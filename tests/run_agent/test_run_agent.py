@@ -1773,12 +1773,11 @@ class TestOmniRouteAdmissionRetry:
         agent._try_recover_primary_transport.assert_not_called()
 
     def test_cumulative_budget_caps_repeated_retry_after_30(self, agent):
-        """Repeated Retry-After: 30 must not exceed the 120s cumulative budget.
+        """Repeated Retry-After: 30 must not exceed the hard 120s budget.
 
-        Pre-fix of the cumulative deadline (#75223 review), eight attempts
-        with a 30s floor could wait ~210s. With a 120s budget the total
-        simulated wait is clamped at 120s and the turn fails cleanly with
-        the structured admission cause.
+        The admission path pins a monotonic deadline and clamps every sleep
+        tick to the remaining duration, so simulated elapsed time is strictly
+        ``<=120s`` (review on #76682: planned-delay budgets overshoot).
         """
         sleeps = []
 
@@ -1798,36 +1797,36 @@ class TestOmniRouteAdmissionRetry:
             side_effect=AssertionError("rebuilt transport")
         )
 
-        # Advance the incremental sleep loop without wall-clock delay.
-        # sleep_end = time.time() + wait_time; each time.sleep(0.2) tick
-        # advances the fake clock so the loop exits after wait_time seconds.
+        # Shared fake clock for time.time / time.monotonic; each sleep advances
+        # it by the clamped duration so the hard deadline is enforceable.
         clock = {"t": 1_000_000.0}
 
-        def _fake_time():
+        def _fake_clock():
             return clock["t"]
 
         def _sleep_and_advance(seconds):
             sleeps.append(float(seconds))
             clock["t"] += float(seconds)
 
-        with patch("agent.conversation_loop.time.time", side_effect=_fake_time):
+        with patch("agent.conversation_loop.time.time", side_effect=_fake_clock):
             with patch(
-                "agent.conversation_loop.time.sleep",
-                side_effect=_sleep_and_advance,
+                "agent.conversation_loop.time.monotonic", side_effect=_fake_clock
             ):
-                result = agent.run_conversation("hello")
+                with patch(
+                    "agent.conversation_loop.time.sleep",
+                    side_effect=_sleep_and_advance,
+                ):
+                    result = agent.run_conversation("hello")
 
         assert result["completed"] is False
         assert result.get("failed") is True
         assert result.get("failure_reason") == "chat_admission_busy"
         assert "chat_admission_busy" in (result.get("error") or "")
-        # Policy spends at most the 120s cumulative budget (logged as
-        # admission_wait_spent). The incremental sleep loop ticks 0.2s so
-        # the sum of sleep() calls can be a single tick over the budget;
-        # that is far below the pre-fix ~210s path under repeated
-        # Retry-After: 30.
-        assert sum(sleeps) <= 121.0
+        # Hard cumulative budget: sum of clamped sleeps must not exceed 120s
+        # (float noise from 0.2s ticks is far below a real overshoot).
+        assert sum(sleeps) <= 120.0 + 1e-6
         assert sum(sleeps) >= 90.0  # at least three full 30s floors
+
         agent._recover_with_credential_pool.assert_not_called()
         agent._try_activate_fallback.assert_not_called()
         agent._try_recover_primary_transport.assert_not_called()

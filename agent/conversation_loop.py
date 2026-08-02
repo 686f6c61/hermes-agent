@@ -5408,10 +5408,17 @@ def run_conversation(
                 # For rate limits, respect the Retry-After header if present
                 _retry_after = None
                 _backoff_policy = None
+                _admission_hard_deadline = None  # monotonic; admission path only
                 if _is_omniroute_admission:
                     _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
                     _admission_budget = omniroute_admission_cumulative_budget()
-                    _remaining_admission = _admission_budget - _retry.admission_wait_spent
+                    # Pin a single monotonic deadline for the whole admission
+                    # wait sequence so fixed-interval sleeps cannot overshoot
+                    # the advertised hard budget (#76682 review).
+                    if _retry.admission_deadline_mono is None:
+                        _retry.admission_deadline_mono = time.monotonic() + _admission_budget
+                    _remaining_admission = _retry.admission_deadline_mono - time.monotonic()
+                    _spent_admission = max(0.0, _admission_budget - max(0.0, _remaining_admission))
                     wait_time = admission_retry_wait(
                         retry_count,
                         _resp_headers,
@@ -5421,16 +5428,15 @@ def run_conversation(
                         # Cumulative admission wait budget exhausted — fail
                         # the turn without credential rotation or fallback.
                         agent._flush_status_buffer()
-                        _spent = _retry.admission_wait_spent
                         _final_summary = (
                             f"Local gateway admission busy (chat_admission_busy) "
-                            f"for {_spent:.0f}s (budget {_admission_budget:.0f}s exhausted)"
+                            f"for {_spent_admission:.0f}s (budget {_admission_budget:.0f}s exhausted)"
                         )
                         agent._emit_status(f"❌ {_final_summary}")
                         logger.error(
                             "%s admission wait budget exhausted after %.1fs (budget=%.1fs) %s error=%s",
                             agent.log_prefix,
-                            _spent,
+                            _spent_admission,
                             _admission_budget,
                             agent._client_log_context(),
                             api_error,
@@ -5447,7 +5453,7 @@ def run_conversation(
                     agent._emit_status(
                         f"⏱️ Local gateway busy; waiting for capacity "
                         f"{wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}, "
-                        f"waited {_retry.admission_wait_spent:.0f}s/"
+                        f"waited {_spent_admission:.0f}s/"
                         f"{_admission_budget:.0f}s)..."
                     )
                     logger.warning(
@@ -5456,13 +5462,13 @@ def run_conversation(
                         wait_time,
                         retry_count,
                         max_retries,
-                        _retry.admission_wait_spent,
+                        _spent_admission,
                         _admission_budget,
                         _remaining_admission,
                         agent._client_log_context(),
                         api_error,
                     )
-                    _retry.admission_wait_spent += wait_time
+                    _admission_hard_deadline = _retry.admission_deadline_mono
                 else:
                     if is_rate_limited:
                         _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
@@ -5514,38 +5520,73 @@ def run_conversation(
                         api_error,
                     )
                 # Sleep in small increments so we can respond to interrupts quickly
-                # instead of blocking the entire wait_time in one sleep() call
-                sleep_end = time.time() + wait_time
-                _backoff_touch_counter = 0
-                while time.time() < sleep_end:
-                    if agent._interrupt_requested:
-                        # Same preserve-redirect rule as the retry-wait above:
-                        # a steering correction must survive backoff, not die
-                        # as "Operation interrupted".
-                        if agent.clear_interrupt(preserve_redirect=True):
-                            _retry.restart_with_redirected_messages = True
+                # instead of blocking the entire wait_time in one sleep() call.
+                # Admission path uses a monotonic hard deadline and clamps each
+                # tick so the final 0.2s sleep cannot cross the 120s budget.
+                if _admission_hard_deadline is not None:
+                    _mono_now = time.monotonic()
+                    sleep_end_mono = min(_mono_now + wait_time, _admission_hard_deadline)
+                    _backoff_touch_counter = 0
+                    while True:
+                        _remaining_sleep = sleep_end_mono - time.monotonic()
+                        _remaining_hard = _admission_hard_deadline - time.monotonic()
+                        if _remaining_sleep <= 0 or _remaining_hard <= 0:
                             break
-                        agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
-                        _interrupt_text = f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries})."
-                        close_interrupted_tool_sequence(messages, _interrupt_text)
-                        agent._persist_session(messages, conversation_history)
-                        agent.clear_interrupt()
-                        return {
-                            "final_response": _interrupt_text,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "interrupted": True,
-                        }
-                    time.sleep(0.2)  # Check interrupt every 200ms
-                    # Touch activity every ~30s so the gateway's inactivity
-                    # monitor knows we're alive during backoff waits.
-                    _backoff_touch_counter += 1
-                    if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
-                        agent._touch_activity(
-                            f"error retry backoff ({retry_count}/{max_retries}), "
-                            f"{int(sleep_end - time.time())}s remaining"
-                        )
+                        if agent._interrupt_requested:
+                            if agent.clear_interrupt(preserve_redirect=True):
+                                _retry.restart_with_redirected_messages = True
+                                break
+                            agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            _interrupt_text = f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries})."
+                            close_interrupted_tool_sequence(messages, _interrupt_text)
+                            agent._persist_session(messages, conversation_history)
+                            agent.clear_interrupt()
+                            return {
+                                "final_response": _interrupt_text,
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "interrupted": True,
+                            }
+                        time.sleep(min(0.2, _remaining_sleep, _remaining_hard))
+                        _backoff_touch_counter += 1
+                        if _backoff_touch_counter % 150 == 0:
+                            agent._touch_activity(
+                                f"error retry backoff ({retry_count}/{max_retries}), "
+                                f"{int(max(0.0, sleep_end_mono - time.monotonic()))}s remaining"
+                            )
+                else:
+                    sleep_end = time.time() + wait_time
+                    _backoff_touch_counter = 0
+                    while time.time() < sleep_end:
+                        if agent._interrupt_requested:
+                            # Same preserve-redirect rule as the retry-wait above:
+                            # a steering correction must survive backoff, not die
+                            # as "Operation interrupted".
+                            if agent.clear_interrupt(preserve_redirect=True):
+                                _retry.restart_with_redirected_messages = True
+                                break
+                            agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            _interrupt_text = f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries})."
+                            close_interrupted_tool_sequence(messages, _interrupt_text)
+                            agent._persist_session(messages, conversation_history)
+                            agent.clear_interrupt()
+                            return {
+                                "final_response": _interrupt_text,
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "interrupted": True,
+                            }
+                        time.sleep(0.2)  # Check interrupt every 200ms
+                        # Touch activity every ~30s so the gateway's inactivity
+                        # monitor knows we're alive during backoff waits.
+                        _backoff_touch_counter += 1
+                        if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
+                            agent._touch_activity(
+                                f"error retry backoff ({retry_count}/{max_retries}), "
+                                f"{int(sleep_end - time.time())}s remaining"
+                            )
                 if _retry.restart_with_redirected_messages:
                     # Leave the retry loop — the check right below rebuilds this
                     # iteration from the correction instead of re-firing the

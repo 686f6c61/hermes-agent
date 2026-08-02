@@ -1100,3 +1100,46 @@ class TestVenvPythonUpdateBoundary:
             "/opt/hermes/venv/bin/python"
         )
 
+
+
+class TestManagedUvSubprocessTimeouts:
+    """#76684: network-bound uv provisioning must not hang forever."""
+
+    def test_timeout_constants_are_positive(self):
+        from hermes_cli import managed_uv as m
+
+        assert m.UV_PYTHON_INSTALL_TIMEOUT_SECONDS > 0
+        assert m.UV_PYTHON_FIND_TIMEOUT_SECONDS > 0
+        assert m.UV_VENV_TIMEOUT_SECONDS > 0
+        assert m.UV_SYNC_TIMEOUT_SECONDS > 0
+        assert m.UV_PYTHON_LIST_TIMEOUT_SECONDS > 0
+
+    def test_attempt_install_generation_treats_timeout_as_failure(self, tmp_path, monkeypatch):
+        from hermes_cli import managed_uv as m
+        import subprocess
+        from types import SimpleNamespace
+
+        python_root = tmp_path / "python"
+        python_root.mkdir()
+        project_root = tmp_path
+        current = SimpleNamespace(
+            python_version=(3, 11, 0),
+            wal_reset_vulnerable=True,
+            sqlite_version_string="3.50.4",
+        )
+
+        def _timeout(*_a, **_k):
+            raise subprocess.TimeoutExpired(cmd="uv", timeout=1)
+
+        monkeypatch.setattr(m.subprocess, "run", _timeout)
+        result = m._attempt_install_generation(
+            "uv",
+            "3.11",
+            project_root=project_root,
+            python_root=python_root,
+            current=current,
+        )
+        assert result is None
+        # generation dir cleaned up on timeout
+        gens = list(python_root.glob("generation-*"))
+        assert gens == []

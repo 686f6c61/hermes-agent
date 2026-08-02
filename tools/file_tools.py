@@ -1926,6 +1926,27 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         return tool_error(str(e))
 
 
+
+def _is_unscoped_search_pattern(pattern: str, target: str) -> bool:
+    """Return True when *pattern* is a pure splat that forces a full-tree walk.
+
+    Models over-issue ``*`` / ``.*`` for inventory listing. That defeats path
+    scoping, walks protected home dirs (macOS TCC popups), and burns seconds
+    walking node_modules before ``limit`` trims the page (#76628).
+    """
+    p = (pattern or "").strip()
+    if not p:
+        return False
+    if target == "files":
+        # Pure globs with no path/name fragment.
+        normalized = p.replace("**", "*")
+        return normalized in {"*", "*.*", "*/*", "*/*/*"} or set(normalized) <= {"*", ".", "/"}
+    if target == "content":
+        # Regex that matches every line / every file contents.
+        return p in {".*", ".+", "^.*$", "^.+$", "(?s).*", "(?s).+"}
+    return False
+
+
 def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
@@ -1933,6 +1954,16 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
+
+        if _is_unscoped_search_pattern(pattern, target):
+            return tool_error(
+                "BLOCKED: pattern is an unscoped wildcard that forces a full-tree walk. "
+                "Narrow the pattern (e.g. a filename fragment or more specific regex) "
+                "or set path= to a smaller directory. Pure globs like '*' / '.*' are "
+                "rejected because they defeat search scope and waste traversal cost.",
+                pattern=pattern,
+                target=target,
+            )
 
         # Track searches to detect *consecutive* repeated search loops.
         # Include pagination args so users can page through truncated

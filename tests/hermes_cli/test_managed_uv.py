@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -17,10 +18,52 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _make_executable(path: Path) -> None:
-    """Create a minimal fake uv binary at *path*."""
+    """Create a minimal fake uv binary at *path*.
+
+    Never plant a POSIX shell script at a Windows ``.exe`` path: CreateProcess
+    raises a blocking "Unsupported 16-Bit Application" dialog and hangs the
+    suite forever (see #76259). Version probing must go through
+    :func:`_stub_uv_version_probe` instead of executing fixture stubs.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == ".exe" or sys.platform == "win32":
+        # Marker only — not a PE binary. Callers must mock subprocess.run so
+        # CreateProcess never loads this as an image (Windows hard-error dialog).
+        path.write_bytes(b"hermes-test-fake-uv\n")
+        # Still set the execute bit so resolve_uv() sees an X_OK file when
+        # tests mock platform.system()=Windows while running on POSIX.
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return
     path.write_text("#!/bin/sh\necho uv 0.1.2\n")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+@contextmanager
+def _stub_uv_version_probe():
+    """Answer ``uv --version`` without executing fixture stubs on disk.
+
+    ``ensure_uv()`` runs ``[path, "--version"]`` after a fresh install to print
+    the version banner. On Windows the fixture is not a real PE image, so the
+    real subprocess would hang on a hard-error dialog (#76259). Mirror the
+    pattern already used by the managed-uv unavailable tests.
+    """
+    real_run = None
+
+    def fake_run(cmd, *args, **kwargs):
+        if (
+            isinstance(cmd, (list, tuple))
+            and len(cmd) >= 2
+            and str(cmd[1]) == "--version"
+        ):
+            return SimpleNamespace(returncode=0, stdout="uv 0.1.2\n", stderr="")
+        # Other probes in this file either mock run themselves or do not
+        # execute fixture stubs; fall through only if a real runner was kept.
+        if real_run is not None:
+            return real_run(cmd, *args, **kwargs)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("hermes_cli.managed_uv.subprocess.run", side_effect=fake_run):
+        yield
 
 
 def _runtime_info(
@@ -113,8 +156,10 @@ class TestEnsureUv:
 
     def test_installs_if_missing(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
              patch("hermes_cli.managed_uv.repair_vulnerable_runtime", return_value=_RRR("not-applicable")), \
-             patch("hermes_cli.managed_uv._install_uv") as mock_install:
+             patch("hermes_cli.managed_uv._install_uv") as mock_install, \
+             _stub_uv_version_probe():
             # Simulate the installer creating the binary
             def fake_install(target):
                 _make_executable(target)
@@ -145,16 +190,36 @@ class TestEnsureUv:
             "hermes_cli.managed_uv.get_hermes_home",
             return_value=tmp_path,
         ), patch(
+            "hermes_cli.managed_uv.platform.system",
+            return_value="Linux",
+        ), patch(
             "hermes_cli.managed_uv._install_uv",
             side_effect=fake_install,
         ), patch(
             "hermes_cli.managed_uv.repair_vulnerable_runtime",
             return_value=repair,
-        ):
+        ), _stub_uv_version_probe():
             path = ensure_uv(repair_observer=observed.append)
 
         assert path == str(tmp_path / "bin" / "uv")
         assert observed == [repair]
+
+    def test_install_on_windows_never_executes_fake_uv_exe(self, tmp_path):
+        """Regression for #76259: fresh install must not CreateProcess the stub."""
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Windows"), \
+             patch("hermes_cli.managed_uv.repair_vulnerable_runtime", return_value=_RRR("not-applicable")), \
+             patch("hermes_cli.managed_uv._install_uv") as mock_install, \
+             _stub_uv_version_probe():
+            def fake_install(target):
+                assert target.name == "uv.exe"
+                _make_executable(target)
+            mock_install.side_effect = fake_install
+
+            from hermes_cli.managed_uv import ensure_uv
+            path = ensure_uv()
+            assert path == str(tmp_path / "bin" / "uv.exe")
+            mock_install.assert_called_once()
 
 
 class TestEnsureUvUpdateBoundary:

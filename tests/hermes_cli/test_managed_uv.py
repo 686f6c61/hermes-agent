@@ -1113,6 +1113,8 @@ class TestManagedUvSubprocessTimeouts:
         assert m.UV_VENV_TIMEOUT_SECONDS > 0
         assert m.UV_SYNC_TIMEOUT_SECONDS > 0
         assert m.UV_PYTHON_LIST_TIMEOUT_SECONDS > 0
+        assert m.UV_VERSION_TIMEOUT_SECONDS > 0
+        assert m.UV_VERSION_TIMEOUT_SECONDS != m.UV_PYTHON_LIST_TIMEOUT_SECONDS
 
     def test_attempt_install_generation_treats_timeout_as_failure(self, tmp_path, monkeypatch):
         from hermes_cli import managed_uv as m
@@ -1143,3 +1145,82 @@ class TestManagedUvSubprocessTimeouts:
         # generation dir cleaned up on timeout
         gens = list(python_root.glob("generation-*"))
         assert gens == []
+
+    def test_ensure_uv_version_probe_timeout_still_returns_path(self, tmp_path, capsys):
+        """Post-install ``uv --version`` timeout must not abort ensure_uv."""
+        import subprocess
+        from hermes_cli.managed_uv import ensure_uv
+
+        def fake_install(target):
+            _make_executable(target)
+
+        def fake_run(cmd, *args, **kwargs):
+            if len(cmd) >= 2 and cmd[1] == "--version":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.repair_vulnerable_runtime", return_value=_RRR("not-applicable")), \
+             patch("hermes_cli.managed_uv._install_uv", side_effect=fake_install), \
+             patch("hermes_cli.managed_uv.subprocess.run", side_effect=fake_run), \
+             patch("hermes_cli.managed_uv.platform.system", return_value="Linux"):
+            path = ensure_uv()
+
+        assert path == str(tmp_path / "bin" / "uv")
+        out = capsys.readouterr().out
+        assert "Managed uv installed" in out
+        assert "version unavailable" in out
+
+    def test_update_managed_uv_version_probe_timeout_is_nonfatal(self, tmp_path, capsys):
+        """Post-self-update ``uv --version`` timeout must not fail update_managed_uv."""
+        import os as _os
+        import subprocess
+        import time as _time
+
+        from hermes_cli.managed_uv import (
+            UV_SELF_UPDATE_INTERVAL_SECONDS,
+            update_managed_uv,
+        )
+
+        uv = tmp_path / "bin" / "uv"
+        _make_executable(uv)
+        import hermes_constants
+        stamp = hermes_constants.get_hermes_home() / "cache" / ".uv_self_update_stamp"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        old = _time.time() - UV_SELF_UPDATE_INTERVAL_SECONDS - 60
+        _os.utime(stamp, (old, old))
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[-2:] == ["self", "update"] or (
+                len(cmd) >= 3 and cmd[1] == "self" and cmd[2] == "update"
+            ):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if len(cmd) >= 2 and cmd[1] == "--version":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.repair_vulnerable_runtime", return_value=_RRR("not-applicable")), \
+             patch("hermes_cli.managed_uv.subprocess.run", side_effect=fake_run):
+            result = update_managed_uv()
+
+        assert result == str(uv)
+        out = capsys.readouterr().out
+        assert "Managed uv updated" in out
+        assert "version unavailable" in out
+
+    def test_uv_version_string_uses_version_timeout_and_swallows_timeout(self, monkeypatch):
+        """_uv_version_string must use UV_VERSION_TIMEOUT_SECONDS and return '' on timeout."""
+        import subprocess
+        from hermes_cli import managed_uv as m
+
+        seen = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        assert m._uv_version_string("/fake/uv") == ""
+        assert seen["timeout"] == m.UV_VERSION_TIMEOUT_SECONDS

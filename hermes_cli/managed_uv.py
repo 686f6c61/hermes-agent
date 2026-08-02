@@ -217,13 +217,22 @@ def _ensure_uv_path(
     # Verify
     result = resolve_uv()
     if result:
-        version = subprocess.run(
-            [result, "--version"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            check=False,
-        timeout=UV_VERSION_TIMEOUT_SECONDS,
-        ).stdout.strip()
+        try:
+            version = subprocess.run(
+                [result, "--version"],
+                capture_output=True,
+                text=True, encoding='utf-8', errors='replace',
+                check=False,
+                timeout=UV_VERSION_TIMEOUT_SECONDS,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            # Non-fatal: the binary is present and usable; only the label probe
+            # hung. Callers (e.g. ``hermes update``) invoke ensure_uv unguarded.
+            logger.debug(
+                "uv --version timed out after %ss after install",
+                UV_VERSION_TIMEOUT_SECONDS,
+            )
+            version = "version unavailable"
         print(f"  ✓ Managed uv installed ({version})")
         # Compatibility boundary: an older, already-imported updater calls the
         # freshly pulled ``ensure_uv()`` after bootstrapping uv.  Repair here so
@@ -360,13 +369,22 @@ def update_managed_uv(
             result = None
         if result is not None and result.returncode == 0:
             _touch_uv_self_update_stamp()
-            version = subprocess.run(
-                [existing, "--version"],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                check=False,
-            timeout=UV_VERSION_TIMEOUT_SECONDS,
-        ).stdout.strip()
+            try:
+                version = subprocess.run(
+                    [existing, "--version"],
+                    capture_output=True,
+                    text=True, encoding='utf-8', errors='replace',
+                    check=False,
+                    timeout=UV_VERSION_TIMEOUT_SECONDS,
+                ).stdout.strip()
+            except subprocess.TimeoutExpired:
+                # Non-fatal: self-update already succeeded; only the label probe
+                # hung. ``hermes update`` calls this unguarded.
+                logger.debug(
+                    "uv --version timed out after %ss after self update",
+                    UV_VERSION_TIMEOUT_SECONDS,
+                )
+                version = "version unavailable"
             print(f"  ✓ Managed uv updated ({version})")
         elif result is not None:
             # Non-fatal — old uv still works fine.
@@ -1019,7 +1037,7 @@ def _uv_version_string(uv_bin: str) -> str:
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=UV_PYTHON_LIST_TIMEOUT_SECONDS,
+            timeout=UV_VERSION_TIMEOUT_SECONDS,
         )
     except Exception:
         return ""

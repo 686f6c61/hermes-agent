@@ -1927,13 +1927,33 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 
 
 
-def _is_unscoped_search_pattern(pattern: str, target: str) -> bool:
-    """Return True when *pattern* is a pure splat that forces a full-tree walk.
+def _is_broad_search_path(path: str | None) -> bool:
+    """True when *path* is the default / broad search root (cwd or empty).
 
-    Models over-issue ``*`` / ``.*`` for inventory listing. That defeats path
-    scoping, walks protected home dirs (macOS TCC popups), and burns seconds
-    walking node_modules before ``limit`` trims the page (#76628).
+    Explicit narrower directories (e.g. ``./src``, ``/tmp/job``) are not broad, so
+    pure wildcards remain allowed there for intentional scoped inventory.
     """
+    raw = (path or "").strip()
+    if not raw:
+        return True
+    # Normalize trivial relative roots that mean "current working directory".
+    cleaned = raw.replace("\\", "/").rstrip("/")
+    return cleaned in {".", "./", ""}
+
+
+def _is_unscoped_search_pattern(
+    pattern: str, target: str, path: str | None = ".",
+) -> bool:
+    """Return True when pure-splat *pattern* is used at a broad search root.
+
+    Models over-issue ``*`` / ``.*`` for inventory listing. At the default
+    cwd that defeats path scoping, walks protected home dirs (macOS TCC
+    popups), and burns seconds walking node_modules before ``limit`` trims
+    the page (#76628). The same pattern under an explicit narrow ``path=``
+    is allowed (scoped inventory).
+    """
+    if not _is_broad_search_path(path):
+        return False
     p = (pattern or "").strip()
     if not p:
         return False
@@ -1955,14 +1975,16 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     try:
         offset, limit = normalize_search_pagination(offset, limit)
 
-        if _is_unscoped_search_pattern(pattern, target):
+        if _is_unscoped_search_pattern(pattern, target, path=path):
             return tool_error(
-                "BLOCKED: pattern is an unscoped wildcard that forces a full-tree walk. "
+                "BLOCKED: pattern is an unscoped wildcard at the broad/default search root. "
                 "Narrow the pattern (e.g. a filename fragment or more specific regex) "
-                "or set path= to a smaller directory. Pure globs like '*' / '.*' are "
-                "rejected because they defeat search scope and waste traversal cost.",
+                "or set path= to a smaller directory (pure '*' / '.*' are allowed only "
+                "when path= is already a bounded directory). Full-tree pure wildcards "
+                "defeat search scope and waste traversal cost.",
                 pattern=pattern,
                 target=target,
+                path=path,
             )
 
         # Track searches to detect *consecutive* repeated search loops.

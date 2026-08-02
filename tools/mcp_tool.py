@@ -2178,32 +2178,53 @@ class MCPServerTask:
         transport connection so a server that gains ping support after a
         reconnect is re-probed with the cheap path.
 
+        When a user RPC owns ``_rpc_lock``, that RPC and its own timeout are the
+        liveness detector; the periodic probe is intentionally skipped so a
+        long-running tool call cannot interleave with ``ping`` / ``list_tools``
+        on the same ClientSession stream (#70218).
+
         Raises on a genuine connection failure so the caller triggers a
         reconnect; returns normally when the session is alive.
         """
-        if not self._ping_unsupported:
-            try:
-                await asyncio.wait_for(self.session.send_ping(), timeout=30.0)
-                return
-            except Exception as exc:
-                # Only a "method not found" means ping is unsupported. Any
-                # other error (timeout, closed transport, session expired) is
-                # a real liveness failure — propagate so we reconnect.
-                if not _is_method_not_found_error(exc):
-                    raise
-                if not self._advertises_tools():
-                    # No ping, no tools → no cheaper probe to fall back to.
-                    raise
-                self._ping_unsupported = True
-                logger.info(
-                    "MCP server '%s': does not implement the optional 'ping' "
-                    "utility (-32601); using 'list_tools' for keepalive on "
-                    "this connection.",
-                    self.name,
-                )
+        session = self.session
+        if session is None:
+            raise RuntimeError("MCP keepalive requested without an active session")
 
-        # Fallback probe for servers without ping support.
-        await asyncio.wait_for(self.session.list_tools(), timeout=30.0)
+        # A ClientSession is one JSON-RPC stream. Sending a keepalive while a
+        # tools/call is in flight can wedge the original request on some
+        # SDK/server combinations even when the ping itself succeeds. An
+        # active RPC already proves liveness, so skip this cycle rather than
+        # queueing a redundant probe behind a potentially long-running call.
+        if self._rpc_lock.locked():
+            return
+
+        # Every other client-initiated RPC uses this lock, so keepalive must
+        # too. The lock also closes the race with a call that starts after the
+        # locked() check above.
+        async with self._rpc_lock:
+            if not self._ping_unsupported:
+                try:
+                    await asyncio.wait_for(session.send_ping(), timeout=30.0)
+                    return
+                except Exception as exc:
+                    # Only a "method not found" means ping is unsupported. Any
+                    # other error (timeout, closed transport, session expired) is
+                    # a real liveness failure — propagate so we reconnect.
+                    if not _is_method_not_found_error(exc):
+                        raise
+                    if not self._advertises_tools():
+                        # No ping, no tools → no cheaper probe to fall back to.
+                        raise
+                    self._ping_unsupported = True
+                    logger.info(
+                        "MCP server '%s': does not implement the optional 'ping' "
+                        "utility (-32601); using 'list_tools' for keepalive on "
+                        "this connection.",
+                        self.name,
+                    )
+
+            # Fallback probe for servers without ping support.
+            await asyncio.wait_for(session.list_tools(), timeout=30.0)
 
     def _mark_session_proven(self) -> None:
         """Record that the current session demonstrated real health.

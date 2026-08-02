@@ -66,6 +66,11 @@ class TurnRetryState:
     # ── Transport / rate-limit recovery ──────────────────────────────────
     primary_recovery_attempted: bool = False
     has_retried_429: bool = False
+    # Cumulative seconds already spent waiting on OmniRoute
+    # ``chat_admission_busy`` 503s within this API-call block. Bound by
+    # ``omniroute_admission_cumulative_budget()`` so repeated Retry-After
+    # floors cannot exceed the advertised wait window.
+    admission_wait_spent: float = 0.0
 
     # ── Auth-failure provider failover ───────────────────────────────────
     # Set once we've escalated a persistent 401/403 (after the per-provider

@@ -1927,22 +1927,53 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 
 
 
-def _is_broad_search_path(path: str | None) -> bool:
+def _is_broad_search_path(path: str | None, task_id: str = "default") -> bool:
     """True when *path* is the default / broad search root (cwd or empty).
 
     Explicit narrower directories (e.g. ``./src``, ``/tmp/job``) are not broad, so
     pure wildcards remain allowed there for intentional scoped inventory.
+
+    Classification uses the task-aware resolver so spellings that normalize to
+    the workspace root (``./child/..``) or expand it (``..``) count as broad,
+    matching what the backend actually walks (#76628 review).
     """
     raw = (path or "").strip()
     if not raw:
         return True
-    # Normalize trivial relative roots that mean "current working directory".
+    # Fast path for the common default spellings without filesystem work.
     cleaned = raw.replace("\\", "/").rstrip("/")
-    return cleaned in {".", "./", ""}
+    if cleaned in {".", "./", ""}:
+        return True
+
+    try:
+        base = _resolve_base_dir(task_id)
+        resolved = _resolve_path_for_task(raw, task_id)
+        base_key = os.path.normpath(str(base))
+        resolved_key = os.path.normpath(str(resolved))
+        if sys.platform == "win32":
+            base_key = os.path.normcase(base_key)
+            resolved_key = os.path.normcase(resolved_key)
+        if base_key == resolved_key:
+            return True
+        # Resolved is an ancestor of the workspace root → expands search root.
+        try:
+            common = os.path.commonpath([base_key, resolved_key])
+        except ValueError:
+            # Different drives (Windows) — treat as an explicit elsewhere scope.
+            return False
+        if sys.platform == "win32":
+            common = os.path.normcase(common)
+        return common == resolved_key
+    except Exception:
+        # Fail closed: if we cannot classify, treat as broad.
+        return True
 
 
 def _is_unscoped_search_pattern(
-    pattern: str, target: str, path: str | None = ".",
+    pattern: str,
+    target: str,
+    path: str | None = ".",
+    task_id: str = "default",
 ) -> bool:
     """Return True when pure-splat *pattern* is used at a broad search root.
 
@@ -1952,7 +1983,7 @@ def _is_unscoped_search_pattern(
     the page (#76628). The same pattern under an explicit narrow ``path=``
     is allowed (scoped inventory).
     """
-    if not _is_broad_search_path(path):
+    if not _is_broad_search_path(path, task_id=task_id):
         return False
     p = (pattern or "").strip()
     if not p:
@@ -1975,7 +2006,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     try:
         offset, limit = normalize_search_pagination(offset, limit)
 
-        if _is_unscoped_search_pattern(pattern, target, path=path):
+        if _is_unscoped_search_pattern(pattern, target, path=path, task_id=task_id):
             return tool_error(
                 "BLOCKED: pattern is an unscoped wildcard at the broad/default search root. "
                 "Narrow the pattern (e.g. a filename fragment or more specific regex) "

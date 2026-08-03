@@ -584,6 +584,12 @@ def _attempt_install_generation(
             request,
             UV_PYTHON_INSTALL_TIMEOUT_SECONDS,
         )
+        # Immediate operator feedback (stdout may be quiet under logging-only).
+        print(
+            f"  ✗ uv python install timed out after {UV_PYTHON_INSTALL_TIMEOUT_SECONDS}s"
+            " — check your network connection.",
+            file=sys.stderr,
+        )
         _remove_tree(generation, boundary=python_root)
         return None
     if install.returncode != 0:
@@ -618,6 +624,11 @@ def _attempt_install_generation(
             "private Python lookup timed out for %s after %ss",
             request,
             UV_PYTHON_FIND_TIMEOUT_SECONDS,
+        )
+        print(
+            f"  ✗ uv python find timed out after {UV_PYTHON_FIND_TIMEOUT_SECONDS}s"
+            " — check your network connection.",
+            file=sys.stderr,
         )
         _remove_tree(generation, boundary=python_root)
         return None
@@ -821,6 +832,11 @@ def _stage_candidate_venv(
             "candidate venv creation timed out after %ss",
             UV_VENV_TIMEOUT_SECONDS,
         )
+        print(
+            f"  ✗ uv venv timed out after {UV_VENV_TIMEOUT_SECONDS}s"
+            " — check your network connection.",
+            file=sys.stderr,
+        )
         _remove_tree(candidate, boundary=runtime_root)
         return None
     if created.returncode != 0:
@@ -860,6 +876,11 @@ def _stage_candidate_venv(
         logger.warning(
             "candidate dependency sync timed out after %ss",
             UV_SYNC_TIMEOUT_SECONDS,
+        )
+        print(
+            f"  ✗ uv sync timed out after {UV_SYNC_TIMEOUT_SECONDS}s"
+            " — check your network connection.",
+            file=sys.stderr,
         )
         _remove_tree(candidate, boundary=runtime_root)
         return None

@@ -1116,7 +1116,7 @@ class TestManagedUvSubprocessTimeouts:
         assert m.UV_VERSION_TIMEOUT_SECONDS > 0
         assert m.UV_VERSION_TIMEOUT_SECONDS != m.UV_PYTHON_LIST_TIMEOUT_SECONDS
 
-    def test_attempt_install_generation_treats_timeout_as_failure(self, tmp_path, monkeypatch):
+    def test_attempt_install_generation_treats_timeout_as_failure(self, tmp_path, monkeypatch, capsys):
         from hermes_cli import managed_uv as m
         import subprocess
         from types import SimpleNamespace
@@ -1130,7 +1130,10 @@ class TestManagedUvSubprocessTimeouts:
             sqlite_version_string="3.50.4",
         )
 
-        def _timeout(*_a, **_k):
+        seen = {}
+
+        def _timeout(*_a, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
             raise subprocess.TimeoutExpired(cmd="uv", timeout=1)
 
         monkeypatch.setattr(m.subprocess, "run", _timeout)
@@ -1145,6 +1148,43 @@ class TestManagedUvSubprocessTimeouts:
         # generation dir cleaned up on timeout
         gens = list(python_root.glob("generation-*"))
         assert gens == []
+        assert seen["timeout"] == m.UV_PYTHON_INSTALL_TIMEOUT_SECONDS
+        err = capsys.readouterr().err
+        assert "uv python install timed out" in err
+        assert str(m.UV_PYTHON_INSTALL_TIMEOUT_SECONDS) in err
+
+    def test_stage_candidate_venv_timeout_prints_stderr_and_uses_timeout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from hermes_cli import managed_uv as m
+        import subprocess
+
+        project_root = tmp_path
+        generation = tmp_path / "python" / "generation-x"
+        generation.mkdir(parents=True)
+        python = generation / "bin" / "python"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("#!/bin/sh\n")
+        python.chmod(0o755)
+
+        seen = {}
+
+        def _timeout(*_a, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired(cmd="uv", timeout=1)
+
+        monkeypatch.setattr(m.subprocess, "run", _timeout)
+        result = m._stage_candidate_venv(
+            "uv",
+            project_root=project_root,
+            generation=generation,
+            python=python,
+        )
+        assert result is None
+        assert seen["timeout"] == m.UV_VENV_TIMEOUT_SECONDS
+        err = capsys.readouterr().err
+        assert "uv venv timed out" in err
+        assert str(m.UV_VENV_TIMEOUT_SECONDS) in err
 
     def test_ensure_uv_version_probe_timeout_still_returns_path(self, tmp_path, capsys):
         """Post-install ``uv --version`` timeout must not abort ensure_uv."""

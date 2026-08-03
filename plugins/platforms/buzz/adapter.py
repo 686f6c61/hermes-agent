@@ -702,6 +702,29 @@ class BuzzAdapter(BasePlatformAdapter):
         text = f"{caption}\n{image_url}" if caption else image_url
         return await self.send(chat_id, text, reply_to=reply_to, metadata=metadata)
 
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Local-file image send — ``send_images`` dispatches ``file://`` here.
+
+        Without this override, base ``PlatformAdapter.send_image_file`` posts
+        the generic "Couldn't deliver the image attachment" stub even though
+        ``send_image`` already uploads local paths via the Buzz CLI (#77392).
+        """
+        return await self.send_image(
+            chat_id=chat_id,
+            image_url=str(image_path),
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         chat_id = str(chat_id)
         state = self._channel_state.get(chat_id)

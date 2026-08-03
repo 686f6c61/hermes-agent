@@ -421,6 +421,22 @@ class TestBuzzAdapterSend:
         args, _stdin = cli.calls[0]
         assert args[args.index("--file") + 1] == str(img)
 
+    @pytest.mark.asyncio
+    async def test_send_image_file_delegates_to_local_upload(self, tmp_path):
+        """file:// dispatch hits send_image_file — must not use base stub (#77392)."""
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG fake")
+        adapter = _make_adapter()
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt127", "message": ""})
+        adapter._run_cli = cli
+        result = await adapter.send_image_file(CHANNEL, str(img), caption="via file path")
+        assert result.success is True
+        assert result.message_id == "evt127"
+        args, stdin = cli.calls[0]
+        assert args[args.index("--file") + 1] == str(img)
+        assert stdin == "via file path"
+
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────
 

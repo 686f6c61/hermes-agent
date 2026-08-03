@@ -490,6 +490,41 @@ class TestRunJobSessionPersistence:
         fake_db.close.assert_called_once()
         mock_agent.close.assert_called_once()
 
+    def test_run_job_all_skills_failed_skips_agent_and_surfaces_skill_name(self, tmp_path):
+        """#77362: all skills missing → fail closed, no AIAgent, not [SILENT]."""
+        from cron.scheduler import SILENT_MARKER, _summarize_cron_failure_for_delivery
+
+        job = {
+            "id": "skill-fail-job",
+            "name": "weekly-monitor",
+            "prompt": "do the weekly report",
+            "skills": ["weekly-market-risk-monitor"],
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=MagicMock()), \
+             patch(
+                 "tools.skills_tool.skill_view",
+                 return_value='{"success": false, "error": "Skill not found."}',
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert mock_agent_cls.call_count == 0
+        assert error is not None
+        assert "weekly-market-risk-monitor" in error
+        assert "aborted" in error.lower() or "failed to load" in error.lower()
+        # Failed jobs always deliver a failure summary — never silence.
+        assert not (final_response or "").strip().upper().startswith(SILENT_MARKER)
+        deliver_content = _summarize_cron_failure_for_delivery(job, error)
+        assert deliver_content.strip()
+        assert "weekly-monitor" in deliver_content or "weekly-market-risk-monitor" in deliver_content
+        assert SILENT_MARKER not in deliver_content
+
 
     @contextlib.contextmanager
     def _run_job_patches(self, tmp_path, extra=()):

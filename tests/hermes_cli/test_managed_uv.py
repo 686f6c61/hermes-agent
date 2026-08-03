@@ -17,6 +17,24 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _host_managed_uv_name() -> str:
+    """Binary name ``managed_uv_path()`` uses when ``platform.system`` is not mocked.
+
+    Native Windows hosts resolve ``uv.exe``; POSIX hosts resolve ``uv``.
+    Fixtures that plant under a patched HERMES_HOME without pinning
+    ``platform.system`` must use this name or ``resolve_uv()`` returns None
+    (hyqqx review on #76741).
+    """
+    return "uv.exe" if sys.platform == "win32" else "uv"
+
+
+def _plant_managed_uv(home: Path, name: str | None = None) -> Path:
+    """Create a fake managed uv under *home*/bin with the product's basename."""
+    path = home / "bin" / (name or _host_managed_uv_name())
+    _make_executable(path)
+    return path
+
+
 def _make_executable(path: Path) -> None:
     """Create a minimal fake uv binary at *path*.
 
@@ -131,14 +149,16 @@ class TestManagedUvPath:
 class TestResolveUv:
 
     def test_existing_executable(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        # Plant at the host-native basename so resolve_uv finds it without a
+        # platform.system pin (Windows → uv.exe, POSIX → uv).
+        uv = _plant_managed_uv(tmp_path)
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
             from hermes_cli.managed_uv import resolve_uv
             result = resolve_uv()
-            assert result == str(tmp_path / "bin" / "uv")
+            assert result == str(uv)
 
     def test_non_executable_file_returns_none(self, tmp_path):
-        uv = tmp_path / "bin" / "uv"
+        uv = tmp_path / "bin" / _host_managed_uv_name()
         uv.parent.mkdir(parents=True)
         uv.write_text("not a binary")
         # Ensure no execute bit
@@ -325,8 +345,7 @@ class TestUpdateManagedUv:
         vulnerable-runtime repair probe still runs (CVE repair is never gated)."""
         from hermes_cli.managed_uv import RuntimeRepairResult, update_managed_uv
 
-        uv = tmp_path / "bin" / "uv"
-        _make_executable(uv)
+        uv = _plant_managed_uv(tmp_path)
         # Fresh stamp under the isolated HERMES_HOME.
         import hermes_constants
         stamp = hermes_constants.get_hermes_home() / "cache" / ".uv_self_update_stamp"
@@ -352,8 +371,7 @@ class TestUpdateManagedUv:
 
         from hermes_cli.managed_uv import UV_SELF_UPDATE_INTERVAL_SECONDS, update_managed_uv
 
-        uv = tmp_path / "bin" / "uv"
-        _make_executable(uv)
+        uv = _plant_managed_uv(tmp_path)
         import hermes_constants
         stamp = hermes_constants.get_hermes_home() / "cache" / ".uv_self_update_stamp"
         stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -670,7 +688,10 @@ class TestRuntimeCutover:
 class TestInstallUvInternals:
     def test_posix_sets_uv_unmanaged_install(self, tmp_path):
         target = tmp_path / "bin" / "uv"
-        with patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
+        # Pin Linux: without it, native Windows takes the PowerShell branch and
+        # never calls _install_uv_posix (hyqqx review on #76741).
+        with patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv._install_uv_posix") as mock_posix:
             from hermes_cli.managed_uv import _install_uv
             _install_uv(target)
             mock_posix.assert_called_once()
@@ -1058,13 +1079,18 @@ class TestDefaultLiveVenv:
     """
 
     def _checkout(self, tmp_path, *dirs):
+        # Build interpreters via the product helper so Windows gets
+        # Scripts/python.exe and POSIX gets bin/python (hyqqx #76741).
+        from hermes_cli.managed_uv import _venv_python
+
         root = tmp_path / "checkout"
         root.mkdir()
         (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         for d in dirs:
-            bin_dir = root / d / "bin"
-            bin_dir.mkdir(parents=True)
-            (bin_dir / "python").write_text("py", encoding="utf-8")
+            venv_dir = root / d
+            python = _venv_python(venv_dir)
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("py", encoding="utf-8")
         return root
 
     def test_dot_venv_only_is_targeted(self, tmp_path):

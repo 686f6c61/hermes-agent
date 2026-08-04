@@ -24825,12 +24825,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # A successful finalize call is not proof the *content* was
                 # final: the edit may have carried only the last preview
                 # snapshot while the tail generated between that snapshot and
-                # stream completion never reached any API call (#71643).
-                # Reconcile the recorded turn-final payload against the
-                # completed response; only a demonstrable mismatch (False)
-                # overrides the flag — None (no record / multi-message split
-                # delivery) keeps the legacy trust so overflow splits are not
-                # re-sent.
+                # stream completion never reached any API call (#71643), or a
+                # multi-message split may have claimed delivery without a
+                # matching payload (#78541). Reconcile the recorded
+                # turn-final payload against the completed response; only a
+                # demonstrable mismatch (False) overrides the flag — None
+                # (no record at all) keeps legacy trust so ambiguous-timeout
+                # dedup is not re-sent.
                 matcher = getattr(consumer, "delivered_final_matches", None)
                 if callable(matcher):
                     try:
@@ -25614,17 +25615,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _content_delivered = bool(
                 _sc and getattr(_sc, "final_content_delivered", False)
             )
-            # #71643: a *successful* finalize edit can still carry only the
-            # last preview snapshot — deltas generated between that edit and
-            # stream completion never reach any API call, and both suppression
-            # flags are set from the call's success rather than its content.
-            # Reconcile the consumer's recorded turn-final payload against the
-            # completed response: on a demonstrable mismatch (False) neither
-            # final_response_sent nor final_content_delivered may suppress the
-            # normal final send. None (no record / multi-message split
-            # delivery) keeps legacy trust; the failed-finalize family
-            # (#51828 / #33793) is unaffected because those paths leave the
-            # flags False or record the complete fallback payload.
+            # #71643 / #78541: a *successful* finalize edit can still carry
+            # only the last preview snapshot — deltas generated between that
+            # edit and stream completion never reach any API call, and both
+            # suppression flags are set from the call's success rather than
+            # its content. Reconcile the consumer's recorded turn-final
+            # payload against the completed response: on a demonstrable
+            # mismatch (False) neither final_response_sent nor
+            # final_content_delivered may suppress the normal final send.
+            # That includes payload-less multi-message split delivery, which
+            # previously returned None and kept legacy trust (#78541). None
+            # (no record at all) still keeps legacy trust; the
+            # failed-finalize family (#51828 / #33793) is unaffected because
+            # those paths leave the flags False or record the complete
+            # fallback payload.
             _stale_finalized = False
             if _content_delivered and not _is_empty_sentinel:
                 _matcher = getattr(_sc, "delivered_final_matches", None)

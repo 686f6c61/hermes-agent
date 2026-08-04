@@ -270,9 +270,9 @@ class GatewayStreamConsumer:
         self._delivered_final_text: Optional[str] = None
         # True when the current turn's answer was delivered across multiple
         # sealed messages (overflow split / adapter continuation adoption).
-        # Payload-equality against a single recorded string is meaningless in
-        # that shape, so delivered_final_matches() falls back to legacy trust
-        # rather than risking a duplicate re-send of a multi-message reply.
+        # The joined delivered payload is still recorded when known so
+        # delivered_final_matches() can detect a stale short flush that
+        # claimed final delivery without the complete answer (#78541).
         self._turn_split_delivery = False
         self._delivered_commentary_texts: list[str] = []
         # Retains the finalized visible text of each streaming segment so
@@ -410,16 +410,17 @@ class GatewayStreamConsumer:
 
         Normalized the same way ``_send_or_edit`` normalizes outgoing text
         (media-directive strip + fence closing) so the gateway can compare it
-        against the completed ``final_response`` (#71643). No-op when the turn
-        was delivered across multiple sealed messages — payload equality is
-        undefined there and ``delivered_final_matches`` returns ``None``.
+        against the completed ``final_response`` (#71643).
+
+        Multi-message split deliveries still record the joined payload when
+        the caller provides it (sealed heads + tail). A payload-less split
+        must not leave a stale flag that suppresses a later complete final
+        (#78541).
         """
-        if self._turn_split_delivery:
-            self._delivered_final_text = None
-            return
-        self._delivered_final_text = ensure_closed_code_fences(
+        cleaned = ensure_closed_code_fences(
             self._clean_for_display(text or "")
         ).strip()
+        self._delivered_final_text = cleaned or None
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
         """Reconcile the recorded turn-final payload against ``final_text``.
@@ -432,29 +433,40 @@ class GatewayStreamConsumer:
           delivered segment/commentary) matches ``final_text``; suppressing
           the normal final send is safe.
         - ``False`` — a turn-final delivery was recorded but its payload
-          demonstrably differs from ``final_text``; the user has NOT seen the
-          complete response and the normal final send must run.
-        - ``None``  — no payload comparison is possible (multi-message split
-          delivery, or a legacy/uncertain path that recorded nothing). The
-          caller keeps the pre-existing flag-trusting behavior so overflow
-          splits and ambiguous-timeout dedup are not regressed.
+          demonstrably differs from ``final_text``, **or** a multi-message
+          split claimed delivery without a matching payload (#78541); the
+          user has NOT seen the complete response and the normal final send
+          must run.
+        - ``None``  — no delivery record exists at all (legacy / uncertain
+          path). The caller keeps pre-existing flag-trusting behavior so
+          ambiguous-timeout dedup is not regressed.
         """
-        if self._turn_split_delivery:
-            return None
-        if self._delivered_final_text is None:
-            return None
         target = ensure_closed_code_fences(
             self._clean_for_display(final_text or "")
         ).strip()
         if not target:
             return None
-        if self._delivered_final_text.strip() == target:
-            return True
-        # A segment break / commentary may have delivered the final text
-        # earlier in the turn under a different record.
+
+        # Segment / commentary ledger can prove full delivery regardless of
+        # split vs single-message shape.
         if self.has_delivered_text(final_text):
             return True
-        return False
+
+        if self._delivered_final_text is not None:
+            if self._delivered_final_text.strip() == target:
+                return True
+            # Recorded payload differs from the complete final — stale
+            # preview or incomplete multi-message delivery.
+            return False
+
+        if self._turn_split_delivery:
+            # Split path claimed final delivery but left no payload and no
+            # segment ledger match.  Trusting the flag here is what swallows
+            # complete group replies after an early short flush (#78541).
+            return False
+
+        # No record at all — legacy trust for pre-record paths.
+        return None
 
     def has_delivered_text(self, text: str) -> bool:
         """Return True if *text* was already delivered as visible chat content."""
@@ -939,11 +951,16 @@ class GatewayStreamConsumer:
                             self._final_response_sent = chunks_delivered and tail_delivered
                             if self._final_response_sent:
                                 self._final_content_delivered = True
-                                # Multi-message split delivery — payload
-                                # equality against a single record is
-                                # undefined (#71643).
+                                # Multi-message split delivery. Record the
+                                # joined sealed heads + tail so the gateway
+                                # can reconcile against final_response and
+                                # refuse to suppress a longer complete
+                                # answer after a short early flush (#78541).
                                 self._turn_split_delivery = True
-                                self._delivered_final_text = None
+                                joined = "".join(chunks[:-1]) + (
+                                    self._accumulated or ""
+                                )
+                                self._record_turn_final_payload(joined)
                             return
                         if got_segment_break:
                             self._message_id = None

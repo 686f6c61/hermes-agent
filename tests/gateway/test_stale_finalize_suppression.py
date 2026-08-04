@@ -257,6 +257,68 @@ async def test_equal_text_control_still_suppresses_duplicate_send(
     assert len(full_sends) <= 1, f"duplicate final delivery: {full_sends!r}"
 
 
+@pytest.mark.asyncio
+async def test_payloadless_split_does_not_suppress_complete_response(
+    monkeypatch, tmp_path
+):
+    """#78541: payload-less multi-message split must not suppress a longer final.
+
+    Simulates the group/forum failure mode: an early short flush sets
+    final_content_delivered + turn_split_delivery with no recorded payload,
+    then the completed response is much longer. The complete text must still
+    reach the platform.
+    """
+    stream_consumer_mod = importlib.import_module("gateway.stream_consumer")
+
+    class PayloadlessSplitAgent:
+        def __init__(self, **kwargs):
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.tools = []
+
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            if self.stream_delta_callback:
+                self.stream_delta_callback(STREAMED_PREFIX)
+            return {
+                "final_response": FULL_RESPONSE,
+                "response_previewed": False,
+                "messages": [],
+                "api_calls": 2,
+            }
+
+    # Patch the consumer class used by the local import inside _run_agent so
+    # finalize claims multi-message delivery without a payload — the #78541
+    # log signature (streamed=True, content_delivered=True, no record).
+    real_consumer_cls = stream_consumer_mod.GatewayStreamConsumer
+
+    class PayloadlessSplitConsumer(real_consumer_cls):
+        async def run(self):  # type: ignore[override]
+            await super().run()
+            self._final_response_sent = True
+            self._final_content_delivered = True
+            self._turn_split_delivery = True
+            self._delivered_final_text = None
+
+    monkeypatch.setattr(
+        stream_consumer_mod, "GatewayStreamConsumer", PayloadlessSplitConsumer
+    )
+
+    adapter, result = await _run_streaming_turn(
+        monkeypatch,
+        tmp_path,
+        PayloadlessSplitAgent,
+        "sess-78541-payloadless-split",
+    )
+
+    assert result["final_response"] == FULL_RESPONSE
+    all_payloads = [c["content"] for c in adapter.sent] + [
+        e["content"] for e in adapter.edits
+    ]
+    assert any(FULL_RESPONSE in payload for payload in all_payloads), (
+        f"complete response never reached the platform after payload-less "
+        f"split; payloads: {all_payloads!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Consumer unit coverage: delivered_final_matches tri-state
 # ---------------------------------------------------------------------------
@@ -284,11 +346,29 @@ class TestDeliveredFinalMatches:
         consumer._record_turn_final_payload(STREAMED_PREFIX)
         assert consumer.delivered_final_matches(FULL_RESPONSE) is False
 
-    def test_split_delivery_returns_none(self):
+    def test_split_delivery_with_stale_payload_returns_false(self):
+        """#78541: multi-message split that only recorded a short prefix must
+        not trust the flag against a longer complete final_response."""
         consumer = _consumer()
         consumer._turn_split_delivery = True
+        consumer._final_content_delivered = True
         consumer._record_turn_final_payload(STREAMED_PREFIX)
-        assert consumer.delivered_final_matches(FULL_RESPONSE) is None
+        assert consumer.delivered_final_matches(FULL_RESPONSE) is False
+
+    def test_payloadless_split_delivery_returns_false(self):
+        """#78541: split flag with no payload must not legacy-trust."""
+        consumer = _consumer()
+        consumer._turn_split_delivery = True
+        consumer._final_content_delivered = True
+        consumer._delivered_final_text = None
+        assert consumer.delivered_final_matches(FULL_RESPONSE) is False
+
+    def test_split_delivery_with_matching_joined_payload_returns_true(self):
+        """Joined multi-message payload equal to final_response still suppresses."""
+        consumer = _consumer()
+        consumer._turn_split_delivery = True
+        consumer._record_turn_final_payload(FULL_RESPONSE)
+        assert consumer.delivered_final_matches(FULL_RESPONSE) is True
 
     def test_empty_final_text_returns_none(self):
         consumer = _consumer()

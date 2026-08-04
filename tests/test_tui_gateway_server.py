@@ -4737,7 +4737,7 @@ def _configure_immediate_prompt_run(
         server, "_sync_session_key_after_compress", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(server, "_drain_queued_prompt", lambda *_args: False)
-    monkeypatch.setattr(server, "_voice_tts_enabled", lambda: False)
+    monkeypatch.setattr(server, "_voice_tts_enabled", lambda *a, **k: False)
     monkeypatch.setattr(server, "_get_db", lambda: None)
 
 

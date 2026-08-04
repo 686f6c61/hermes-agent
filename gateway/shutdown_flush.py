@@ -166,6 +166,68 @@ def _serialise_value(value: Any) -> Optional[dict]:
     return {"text": str(value)}
 
 
+def spool_transcript_messages(
+    session_id: str,
+    messages: list,
+    *,
+    reason: str = "pending_cap_overflow",
+) -> bool:
+    """Persist dropped/pending transcript rows for later recovery (#78182).
+
+    Uses the same ``pending_messages/`` directory as
+    :func:`flush_pending_to_file`. Each message is written as its own payload
+    so :func:`recover_pending_to_db` can re-insert after the DB is repaired.
+
+    Returns True when at least one message was spooled.
+    """
+    if not session_id or not messages:
+        return False
+
+    flush_dir = _get_flush_dir()
+    ts = int(time.time())
+    spooled = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            message = {"role": "user", "content": str(message)}
+        content = message.get("content")
+        if content is None:
+            content = message.get("text", "")
+        if not content and not message:
+            continue
+        try:
+            _write_payload(
+                flush_dir,
+                {
+                    "session_key": session_id,
+                    "reason": reason,
+                    "ts": ts,
+                    "data": {
+                        "session_id": session_id,
+                        "text": content if isinstance(content, str) else str(content),
+                        "role": message.get("role", "user"),
+                        "message": message,
+                    },
+                },
+            )
+            spooled += 1
+        except Exception as exc:
+            logger.error(
+                "Failed to spool overflow transcript for session %s: %s",
+                session_id,
+                exc,
+            )
+    if spooled:
+        logger.error(
+            "Spooled %d overflow transcript message(s) for session %s to %s "
+            "(reason=%s) — pending queue cap would have discarded them (#78182)",
+            spooled,
+            session_id,
+            flush_dir,
+            reason,
+        )
+    return spooled > 0
+
+
 def recover_pending_to_db(
     session_db=None,
 ) -> int:
@@ -243,7 +305,7 @@ def recover_pending_to_db(
 
             session_db.append_message(
                 session_id=session_id,
-                role="user",
+                role=data.get("role") or "user",
                 content=text,
                 timestamp=payload.get("ts", int(time.time())),
             )

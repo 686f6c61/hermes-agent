@@ -166,5 +166,50 @@ class TestRuntimeFtsRebuild:
         _corrupt_fts(tmp_path / "state.db")
         with pytest.raises(sqlite3.DatabaseError):
             db.append_message("s1", "user", "second corruption")
+        # #78182: a rebuild that already ran, then a still-broken write path,
+        # must mark recovery failure (not claim silent success).
+        assert db._fts_write_path_broken is True
+
+
+class TestPendingCapSpoolsOverflow:
+    """Gateway pending-cap must not discard transcripts (#78182)."""
+
+    def test_overflow_message_is_spooled_not_only_dropped(self, tmp_path, monkeypatch):
+        import threading
+
+        from gateway.session import SessionStore
+        from gateway import shutdown_flush
+
+        monkeypatch.setattr(shutdown_flush, "_get_flush_dir", lambda: tmp_path / "pending")
+        (tmp_path / "pending").mkdir()
+
+        class FakeDb:
+            def rebuild_fts(self):
+                return 0
+
+            def append_message(self, **kwargs):
+                raise RuntimeError("database disk image is malformed")
+
+        store = object.__new__(SessionStore)
+        store._db = FakeDb()
+        store._transcript_retry_lock = threading.Lock()
+        store._dirty_transcripts = {}
+        store._transcript_append_failures = {}
+        store._fts_rebuild_attempted = True
+
+        for i in range(store._MAX_PENDING_PER_SESSION + 3):
+            store.append_to_transcript("s1", {"role": "user", "content": f"msg{i}"})
+
+        pending = store._dirty_transcripts.get("s1", [])
+        assert len(pending) <= store._MAX_PENDING_PER_SESSION
+        # Overflow was written under pending_messages/
+        spools = list((tmp_path / "pending").glob("*.json"))
+        assert len(spools) >= 3
+        # Oldest messages should be among the spools
+        texts = []
+        for path in spools:
+            payload = __import__("json").loads(path.read_text(encoding="utf-8"))
+            texts.append(payload["data"]["text"])
+        assert "msg0" in texts
 
 

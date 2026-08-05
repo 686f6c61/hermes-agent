@@ -8,8 +8,8 @@ import { $currentCwd, $selectedStoredSessionId, $sessions, applyConfiguredDefaul
 
 import {
   $activeProjectId,
-  $projectScope,
   $projects,
+  $projectScope,
   $projectsRpcAvailable,
   $projectTree,
   $removedSessionIds,

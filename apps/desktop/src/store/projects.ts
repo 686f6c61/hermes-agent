@@ -15,12 +15,12 @@ import { persistentAtom } from '@/lib/persisted'
 import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import { setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
+import { requestFreshSession } from '@/store/profile'
 import {
   $activeGatewayProfile,
   $newChatProfile,
   normalizeProfileKey
 } from '@/store/profile-identity'
-import { requestFreshSession } from '@/store/profile'
 import {
   $currentCwd,
   $selectedStoredSessionId,

@@ -11,7 +11,6 @@ import { translateNow } from '@/i18n'
 import { desktopDefaultCwd, isDesktopFsRemoteMode, selectDesktopPaths, writeDesktopFileText } from '@/lib/desktop-fs'
 import { desktopGit } from '@/lib/desktop-git'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
-import { persistentAtom } from '@/lib/persisted'
 import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import { setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
@@ -21,6 +20,15 @@ import {
   $newChatProfile,
   normalizeProfileKey
 } from '@/store/profile-identity'
+import {
+  $activeProjectId,
+  $projects,
+  $projectScope,
+  $projectTree,
+  $projectTreeLoading,
+  ALL_PROJECTS,
+  exitProjectScope
+} from '@/store/projects-cache-state'
 import {
   $currentCwd,
   $selectedStoredSessionId,
@@ -33,20 +41,21 @@ import {
 import { $focusedSessionState, $focusedStoredSessionId } from '@/store/session-states'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
 
+// Re-export cache atoms so existing `@/store/projects` imports keep working.
+export {
+  $activeProjectId,
+  $projects,
+  $projectScope,
+  $projectTree,
+  $projectTreeLoading,
+  ALL_PROJECTS,
+  exitProjectScope
+}
+
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
 // per-profile projects.db store. The sidebar groups sessions by project folder
 // membership; these atoms are the renderer's cached view.
-
-export const $projects = atom<ProjectInfo[]>([])
-export const $activeProjectId = atom<null | string>(null)
-
-// The authoritative project -> repo -> lane tree (overview), served by
-// `projects.tree`. Lanes carry counts + structure; per-project session rows are
-// fetched lazily on drill-in via `fetchProjectSessions`. This is the single
-// source of project membership — the desktop no longer derives it.
-export const $projectTree = atom<SidebarProjectTree[]>([])
-export const $projectTreeLoading = atom(false)
 
 // False when the connected backend predates the projects.* JSON-RPC surface
 // (same semver label, older install). Null until the first probe.
@@ -141,22 +150,6 @@ export const endSessionMutation = (ids: Array<null | string | undefined>): void 
 // True while the disk scan is in flight (drives the "finding repos" hint).
 export const $reposScanning = atom(false)
 
-// ── Project scope (the "you're inside a project" view, mirroring profile scope)─
-// The sidebar's grouped view is a project switcher: ALL_PROJECTS shows the
-// project overview (a list you drill into), and a concrete id means you've
-// "entered" that project so only its worktrees/branches/sessions show. This is
-// pure view state (localStorage), distinct from the durable active-project
-// pointer in projects.db — though entering a project also makes it active so new
-// chats land there, exactly as selecting a profile does.
-export const ALL_PROJECTS = '__all_projects__'
-
-const PROJECT_SCOPE_KEY = 'hermes.desktop.projectScope'
-
-export const $projectScope = persistentAtom<string>(PROJECT_SCOPE_KEY, ALL_PROJECTS, {
-  decode: raw => raw || ALL_PROJECTS,
-  encode: value => value || ALL_PROJECTS
-})
-
 // Enter a project: scope the sidebar to it and make it the active project
 // (best-effort — the durable pointer is nice-to-have, the view scope is the
 // point). Never opens a session.
@@ -169,10 +162,6 @@ export function enterProject(id: string): void {
   if (id.startsWith('p_')) {
     void setActiveProject(id).catch(() => undefined)
   }
-}
-
-export function exitProjectScope(): void {
-  $projectScope.set(ALL_PROJECTS)
 }
 
 // A project's working root: its primary folder, else the first repo that has

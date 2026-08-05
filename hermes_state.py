@@ -2643,9 +2643,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 ):
                     if not self._fts_write_path_broken:
                         self._fts_write_path_broken = True
+                        # Wording: rebuild may have failed or still left a
+                        # broken write path — do not claim "completed" (#78323).
                         logger.error(
-                            "state.db FTS in-place rebuild completed but the "
-                            "retried write still fails (%s). Treating as "
+                            "state.db FTS write path still broken after the "
+                            "in-place rebuild attempt (%s). Treating as "
                             "recovery failure — run `hermes doctor` / "
                             "repair_state_db_schema. Canonical rows may still "
                             "be intact; this process will not re-attempt FTS "

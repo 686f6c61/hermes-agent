@@ -212,4 +212,70 @@ class TestPendingCapSpoolsOverflow:
             texts.append(payload["data"]["text"])
         assert "msg0" in texts
 
+    def test_spool_filenames_sort_in_write_order(self, tmp_path, monkeypatch):
+        """#78323: recovery must re-insert burst spools in write order."""
+        from gateway import shutdown_flush
+
+        monkeypatch.setattr(shutdown_flush, "_get_flush_dir", lambda: tmp_path / "pending")
+        (tmp_path / "pending").mkdir()
+
+        msgs = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+        ]
+        assert shutdown_flush.spool_transcript_messages("sess-order", msgs) is True
+        names = sorted(p.name for p in (tmp_path / "pending").glob("*.json"))
+        # Lexicographic order of filenames must match write order.
+        texts = []
+        for name in names:
+            payload = __import__("json").loads(
+                (tmp_path / "pending" / name).read_text(encoding="utf-8")
+            )
+            texts.append(payload["data"]["text"])
+        assert texts == ["first", "second", "third"]
+
+    def test_tool_call_row_spools_and_recovers_without_text(
+        self, tmp_path, monkeypatch
+    ):
+        """#78323: assistant tool_calls with content=None must recover intact."""
+        from gateway import shutdown_flush
+
+        monkeypatch.setattr(shutdown_flush, "_get_flush_dir", lambda: tmp_path / "pending")
+        (tmp_path / "pending").mkdir()
+
+        tool_row = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{}"},
+                }
+            ],
+            "timestamp": 1_700_000_000,
+        }
+        assert (
+            shutdown_flush.spool_transcript_messages("sess-tools", [tool_row]) is True
+        )
+
+        calls = []
+
+        class FakeDb:
+            def append_message(self, **kwargs):
+                calls.append(kwargs)
+                return 1
+
+        recovered = shutdown_flush.recover_pending_to_db(FakeDb())
+        assert recovered == 1
+        assert len(calls) == 1
+        assert calls[0]["session_id"] == "sess-tools"
+        assert calls[0]["role"] == "assistant"
+        assert calls[0]["content"] is None
+        assert calls[0]["tool_calls"] == tool_row["tool_calls"]
+        assert calls[0]["timestamp"] == 1_700_000_000
+        # File removed on success — no perpetual startup warning.
+        assert list((tmp_path / "pending").glob("*.json")) == []
+
 

@@ -161,9 +161,24 @@ class TestResolveUv:
         uv = tmp_path / "bin" / _host_managed_uv_name()
         uv.parent.mkdir(parents=True)
         uv.write_text("not a binary")
-        # Ensure no execute bit
+        # Ensure no execute bit (POSIX). On native Windows/NTFS, chmod mode
+        # bits are not honored and os.access(..., X_OK) is effectively always
+        # True for existing files (monerostar Win11 verification on #76741:
+        # mode stays 0o100777). Pin the access check so we still exercise
+        # resolve_uv's X_OK gate without relying on NTFS POSIX semantics.
         uv.chmod(0o644)
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        real_access = os.access
+
+        def _access(path, mode, *args, **kwargs):
+            try:
+                if mode == os.X_OK and Path(path).resolve() == uv.resolve():
+                    return False
+            except OSError:
+                pass
+            return real_access(path, mode, *args, **kwargs)
+
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv.os.access", side_effect=_access):
             from hermes_cli.managed_uv import resolve_uv
             assert resolve_uv() is None
 

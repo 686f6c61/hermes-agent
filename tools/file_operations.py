@@ -980,13 +980,24 @@ class ShellFileOperations(FileOperations):
             # lossy text would let a read→edit→write round-trip silently
             # overwrite the original bytes with mojibake. Treat a file whose
             # sample carries the replacement char as binary (read-only) so the
-            # agent can't corrupt it. Legitimate UTF-8 text effectively never
-            # contains U+FFFD.
-            if "\ufffd" in content_sample[:1000]:
-                return True
-            non_printable = sum(1 for c in content_sample[:1000]
+            # agent can't corrupt it.
+            #
+            # Exception (#82115): ``head -c N`` cuts on a *byte* boundary. When
+            # a multi-byte CJK sequence straddles the cut, replace-decoding
+            # manufactures a *trailing* U+FFFD even though the file is valid
+            # UTF-8. Prefer the byte-layer sampler when possible; for this
+            # text fallback, only mid-sample U+FFFD counts as binary.
+            sample = content_sample[:1000]
+            if "\ufffd" in sample:
+                core = sample.rstrip("\ufffd")
+                if "\ufffd" in core:
+                    return True
+                sample = core if core else sample
+            if not sample:
+                return False
+            non_printable = sum(1 for c in sample
                                if ord(c) < 32 and c not in '\n\r\t')
-            return non_printable / min(len(content_sample), 1000) > 0.30
+            return non_printable / len(sample) > 0.30
         
         return False
     

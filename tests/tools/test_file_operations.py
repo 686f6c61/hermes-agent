@@ -795,3 +795,26 @@ class TestByteLayerBinaryDetection:
         result = ops.read_file("/tmp/a.out")
         assert result.is_binary is True
 
+
+
+class TestUtf8BoundaryTextHeuristic:
+    """#82115: text-layer fallback must not flag CJK cut by head -c as binary."""
+
+    def test_trailing_replacement_from_byte_cut_is_text(self, file_ops):
+        # Simulate head -c cutting mid-character: only trailing U+FFFD.
+        prefix = "x" * 996
+        sample = prefix + "\ufffd"  # truncated 한글 lead byte after replace
+        assert file_ops._is_likely_binary("repro.rs", sample) is False
+
+    def test_mid_sample_replacement_stays_binary(self, file_ops):
+        sample = "hello\ufffdworld" + ("y" * 50)
+        assert file_ops._is_likely_binary("bad.bin", sample) is True
+
+    def test_cjk_straddle_byte_sample_is_text(self, file_ops, tmp_path):
+        # Full read_file path with 999 ASCII then CJK (issue repro).
+        data = (b"// " + b"x" * 996) + "한글주석".encode("utf-8")
+        path = tmp_path / "repro.rs"
+        path.write_bytes(data)
+        r = file_ops.read_file(str(path))
+        assert r.is_binary is False, r.error
+        assert r.error is None

@@ -39,6 +39,23 @@ function artifactSessionTitle(session: SessionInfo): string {
   return session.title?.trim() || session.preview?.trim() || 'Untitled session'
 }
 
+/**
+ * Hermes state.db stores message/session times as Unix **seconds**
+ * (``time.time()``). ``Date`` / ``Intl.DateTimeFormat`` expect milliseconds.
+ * Values already in ms (or ``Date.now()``) pass through unchanged.
+ *
+ * Without the conversion, Artifacts timestamps render as Jan 1970
+ * (e.g. 1.7e9 seconds → ~20 days after epoch in ms) (#81016).
+ */
+export function toEpochMs(value: number | null | undefined, fallback = Date.now()): number {
+  if (value == null || !Number.isFinite(value) || value <= 0) {
+    return fallback
+  }
+  // Unix seconds today are ~1.7e9; ms are ~1.7e12. Threshold 1e12 ≈ 2001-09-09
+  // in ms, safely above any second-based timestamp for the next ~30k years.
+  return value < 1e12 ? value * 1000 : value
+}
+
 function normalizeValue(value: string): string {
   return value.trim().replace(/[),.;]+$/, '')
 }
@@ -283,7 +300,9 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
         label: artifactLabel(value),
         sessionId: session.id,
         sessionTitle: title,
-        timestamp: message.timestamp || session.last_active || session.started_at || Date.now()
+        timestamp: toEpochMs(
+          message.timestamp || session.last_active || session.started_at
+        )
       })
     })
   }

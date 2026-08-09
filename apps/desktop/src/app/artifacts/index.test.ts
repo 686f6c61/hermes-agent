@@ -3,7 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { $connection } from '@/store/session'
 import type { SessionInfo, SessionMessage } from '@/types/hermes'
 
-import { artifactImageSrc, collectArtifactsForSession, loadArtifactsForSessions } from './artifact-utils'
+import {
+  artifactImageSrc,
+  collectArtifactsForSession,
+  loadArtifactsForSessions,
+  toEpochMs
+} from './artifact-utils'
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -44,8 +49,30 @@ describe('collectArtifactsForSession', () => {
     expect(artifacts[0]).toMatchObject({
       href: 'https://example.com/docs/getting-started',
       kind: 'link',
-      value: 'https://example.com/docs/getting-started'
+      value: 'https://example.com/docs/getting-started',
+      // DB seconds → ms for Date formatting (#81016)
+      timestamp: 2_000_000
     })
+  })
+
+  it('converts second-based session timestamps to ms when messages omit them', () => {
+    // 2026-08-07 19:43:00 UTC
+    const sessionTs = Math.floor(Date.UTC(2026, 7, 7, 19, 43, 0) / 1000)
+    const artifacts = collectArtifactsForSession(
+      makeSession({ last_active: sessionTs, started_at: sessionTs }),
+      [
+        {
+          content: 'See https://example.com/report.pdf',
+          role: 'assistant'
+        }
+      ]
+    )
+
+    expect(artifacts).toHaveLength(1)
+    expect(artifacts[0].timestamp).toBe(sessionTs * 1000)
+    // Must not render as 1970 when fed to Date
+    expect(new Date(artifacts[0].timestamp).getUTCFullYear()).toBe(2026)
+    expect(new Date(artifacts[0].timestamp).getUTCMonth()).toBe(7)
   })
 
   it('indexes http links present in tool JSON payloads', () => {
@@ -87,6 +114,13 @@ describe('collectArtifactsForSession', () => {
     expect(api).toHaveBeenCalledWith({
       path: '/api/fs/read-data-url?path=%2FUsers%2Fme%2F.hermes%2Fskills%2Fwork-esab%2Freferences%2Fimages%2Fmanual-step03.jpeg'
     })
+  })
+})
+
+describe('toEpochMs', () => {
+  it('multiplies second-scale values and leaves millisecond values alone', () => {
+    expect(toEpochMs(1_700_000_000)).toBe(1_700_000_000_000)
+    expect(toEpochMs(1_700_000_000_000)).toBe(1_700_000_000_000)
   })
 })
 

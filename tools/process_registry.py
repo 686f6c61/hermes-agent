@@ -2169,8 +2169,23 @@ class ProcessRegistry:
             return {"status": "error", "error": str(e)}
 
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
-        """Send data + newline to a running process's stdin (like pressing Enter)."""
-        return self.write_stdin(session_id, data + "\n")
+        """Send data + newline to a running process's stdin (like pressing Enter).
+
+        On Windows winpty (PTY mode), canonical-mode input flushes on CR
+        (``\\r``), not LF. Appending ``\\n`` alone echoes on the PTY but never
+        reaches the child's ``stdin.read()`` (#83773). Pipe mode and POSIX
+        keep LF.
+        """
+        session = self.get(session_id)
+        if (
+            session is not None
+            and getattr(session, "_pty", None)
+            and _IS_WINDOWS
+        ):
+            newline = "\r"
+        else:
+            newline = "\n"
+        return self.write_stdin(session_id, data + newline)
 
     def request_close_terminal(self, session_id: str) -> dict:
         """Ask the desktop GUI to close the read-only terminal tab mirroring this

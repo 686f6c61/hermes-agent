@@ -218,30 +218,36 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
 
 
 
-def _ensure_stdio_pipe_for_acp(stream, *, name: str) -> None:
+def _ensure_stdio_pipe_for_acp(stream, *, name: str):
     """Ensure *stream* is a pipe/socket/char device for asyncio connect_write_pipe.
 
     The ACP SDK calls ``loop.connect_write_pipe(..., sys.stdout)``, which raises
     ``ValueError: Pipe transport is only for pipes, sockets and character devices``
     when the host redirected stdout to a regular file (#84515). Bridge through
     an anonymous pipe and pump bytes to the original fd so non-pipe hosts work.
+
+    Returns a no-arg restore callable that puts the original fd back (so unit
+    tests under pytest capture do not hit ``Illegal seek`` after main returns).
     """
     import os
     import stat
     import threading
 
+    def _noop() -> None:
+        return None
+
     if stream is None:
-        return
+        return _noop
     try:
         fd = stream.fileno()
     except Exception:
-        return
+        return _noop
     try:
         mode = os.fstat(fd).st_mode
     except Exception:
-        return
+        return _noop
     if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode):
-        return
+        return _noop
 
     r_fd, w_fd = os.pipe()
     try:
@@ -249,19 +255,24 @@ def _ensure_stdio_pipe_for_acp(stream, *, name: str) -> None:
     except Exception:
         os.close(r_fd)
         os.close(w_fd)
-        return
+        return _noop
     try:
         os.dup2(w_fd, fd)
     except Exception:
         os.close(r_fd)
         os.close(w_fd)
         os.close(saved)
-        return
+        return _noop
     os.close(w_fd)
+
+    # Pump from the pipe read-end into the original destination. Keep *saved*
+    # open until restore() so the pump can finish draining after we put the
+    # original fd back on *stream*.
+    pump_stop = threading.Event()
 
     def _pump() -> None:
         try:
-            while True:
+            while not pump_stop.is_set():
                 chunk = os.read(r_fd, 65536)
                 if not chunk:
                     break
@@ -274,16 +285,32 @@ def _ensure_stdio_pipe_for_acp(stream, *, name: str) -> None:
                 os.close(r_fd)
             except OSError:
                 pass
-            try:
-                os.close(saved)
-            except OSError:
-                pass
 
     threading.Thread(
         target=_pump,
         name=f"acp-{name}-pipe-bridge",
         daemon=True,
     ).start()
+
+    restored = {"done": False}
+
+    def restore() -> None:
+        if restored["done"]:
+            return
+        restored["done"] = True
+        try:
+            # Closing the write end of the pipe (currently on *fd*) signals
+            # EOF to the pump; then put the original descriptor back.
+            os.dup2(saved, fd)
+        except OSError:
+            pass
+        pump_stop.set()
+        try:
+            os.close(saved)
+        except OSError:
+            pass
+
+    return restore
 
 
 
@@ -341,7 +368,8 @@ def main(argv: list[str] | None = None) -> None:
     agent = HermesACPAgent()
     # Host apps may redirect stdout to a file or wrap it so it is not a pipe.
     # The ACP SDK requires pipe-like fds for connect_write_pipe (#84515).
-    _ensure_stdio_pipe_for_acp(sys.stdout, name="stdout")
+    # Always restore on exit so pytest capture / parent process stdout stay sane.
+    restore_stdout = _ensure_stdio_pipe_for_acp(sys.stdout, name="stdout")
     try:
         asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
     except KeyboardInterrupt:
@@ -349,6 +377,8 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.exception("ACP agent crashed")
         sys.exit(1)
+    finally:
+        restore_stdout()
 
 
 if __name__ == "__main__":

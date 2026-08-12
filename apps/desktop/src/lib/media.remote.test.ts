@@ -11,9 +11,27 @@ import {
   isInlineMediaSrc,
   isRemoteGateway,
   mediaExternalUrl,
+  mediaName,
   resolveMediaDisplaySrc,
   resolveMediaPlaybackSrc
 } from './media'
+
+describe('mediaName', () => {
+  it('keeps non-ASCII basenames on Windows drive paths (#84361)', () => {
+    expect(mediaName('D:/Users/licat/Desktop/迷妃湖路段_payload.json')).toBe(
+      '迷妃湖路段_payload.json'
+    )
+    expect(mediaName('C:\\tmp\\报告.pdf')).toBe('报告.pdf')
+  })
+
+  it('keeps non-ASCII basenames on POSIX paths', () => {
+    expect(mediaName('/tmp/迷妃湖路段_payload.json')).toBe('迷妃湖路段_payload.json')
+  })
+
+  it('decodes percent-encoded file URL path segments', () => {
+    expect(mediaName('file:///tmp/%E6%8A%A5%E5%91%8A.pdf')).toBe('报告.pdf')
+  })
+})
 
 describe('isRemoteGateway', () => {
   afterEach(() => {

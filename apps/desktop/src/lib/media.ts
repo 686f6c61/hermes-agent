@@ -45,10 +45,22 @@ export function mediaMime(path: string): string {
 }
 
 export function mediaName(path: string): string {
+  // Windows drive paths (`D:/…`, `C:\…`) are valid URL schemes to WHATWG, so
+  // `new URL` never throws and `pathname` is percent-encoded. Split the
+  // filesystem string instead so non-ASCII labels stay readable (#84361).
+  if (/^(?:[a-zA-Z]:[\\/]|\\\\|\/|~\/)/.test(path) || !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path)) {
+    return path.split(/[\\/]/).filter(Boolean).pop() || path
+  }
+
   try {
     const url = new URL(path)
+    const segment = url.pathname.split('/').filter(Boolean).pop() || path
 
-    return url.pathname.split('/').filter(Boolean).pop() || path
+    try {
+      return decodeURIComponent(segment)
+    } catch {
+      return segment
+    }
   } catch {
     return path.split(/[\\/]/).filter(Boolean).pop() || path
   }

@@ -62,6 +62,16 @@ describe('mediaExternalUrl', () => {
     expect(mediaExternalUrl('file:///tmp/a.png')).toBe('file:///tmp/a.png')
   })
 
+  it('escapes URL-structural characters in local file URLs (#84361)', () => {
+    $connection.set({ mode: 'local' } as never)
+    expect(mediaExternalUrl('/tmp/Report #2.pdf')).toBe('file:///tmp/Report %232.pdf')
+    expect(mediaExternalUrl('/tmp/a?b.pdf')).toBe('file:///tmp/a%3Fb.pdf')
+    expect(mediaExternalUrl('/tmp/100%.pdf')).toBe('file:///tmp/100%25.pdf')
+    // Spaces and home-relative paths stay literal for the main process.
+    expect(mediaExternalUrl('/tmp/a b.pdf')).toBe('file:///tmp/a b.pdf')
+    expect(mediaExternalUrl('~/docs/a.pdf')).toBe('file://~/docs/a.pdf')
+  })
+
   it('rewrites gateway-local paths to an authenticated download URL', () => {
     $connection.set({ mode: 'remote', baseUrl: 'https://gw', token: 's e/cret' } as never)
     expect(mediaExternalUrl('file:///tmp/a b.png')).toBe(

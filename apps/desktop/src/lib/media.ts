@@ -98,6 +98,20 @@ export async function resolveMediaPlaybackSrc(path: string): Promise<string> {
   return resolveMediaDisplaySrc(path)
 }
 
+// Escape only URL-structural characters in a filesystem path so `new URL`
+// does not treat `#` / `?` as fragment/query (or a raw `%` as a bad escape).
+// Spaces and non-ASCII stay literal; Windows drive letters and `~/…` stay
+// intact for the main process to expand (#84361).
+export function pathToLocalFileUrl(path: string): string {
+  if (/^file:/i.test(path)) {
+    return path
+  }
+
+  const escaped = path.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')
+
+  return `file://${escaped}`
+}
+
 // Resolve a media path to a URL the shell can open. Remote mode rewrites
 // gateway-local paths to an authenticated /api/files/download URL (the file
 // lives on the gateway, not this disk); local mode keeps the file:// form.
@@ -116,7 +130,7 @@ export function mediaExternalUrl(path: string): string {
     }
   }
 
-  return /^file:/i.test(path) ? path : `file://${path}`
+  return pathToLocalFileUrl(path)
 }
 
 // Custom Electron scheme (registered in electron/main.ts) that streams a local

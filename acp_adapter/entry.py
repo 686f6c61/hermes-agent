@@ -217,6 +217,76 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
         return 1
 
 
+
+def _ensure_stdio_pipe_for_acp(stream, *, name: str) -> None:
+    """Ensure *stream* is a pipe/socket/char device for asyncio connect_write_pipe.
+
+    The ACP SDK calls ``loop.connect_write_pipe(..., sys.stdout)``, which raises
+    ``ValueError: Pipe transport is only for pipes, sockets and character devices``
+    when the host redirected stdout to a regular file (#84515). Bridge through
+    an anonymous pipe and pump bytes to the original fd so non-pipe hosts work.
+    """
+    import os
+    import stat
+    import threading
+
+    if stream is None:
+        return
+    try:
+        fd = stream.fileno()
+    except Exception:
+        return
+    try:
+        mode = os.fstat(fd).st_mode
+    except Exception:
+        return
+    if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode):
+        return
+
+    r_fd, w_fd = os.pipe()
+    try:
+        saved = os.dup(fd)
+    except Exception:
+        os.close(r_fd)
+        os.close(w_fd)
+        return
+    try:
+        os.dup2(w_fd, fd)
+    except Exception:
+        os.close(r_fd)
+        os.close(w_fd)
+        os.close(saved)
+        return
+    os.close(w_fd)
+
+    def _pump() -> None:
+        try:
+            while True:
+                chunk = os.read(r_fd, 65536)
+                if not chunk:
+                    break
+                try:
+                    os.write(saved, chunk)
+                except OSError:
+                    break
+        finally:
+            try:
+                os.close(r_fd)
+            except OSError:
+                pass
+            try:
+                os.close(saved)
+            except OSError:
+                pass
+
+    threading.Thread(
+        target=_pump,
+        name=f"acp-{name}-pipe-bridge",
+        daemon=True,
+    ).start()
+
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point: load env, configure logging, run the ACP agent."""
     args = _parse_args(argv)
@@ -269,6 +339,9 @@ def main(argv: list[str] | None = None) -> None:
             logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
 
     agent = HermesACPAgent()
+    # Host apps may redirect stdout to a file or wrap it so it is not a pipe.
+    # The ACP SDK requires pipe-like fds for connect_write_pipe (#84515).
+    _ensure_stdio_pipe_for_acp(sys.stdout, name="stdout")
     try:
         asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
     except KeyboardInterrupt:

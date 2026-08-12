@@ -11115,11 +11115,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _faulthandler_path = os.path.join(_log_dir, "gateway_faulthandler.log")
                 os.makedirs(_log_dir, exist_ok=True)
                 _fh = open(_faulthandler_path, "a", encoding="utf-8")
+                # chain=False: SIGUSR2 is a diagnostic dump only. With
+                # chain=True, Linux continues to the default disposition after
+                # the dump and kills the gateway (systemd then restarts it),
+                # which destroys the in-memory state being investigated (#84373).
                 faulthandler.register(
                     _sigusr2,
                     file=_fh,
                     all_threads=True,
-                    chain=True,
+                    chain=False,
                 )
             except Exception:
                 logger.debug("Could not set up faulthandler file logging", exc_info=True)

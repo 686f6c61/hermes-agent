@@ -2260,6 +2260,21 @@ def anthropic_prompt_cache_policy(
         # pi-mono's "alibaba" cacheControlFormat.
         return True, False
 
+    # LiteLLM proxy on the OpenAI-compatible wire (chat_completions). Claude
+    # behind /v1/chat/completions supports Anthropic cache_control markers,
+    # but without a grant branch the policy fell through to (False, False)
+    # and served 0% cache hits — full prompt re-billed every turn (#84506).
+    # Match provider id (custom:litellm, litellm, …) or hostname. Native
+    # anthropic_messages already hits the third-party wire branch above.
+    is_litellm_endpoint = (
+        "litellm" in provider_lower
+        or "litellm" in base_url_hostname(eff_base_url).lower()
+    )
+    if is_litellm_endpoint and is_claude and not is_anthropic_wire:
+        # Inner-block layout: accepted on the verified OpenAI-wire LiteLLM
+        # deployment; keeps the same shape as anthropic_messages for Claude.
+        return True, True
+
     return False, False
 
 

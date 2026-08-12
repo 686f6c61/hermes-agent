@@ -417,6 +417,56 @@ class TestDeepSeekOpenCode:
         assert agent._anthropic_prompt_cache_policy() == (False, False)
 
 
+class TestLiteLLMOpenAIWire:
+    """LiteLLM on /v1/chat/completions must grant Claude cache markers (#84506)."""
+
+    def test_claude_on_custom_litellm_openai_wire_caches(self):
+        agent = _make_agent(
+            provider="custom:litellm",
+            base_url="https://litellm.example.com/v1",
+            api_mode="chat_completions",
+            model="claude-opus-5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+    def test_claude_on_litellm_provider_id_caches(self):
+        agent = _make_agent(
+            provider="litellm",
+            base_url="https://proxy.internal/v1",
+            api_mode="chat_completions",
+            model="anthropic/claude-sonnet-4.6",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+    def test_non_claude_on_litellm_does_not_cache(self):
+        agent = _make_agent(
+            provider="custom:litellm",
+            base_url="https://litellm.example.com/v1",
+            api_mode="chat_completions",
+            model="gpt-4o",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (False, False)
+
+    def test_cache_disabled_still_wins_on_litellm(self):
+        agent = _make_agent(
+            provider="custom:litellm",
+            base_url="https://litellm.example.com/v1",
+            api_mode="chat_completions",
+            model="claude-opus-5",
+        )
+        agent._cache_disabled = True
+        assert agent._anthropic_prompt_cache_policy() == (False, False)
+
+    def test_litellm_anthropic_wire_still_native(self):
+        agent = _make_agent(
+            provider="custom:litellm",
+            base_url="https://litellm.example.com/v1",
+            api_mode="anthropic_messages",
+            model="claude-opus-5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+
 class TestNousPortalAnthropicWire:
     def test_portal_claude_on_the_messages_wire_uses_the_native_layout(self):
         agent = _make_agent(

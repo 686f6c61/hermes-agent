@@ -51,6 +51,45 @@ def _client_base_url(client) -> str:
     return ""
 
 
+def test_api_key_provider_wrap_uses_explicit_override_not_stock_creds_url():
+    """#85535: named API-key branch must wrap against explicit_base_url.
+
+    Fallback entries override a built-in provider's endpoint. Wrap used to
+    inspect the credential-pool stock URL, so an Anthropic-only override
+    never triggered the Messages adapter.
+    """
+    from agent.auxiliary_client import resolve_provider_client, AnthropicAuxiliaryClient
+
+    fake_anthropic = MagicMock(name="anthropic_sdk_client")
+    stock_creds = {
+        "provider": "minimax",
+        "api_key": "sk-stock",
+        "base_url": "https://api.minimax.io/v1",
+        "source": "env",
+    }
+    with (
+        patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value=stock_creds,
+        ),
+        patch(
+            "agent.anthropic_adapter.build_anthropic_client",
+            return_value=fake_anthropic,
+        ) as mock_build,
+    ):
+        client, _model = resolve_provider_client(
+            "minimax",
+            model="claude-opus-4-8",
+            explicit_base_url=_ANTHROPIC_BASE,
+            explicit_api_key="k-override",
+            api_mode="anthropic_messages",
+        )
+
+    assert isinstance(client, AnthropicAuxiliaryClient)
+    mock_build.assert_called_once_with("k-override", _ANTHROPIC_BASE)
+    assert client.base_url == _ANTHROPIC_BASE
+
+
 def test_explicit_base_anthropic_messages_keeps_anthropic_path():
     """api_mode=anthropic_messages must build the Anthropic wrapper on the raw
     ``/anthropic`` base — not the ``/v1``-rewritten one."""

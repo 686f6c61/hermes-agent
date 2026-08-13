@@ -6717,7 +6717,17 @@ def resolve_provider_client(
         # Anthropic-wire endpoints (Kimi Coding Plan api.kimi.com/coding,
         # /anthropic-suffixed gateways) so named providers like kimi-coding
         # land on the right transport without needing per-provider branches.
-        client = _wrap_if_needed(client, final_model, raw_base_url, api_key)
+        #
+        # Wrap against the same endpoint the caller targeted. After an
+        # explicit_base_url override, that is the override (un-rewritten so
+        # /anthropic suffixes stay visible) — not the credential-pool stock
+        # URL (#85535).
+        wrap_url = (
+            explicit_base_url.strip().rstrip("/")
+            if explicit_base_url
+            else raw_base_url
+        )
+        client = _wrap_if_needed(client, final_model, wrap_url, api_key)
 
         logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode

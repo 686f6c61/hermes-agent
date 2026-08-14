@@ -90,6 +90,34 @@ class TestOllamaCloudCredentials:
         result = resolve_runtime_provider(requested="ollama-cloud")
         assert result["base_url"] == "https://ollama.com/v1"
 
+    def test_pool_then_host_only_config_base_url_keeps_v1(self, monkeypatch):
+        """Config model.base_url=https://ollama.com after a default pool URL (#85417)."""
+        from types import SimpleNamespace
+
+        from hermes_cli.runtime_provider import _resolve_runtime_from_pool_entry
+
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._get_model_config",
+            lambda: {
+                "provider": "ollama-cloud",
+                "base_url": "https://ollama.com",
+                "default": "deepseek-v4-pro",
+            },
+        )
+        entry = SimpleNamespace(
+            runtime_base_url="https://ollama.com/v1",
+            base_url="https://ollama.com/v1",
+            runtime_api_key="pool-key",
+            access_token="",
+            source="pool",
+        )
+        result = _resolve_runtime_from_pool_entry(
+            provider="ollama-cloud",
+            entry=entry,
+            requested_provider="ollama-cloud",
+        )
+        assert result["base_url"] == "https://ollama.com/v1"
+
 
 # ── Model Catalog (dynamic — no static list) ──
 

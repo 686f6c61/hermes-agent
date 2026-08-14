@@ -582,6 +582,14 @@ def _resolve_runtime_from_pool_entry(
     if provider == "lmstudio":
         base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
 
+    # After pool / config.yaml / env have all had a chance to overwrite
+    # the URL: a host-only model.base_url (https://ollama.com) must not
+    # re-drop /v1 once we have already healed the pool entry (#85417).
+    if provider == "ollama-cloud":
+        from hermes_cli.auth import ensure_ollama_cloud_openai_base_url
+
+        base_url = ensure_ollama_cloud_openai_base_url(base_url)
+
     return {
         "provider": provider,
         "api_mode": api_mode,

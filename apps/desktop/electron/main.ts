@@ -141,6 +141,7 @@ import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
+import { absolutizeProtocolRelativeUrl, looksLikeLocalFilesystemPath } from './local-filesystem-path'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
   oauthGuardMayHardFail,
@@ -1301,10 +1302,6 @@ function loadWindowUrl(win, url, label) {
   win.loadURL(url).catch(error => rememberLog(`${label} failed to load: ${describeCrashReason(error)}`))
 }
 
-function looksLikeLocalFilesystemPath(value) {
-  return /^(?:\/|~\/|[a-zA-Z]:[\\/]|\\\\)/.test(value)
-}
-
 function openLocalFilesystemPath(localPath) {
   void shell
     .openPath(localPath)
@@ -1328,7 +1325,7 @@ function openLocalFilesystemPath(localPath) {
 }
 
 function openExternalUrl(rawUrl) {
-  const raw = String(rawUrl || '').trim()
+  const raw = absolutizeProtocolRelativeUrl(String(rawUrl || '').trim())
 
   if (!raw) {
     return false

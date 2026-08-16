@@ -2609,6 +2609,7 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit Models…',
       refreshModels: 'Refresh Models',
+      resetReasoningDefault: 'Use Settings reasoning default',
       fast: 'Fast'
     },
     modelOptions: {
@@ -2733,6 +2734,7 @@ export const en: Translations = {
       switchModel: 'Switch model',
       openModelPicker: 'Open model picker',
       modelPinned: 'pinned by you; new chats use this instead of the Settings default',
+      effortPinned: 'reasoning override; new chats use this instead of the Settings default',
       modelTitle: (provider, model) => `Model · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

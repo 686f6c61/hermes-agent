@@ -31,6 +31,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  getCurrentEffortSource,
   $messages,
   $newChatWorkspaceTarget,
   $sessions,
@@ -200,7 +201,9 @@ async function desktopSessionCreateParams(cwd: string): Promise<Record<string, u
     ...(selection.model
       ? { model: selection.model, ...(selection.provider ? { provider: selection.provider } : {}) }
       : {}),
-    ...(selection.effort ? { reasoning_effort: selection.effort } : {}),
+    ...(selection.effort && getCurrentEffortSource() === 'manual'
+      ? { reasoning_effort: selection.effort }
+      : {}),
     fast: selection.fast
   }
 }

@@ -2191,6 +2191,7 @@ export interface Translations {
       noModels: string
       editModels: string
       refreshModels: string
+      resetReasoningDefault: string
       fast: string
     }
     modelOptions: {
@@ -2315,6 +2316,7 @@ export interface Translations {
       switchModel: string
       openModelPicker: string
       modelPinned: string
+      effortPinned: string
       modelTitle: (provider: string, model: string) => string
       providerModelTitle: (provider: string, model: string) => string
     }

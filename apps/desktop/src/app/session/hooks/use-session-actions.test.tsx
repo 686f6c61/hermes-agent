@@ -34,7 +34,9 @@ import {
   setActiveSessionStoredIdRotation,
   setAwaitingResponse,
   setBusy,
+  markComposerEffortManual,
   setCurrentCwd,
+  setCurrentEffortSource,
   setCurrentFastMode,
   setCurrentModel,
   setCurrentProvider,
@@ -485,6 +487,7 @@ describe('createBackendSessionForSend profile routing', () => {
     $currentModel.set('')
     $currentProvider.set('')
     $currentReasoningEffort.set('')
+    setCurrentEffortSource('')
     setNewChatWorkspaceTarget(undefined)
     vi.restoreAllMocks()
   })
@@ -541,6 +544,7 @@ describe('createBackendSessionForSend profile routing', () => {
     setCurrentModel('anthropic/claude-sonnet-4.6')
     setCurrentProvider('anthropic')
     setCurrentReasoningEffort('high')
+    markComposerEffortManual()
     setCurrentFastMode(false)
 
     let createParams: Record<string, unknown> | undefined
@@ -583,6 +587,15 @@ describe('createBackendSessionForSend profile routing', () => {
       provider: 'anthropic',
       reasoning_effort: 'high'
     })
+  })
+
+  it('does not ship an inherited sticky effort on session.create', async () => {
+    const params = await createWith(() => {
+      setCurrentReasoningEffort('ultra')
+      setCurrentEffortSource('default')
+    })
+
+    expect(params).not.toHaveProperty('reasoning_effort')
   })
 
   it('falls back to the entered project cwd when the current cwd is blank', async () => {

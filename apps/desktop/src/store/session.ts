@@ -13,6 +13,7 @@ import { clearUnreadOnOpen } from './session-unread-remote'
 
 type Updater<T> = T | ((current: T) => T)
 export type ComposerModelSource = '' | 'default' | 'manual'
+export type ComposerEffortSource = ComposerModelSource
 
 const WORKSPACE_CWD_KEY = 'hermes.desktop.workspace-cwd'
 
@@ -25,6 +26,7 @@ const COMPOSER_MODEL_KEY = 'hermes.desktop.composer.model'
 const COMPOSER_PROVIDER_KEY = 'hermes.desktop.composer.provider'
 const COMPOSER_MODEL_SOURCE_KEY = 'hermes.desktop.composer.model-source'
 const COMPOSER_EFFORT_KEY = 'hermes.desktop.composer.reasoning-effort'
+const COMPOSER_EFFORT_SOURCE_KEY = 'hermes.desktop.composer.reasoning-effort-source'
 const COMPOSER_FAST_KEY = 'hermes.desktop.composer.fast'
 
 // The last chat the user had open, so a relaunch lands back on it instead of an
@@ -803,9 +805,34 @@ export const markComposerSelectionManual = (): void => {
   setCurrentModelSource('manual')
 }
 
+export const getCurrentEffortSource = (): ComposerEffortSource => {
+  const source = storedString(COMPOSER_EFFORT_SOURCE_KEY)
+
+  return source === 'default' || source === 'manual' ? source : ''
+}
+
+export const $currentEffortSource = atom<ComposerEffortSource>(getCurrentEffortSource())
+
+export const setCurrentEffortSource = (source: ComposerEffortSource) => {
+  persistString(COMPOSER_EFFORT_SOURCE_KEY, source || null)
+  $currentEffortSource.set(source)
+}
+
+export const markComposerEffortManual = (): void => {
+  composerSelectionGeneration += 1
+  setCurrentEffortSource('manual')
+}
+
 export const setCurrentReasoningEffort = (next: Updater<string>) => {
   updateAtom($currentReasoningEffort, next)
   persistString(COMPOSER_EFFORT_KEY, $currentReasoningEffort.get() || null)
+}
+
+/** Drop a sticky composer effort so the next session.create inherits config.yaml. */
+export const resetComposerReasoningToDefault = (): void => {
+  const fallback = $defaultReasoningEffort.get()
+  setCurrentReasoningEffort(fallback)
+  setCurrentEffortSource('default')
 }
 
 // The profile's `agent.reasoning_effort`, mirrored from config so surfaces that

@@ -235,6 +235,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
               data-testid="reset-reasoning-default"
               onSelect={event => {
                 event.preventDefault()
+
                 resetComposerReasoningToDefault()
                 if (activeSessionId) {
                   void requestGateway('config.set', {

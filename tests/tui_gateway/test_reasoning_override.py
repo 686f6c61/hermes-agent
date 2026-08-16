@@ -13,6 +13,16 @@ from tui_gateway.reasoning_override import (
 from tui_gateway.server import _session_info
 
 
+def test_codex_alias_still_drops_ultra(monkeypatch):
+    import tui_gateway.reasoning_override as ro
+
+    monkeypatch.setattr(ro, "_canonical_provider", lambda _provider: "openai-codex")
+    parsed = parse_create_reasoning_override(
+        "ultra", provider="chatgpt-codex", model="gpt-5.4"
+    )
+    assert parsed is None
+
+
 def test_codex_drops_ultra_override():
     parsed = parse_create_reasoning_override(
         "ultra", provider="openai-codex", model="gpt-5.4"
@@ -131,6 +141,22 @@ def test_config_set_rejects_codex_ultra():
         )
     assert "error" in resp
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_make_agent_drop_clears_session_override():
+    session = {
+        "create_reasoning_override": {"enabled": True, "effort": "ultra"},
+    }
+    with patch.dict(server._sessions, {"s-drop": session}, clear=False), \
+            patch.object(server, "_load_reasoning_config", return_value={"enabled": True, "effort": "xhigh"}):
+        got = server._resolve_agent_reasoning_config(
+            {"enabled": True, "effort": "ultra"},
+            provider="openai-codex",
+            model="gpt-5.4",
+            sid="s-drop",
+        )
+    assert got == {"enabled": True, "effort": "xhigh"}
+    assert "create_reasoning_override" not in session
 
 
 def test_session_info_reports_override_flag():

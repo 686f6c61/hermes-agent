@@ -835,6 +835,19 @@ export const resetComposerReasoningToDefault = (): void => {
   setCurrentEffortSource('default')
 }
 
+/** After session.create: if we sent an effort and the backend did not keep it,
+ *  clear the sticky pick so the pill and the next create match the session. */
+export const reconcileComposerReasoningAfterCreate = (
+  sentEffort: boolean,
+  info?: { reasoning_override?: boolean }
+): void => {
+  if (!sentEffort || info?.reasoning_override) {
+    return
+  }
+
+  resetComposerReasoningToDefault()
+}
+
 // The profile's `agent.reasoning_effort`, mirrored from config so surfaces that
 // need to render or apply "the default" resolve the user's configured level
 // instead of assuming DEFAULT_REASONING_EFFORT (lib/reasoning-effort). Empty

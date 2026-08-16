@@ -23,6 +23,18 @@ _GITHUB_PROVIDERS = frozenset(
 )
 
 
+def _canonical_provider(provider: str | None) -> str:
+    slug = str(provider or "").strip().lower()
+    if not slug:
+        return ""
+    try:
+        from hermes_cli.providers import normalize_provider
+
+        return str(normalize_provider(slug) or slug).strip().lower()
+    except Exception:
+        return slug
+
+
 def parse_create_reasoning_override(
     effort,
     *,
@@ -64,10 +76,10 @@ def lookup_supported_reasoning_efforts(
     model: str | None,
 ) -> tuple[str, ...] | None:
     """Known accepted efforts, or None when the catalog cannot say."""
-    slug = str(provider or "").strip().lower()
-    if slug in _CODEX_PROVIDERS:
+    slug = _canonical_provider(provider)
+    if slug in _CODEX_PROVIDERS or slug == "openai-codex":
         return _CODEX_REASONING_EFFORTS
-    if slug in _GITHUB_PROVIDERS:
+    if slug in _GITHUB_PROVIDERS or slug == "github-copilot":
         try:
             from hermes_cli.models import github_model_reasoning_efforts
 

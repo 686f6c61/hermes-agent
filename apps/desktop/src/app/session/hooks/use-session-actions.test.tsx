@@ -30,6 +30,7 @@ import {
   $resumeFailedSessionId,
   $selectedStoredSessionId,
   $turnStartedAt,
+  getCurrentEffortSource,
   markComposerEffortManual,
   setActiveSessionId,
   setActiveSessionStoredIdRotation,
@@ -596,6 +597,37 @@ describe('createBackendSessionForSend profile routing', () => {
     })
 
     expect(params).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('clears a manual sticky effort when create did not keep the override', async () => {
+    setCurrentReasoningEffort('ultra')
+    markComposerEffortManual()
+
+    let createParams: Record<string, unknown> | undefined
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create') {
+        createParams = params
+
+        return {
+          session_id: RUNTIME_SESSION_ID,
+          stored_session_id: null,
+          info: { reasoning_override: false }
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={next => (handle = next)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await act(async () => {
+      await handle!.createBackendSessionForSend()
+    })
+
+    expect(createParams).toMatchObject({ reasoning_effort: 'ultra' })
+    expect(getCurrentEffortSource()).toBe('default')
   })
 
   it('falls back to the entered project cwd when the current cwd is blank', async () => {

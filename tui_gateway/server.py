@@ -4371,6 +4371,7 @@ def _resolve_agent_reasoning_config(
     *,
     provider: str | None,
     model: str,
+    sid: str | None = None,
 ) -> dict | None:
     """Use a session override only when the runtime can honor it.
 
@@ -4385,6 +4386,10 @@ def _resolve_agent_reasoning_config(
         )
         if kept is not None:
             return kept
+        if sid:
+            session = _sessions.get(sid)
+            if isinstance(session, dict):
+                session.pop("create_reasoning_override", None)
     return _load_reasoning_config(str(model or ""))
 
 
@@ -6923,6 +6928,7 @@ def _make_agent(
             reasoning_config_override,
             provider=runtime.get("provider"),
             model=str(model or ""),
+            sid=sid,
         ),
         service_tier=(
             service_tier_override

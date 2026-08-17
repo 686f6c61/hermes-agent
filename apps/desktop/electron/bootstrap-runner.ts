@@ -240,7 +240,7 @@ function httpStatusFromDownloadError(err) {
 }
 
 function isTransientInstallScriptTransport(err) {
-  const code = err && err.code
+  const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined
 
   return (
     code === 'EAI_AGAIN' ||

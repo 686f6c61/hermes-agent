@@ -292,8 +292,7 @@ test('shouldRetryInstallScriptDownload is bounded and skips 404', () => {
   assert.equal(shouldRetryInstallScriptDownload(new Error('Failed to download install.sh: HTTP 404 from url'), 1), false)
   assert.equal(shouldRetryInstallScriptDownload(new Error('Failed to download install.sh: HTTP 401 from url'), 1), false)
 
-  const reset = new Error('socket hang up')
-  reset.code = 'ECONNRESET'
+  const reset = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
   assert.equal(shouldRetryInstallScriptDownload(reset, 1), true)
   assert.equal(shouldRetryInstallScriptDownload(reset, 3), false)
   assert.equal(shouldRetryInstallScriptDownload(new Error('disk full'), 1), false)

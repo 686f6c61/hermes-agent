@@ -71,6 +71,7 @@ import {
   cookiesHavePrivySession,
   cookiesHaveSession,
   gatewayTicketFailure,
+  isGatewayAuthRejection,
   gatewayWsUrlIpcResult,
   hostLabelFromBaseUrl,
   localProfileEntry,
@@ -209,6 +210,7 @@ import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle 
 import { ensureMainWindow } from './main-window-lifecycle'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
 import {
+  gatedCookieSessionOrder,
   oauthGuardMayHardFail,
   oauthSessionIsLive,
   resolveJsonBody,
@@ -4884,9 +4886,9 @@ function downloadViaTokenToFile(url, token, ctx, options: any = {}) {
       parsed,
       {
         method: 'GET',
-        headers: {
-          'X-Hermes-Session-Token': token
-        }
+        headers: options.bearer
+          ? { Authorization: `Bearer ${token}` }
+          : { 'X-Hermes-Session-Token': token }
       },
       res => {
         // Headers arrived — the connection phase is done. Drop the idle timeout
@@ -6801,7 +6803,7 @@ function openOauthLoginWindow(baseUrl, { silent = false } = {}) {
 // authed REST against a gated gateway, including minting WS tickets.
 function fetchJsonViaOauthSession(url, options: any = {}) {
   return new Promise((resolve, reject) => {
-    const sess = getOauthSession()
+    const sess = options.session || getOauthSession()
 
     if (!sess) {
       reject(new Error('OAuth session partition is unavailable.'))
@@ -6913,6 +6915,35 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
 
     request.end()
   })
+}
+
+function electronSessionForCookieJar(jar) {
+  if (jar === 'default-session') {
+    return session.defaultSession
+  }
+
+  return getOauthSession()
+}
+
+async function fetchJsonViaGatedCookies(url, options: any = {}, providers = null) {
+  const order = gatedCookieSessionOrder(providers)
+  let lastError
+
+  for (const jar of order) {
+    const sess = electronSessionForCookieJar(jar)
+
+    try {
+      return await fetchJsonViaOauthSession(url, { ...options, session: sess })
+    } catch (error) {
+      lastError = error
+
+      if (!isGatewayAuthRejection(error) || order.length === 1) {
+        throw error
+      }
+    }
+  }
+
+  throw lastError
 }
 
 // ---------------------------------------------------------------------------
@@ -7051,9 +7082,11 @@ async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> 
 // user-selected destination (via finalizeGatewayDownload). The connect timeout
 // is cleared once the response headers arrive.
 function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
-  return new Promise((resolve, reject) => {
-    const sess = getOauthSession()
+  return downloadViaSessionToFile(url, options.session || getOauthSession(), ctx, options)
+}
 
+function downloadViaSessionToFile(url, sess, ctx, options: any = {}) {
+  return new Promise((resolve, reject) => {
     if (!sess) {
       reject(new Error('OAuth session partition is unavailable.'))
 
@@ -7197,6 +7230,38 @@ function readGatewayErrorText(res): Promise<string> {
   })
 }
 
+async function downloadGatedToFile(url, ctx, connection) {
+  const nativeAt = await ensureNativeAccessToken(connection.baseUrl).catch(() => null)
+
+  if (nativeAt) {
+    try {
+      return await downloadViaTokenToFile(url, nativeAt, ctx, { bearer: true })
+    } catch (error) {
+      if (!isGatewayAuthRejection(error)) {
+        throw error
+      }
+    }
+  }
+
+  const providers = await gatewayAuthProviders(connection.baseUrl)
+  const order = gatedCookieSessionOrder(providers)
+  let lastError
+
+  for (const jar of order) {
+    try {
+      return await downloadViaSessionToFile(url, electronSessionForCookieJar(jar), ctx)
+    } catch (error) {
+      lastError = error
+
+      if (!isGatewayAuthRejection(error) || order.length === 1) {
+        throw error
+      }
+    }
+  }
+
+  throw lastError
+}
+
 async function saveGatewayFile(payload: any = {}) {
   const filePath = gatewayFilePath(payload.path)
 
@@ -7220,7 +7285,7 @@ async function saveGatewayFile(payload: any = {}) {
 
   try {
     return await (connection.authMode === 'oauth'
-      ? downloadViaOauthSessionToFile(url, ctx)
+      ? downloadGatedToFile(url, ctx, connection)
       : downloadViaTokenToFile(url, connection.token, ctx))
   } catch (error) {
     // Desktop and the remote gateway update independently. A gateway predating
@@ -7248,7 +7313,9 @@ async function saveGatewayFileViaDataUrl(connection, profile, filePath, ctx: any
   const url = `${connection.baseUrl}${requestPath}`
 
   const json = (
-    connection.authMode === 'oauth' ? await fetchJsonViaOauthSession(url) : await fetchJson(url, connection.token)
+    connection.authMode === 'oauth'
+      ? await fetchJsonViaGatedCookies(url, {}, await gatewayAuthProviders(connection.baseUrl))
+      : await fetchJson(url, connection.token)
   ) as any
 
   const dataUrl = json?.dataUrl
@@ -12867,12 +12934,16 @@ async function fetchJsonForBackend(
       })
     }
 
-    return fetchJsonViaOauthSession(url, {
-      method: opts.method,
-      body: opts.body,
-      timeoutMs: opts.timeoutMs,
-      headers: descriptor.headers
-    })
+    return fetchJsonViaGatedCookies(
+      url,
+      {
+        method: opts.method,
+        body: opts.body,
+        timeoutMs: opts.timeoutMs,
+        headers: descriptor.headers
+      },
+      await gatewayAuthProviders(descriptor.baseUrl, descriptor.headers)
+    )
   }
 
   return fetchJson(url, descriptor.token, {
@@ -13389,11 +13460,15 @@ async function handleHermesApiRequest(request) {
           bearer: restAuth.token
         })
       } else {
-        response = await fetchJsonViaOauthSession(url, {
-          method: request?.method,
-          body: request?.body,
-          timeoutMs
-        })
+        response = await fetchJsonViaGatedCookies(
+          url,
+          {
+            method: request?.method,
+            body: request?.body,
+            timeoutMs
+          },
+          await gatewayAuthProviders(connection.baseUrl)
+        )
       }
     } else {
       response = await fetchJson(url, connection.token, {

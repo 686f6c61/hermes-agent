@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { test } from 'vitest'
 
 import {
+  gatedCookieSessionOrder,
   oauthGuardMayHardFail,
   oauthSessionIsLive,
   resolveJsonBody,
@@ -129,4 +130,14 @@ test('oauthGuardMayHardFail keeps the strict guard when the list is unusable', (
   assert.equal(oauthGuardMayHardFail(undefined), true)
   assert.equal(oauthGuardMayHardFail('nonsense' as any), true)
   assert.equal(oauthGuardMayHardFail([{ supportsPassword: true }]), true)
+})
+
+test('gatedCookieSessionOrder falls back to the default jar only for password-only gateways', () => {
+  assert.deepEqual(gatedCookieSessionOrder([{ name: 'basic', supportsPassword: true }]), [
+    'oauth-partition',
+    'default-session'
+  ])
+  assert.deepEqual(gatedCookieSessionOrder([{ name: 'nous', supportsPassword: false }]), ['oauth-partition'])
+  assert.deepEqual(gatedCookieSessionOrder([]), ['oauth-partition'])
+  assert.deepEqual(gatedCookieSessionOrder(null), ['oauth-partition'])
 })

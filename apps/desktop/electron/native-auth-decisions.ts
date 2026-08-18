@@ -142,3 +142,24 @@ export function oauthGuardMayHardFail(providers: AdvertisedAuthProvider[] | null
 
   return !named.every(provider => provider.supportsPassword)
 }
+
+export type GatedCookieJar = 'oauth-partition' | 'default-session'
+
+/**
+ * Cookie jars to try for a gated (`auth_required`) REST/download request.
+ *
+ * Real OAuth (and mixed / unknown provider lists) stay on the persistent
+ * OAuth partition. Password-only gateways set the session cookie via
+ * POST /auth/password-login; that cookie often lands in the default session
+ * rather than `persist:hermes-remote-oauth`, so try the official partition
+ * first and fall back to the default jar (#88987).
+ */
+export function gatedCookieSessionOrder(
+  providers: AdvertisedAuthProvider[] | null | undefined
+): GatedCookieJar[] {
+  if (!oauthGuardMayHardFail(providers)) {
+    return ['oauth-partition', 'default-session']
+  }
+
+  return ['oauth-partition']
+}

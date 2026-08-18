@@ -225,6 +225,15 @@ function resolveRemoteSshDashboardProfile(configuredRemoteProfile, poolOrProfile
     return configured
   }
 
+  // Explicit remoteProfile: "default" means the remote root home. The second
+  // argument at the SSH bootstrap call site is often the *local* Desktop
+  // profile name (e.g. mac-mini) — a routing label, not a remote profile.
+  // Treating "default" as unset leaked that local name into
+  // `hermes --profile <local>` and the remote exited immediately (#88994).
+  if (configured === 'default') {
+    return ''
+  }
+
   const key = String(poolOrProfileKey || '').trim()
   const requested = key.startsWith('conn:') ? key.split('::').pop() || '' : key
 

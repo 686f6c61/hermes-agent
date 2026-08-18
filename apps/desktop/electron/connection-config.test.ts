@@ -71,6 +71,14 @@ test('resolveRemoteSshDashboardProfile never sends a conn: pool key to the remot
   assert.equal(resolveRemoteSshDashboardProfile('writer', 'conn:mac-mini::default'), 'writer')
 })
 
+test('resolveRemoteSshDashboardProfile honors explicit default and does not leak a local profile name', () => {
+  // Per-profile SSH with remoteProfile: "default" used to skip that value and
+  // send the local Desktop profile name (mac-mini) as --profile.
+  assert.equal(resolveRemoteSshDashboardProfile('default', 'mac-mini'), '')
+  assert.equal(resolveRemoteSshDashboardProfile('default', 'conn:mac-mini::writer'), '')
+  assert.equal(resolveRemoteSshDashboardProfile('default', 'default'), '')
+})
+
 test('normAuthMode coerces to token unless explicitly oauth', () => {
   assert.equal(normAuthMode('oauth'), 'oauth')
   assert.equal(normAuthMode('token'), 'token')

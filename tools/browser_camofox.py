@@ -510,31 +510,129 @@ def _delete(path: str, body: dict = None, timeout: Optional[int] = None) -> dict
 
 # Camofox reports a cached tab as gone with two status codes (same client
 # action — forget tab_id):
-# - 404: idle GC, or an id this server never issued
+# - 404: idle GC, or an id this server never issued (mandatory tab endpoints)
 # - 410 Gone: tab_destroyed / page_crashed / browser_restarted (camofox
 #   server.js; body includes recovery: "create_new_tab"). After a browser
 #   restart every cached tab_id is stale at once.
-# Navigate recreates a tab (has a target URL). Sibling ops only clear the
-# cached id so the next browser_navigate is not stuck.
+# Navigate POSTs /navigate to the resolved tab (has a target URL). Sibling
+# ops only clear the cached id so the next browser_navigate is not stuck.
+# /evaluate is optional: 404 without a tab-missing payload is "route not
+# found" on older servers (capability), not a stale tab.
 _STALE_TAB_STATUSES = (404, 410)
 _STALE_TAB_ERROR = (
     "Browser tab was garbage-collected by the Camofox server. "
     "Call browser_navigate to open a new tab."
 )
+_EVAL_CAPABILITY_ERROR = (
+    "JavaScript evaluation is not supported by this Camofox server. "
+    "Use browser_snapshot or browser_vision to inspect page state."
+)
+_TAB_MISSING_CODES = frozenset({
+    "tab_destroyed",
+    "page_crashed",
+    "tab_timeout",
+    "tab_not_found",
+    "unknown_tab",
+    "tab_gone",
+})
 
 
-def _clear_stale_tab(session: Dict[str, Any], exc: requests.HTTPError) -> bool:
-    """If *exc* is a stale-tab 404/410, clear session tab_id and return True."""
-    if exc.response is not None and exc.response.status_code in _STALE_TAB_STATUSES:
-        logger.warning(
-            "Camofox tab %s returned %s — tab is gone (GC or server restart). "
-            "Clearing cached tab_id.",
-            session.get("tab_id"),
-            exc.response.status_code,
-        )
-        session["tab_id"] = None
+def _http_error_payload(exc: BaseException) -> Dict[str, Any]:
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return {}
+    try:
+        data = resp.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _payload_says_tab_missing(exc: BaseException) -> bool:
+    payload = _http_error_payload(exc)
+    if payload.get("recovery") == "create_new_tab":
         return True
-    return False
+    code = str(payload.get("code") or "")
+    if code in _TAB_MISSING_CODES:
+        return True
+    parts = [
+        payload.get("error"),
+        payload.get("message"),
+        payload.get("code"),
+    ]
+    resp = getattr(exc, "response", None)
+    if resp is not None and not any(parts):
+        try:
+            parts.append(resp.text)
+        except Exception:
+            pass
+    text = " ".join(str(p) for p in parts if p).lower()
+    return any(
+        token in text
+        for token in (
+            "tab not found",
+            "unknown tab",
+            "tab destroyed",
+            "no such tab",
+            "tab_destroyed",
+            "page_crashed",
+        )
+    )
+
+
+def classify_camofox_http_error(exc: BaseException, *, endpoint: str = "mandatory") -> str:
+    """Classify a Camofox HTTPError: ``stale``, ``capability``, or ``other``.
+
+    ``endpoint="evaluate"`` treats bare 404/405/501 as missing capability
+    unless the body says the tab itself is gone. Mandatory tab endpoints
+    treat every 404 as stale.
+    """
+    resp = getattr(exc, "response", None)
+    if not isinstance(exc, requests.HTTPError) or resp is None:
+        return "other"
+    try:
+        status = int(resp.status_code)
+    except (TypeError, ValueError):
+        return "other"
+    if status == 410:
+        return "stale"
+    if endpoint == "evaluate":
+        if status in (405, 501):
+            return "capability"
+        if status == 404:
+            return "stale" if _payload_says_tab_missing(exc) else "capability"
+        return "other"
+    if status == 404:
+        return "stale"
+    return "other"
+
+
+def _clear_stale_tab(
+    session: Dict[str, Any],
+    exc: BaseException,
+    *,
+    endpoint: str = "mandatory",
+) -> bool:
+    """If *exc* is a stale-tab error, clear session tab_id and return True."""
+    if classify_camofox_http_error(exc, endpoint=endpoint) != "stale":
+        return False
+    logger.warning(
+        "Camofox tab %s returned %s — tab is gone (GC or server restart). "
+        "Clearing cached tab_id.",
+        session.get("tab_id"),
+        getattr(getattr(exc, "response", None), "status_code", "?"),
+    )
+    session["tab_id"] = None
+    return True
+
+
+def _post_tab_navigate(session: Dict[str, Any], browser_url: str) -> dict:
+    """POST the target URL to the resolved tab. Never synthesize success."""
+    return _post(
+        f"/tabs/{session['tab_id']}/navigate",
+        {"userId": session["user_id"], "url": browser_url},
+        timeout=60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -547,23 +645,17 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
         browser_url, rewrite_info = _rewrite_loopback_url_for_camofox(url)
         session = _get_session(task_id)
         if not session["tab_id"]:
-            # Create tab with the target URL directly
+            # Create or adopt a tab. Adoption can attach to an already-open
+            # tab that is not at *browser_url*, so success always comes from
+            # a real /navigate (or a retry after stale-tab recovery).
             session = _ensure_tab(task_id, browser_url)
-            data = {"ok": True, "url": browser_url}
-        else:
-            # Navigate existing tab — recover from stale tab 404/410
-            try:
-                data = _post(
-                    f"/tabs/{session['tab_id']}/navigate",
-                    {"userId": session["user_id"], "url": browser_url},
-                    timeout=60,
-                )
-            except requests.HTTPError as e:
-                if _clear_stale_tab(session, e):
-                    session = _ensure_tab(task_id, browser_url)
-                    data = {"ok": True, "url": browser_url}
-                else:
-                    raise
+        try:
+            data = _post_tab_navigate(session, browser_url)
+        except requests.HTTPError as e:
+            if not _clear_stale_tab(session, e):
+                raise
+            session = _ensure_tab(task_id, browser_url)
+            data = _post_tab_navigate(session, browser_url)
         result = {
             "success": True,
             "url": data.get("url", browser_url),
@@ -599,6 +691,8 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
                 snapshot_text = _truncate_snapshot(snapshot_text)
             result["snapshot"] = snapshot_text
             result["element_count"] = snap_data.get("refsCount", 0)
+        except requests.HTTPError as e:
+            _clear_stale_tab(session, e)
         except Exception:
             pass  # Navigation succeeded; snapshot is a bonus
 
@@ -637,7 +731,9 @@ def _camofox_private_page_block(session: Dict[str, Any], task_id: Optional[str],
 
     if not _eval_ssrf_guard_active(task_id or "default"):
         return None
-    blocked_url = _camofox_current_page_private_url(session["tab_id"], session["user_id"])
+    blocked_url = _camofox_current_page_private_url(
+        session["tab_id"], session["user_id"], session=session
+    )
     if not blocked_url:
         return None
     return json.dumps({
@@ -957,6 +1053,8 @@ def camofox_vision(question: str, annotate: bool = False,
                     params={"userId": session["user_id"]},
                 )
                 annotation_context = f"\n\nAccessibility tree (element refs for interaction):\n{snap_data.get('snapshot', '')[:3000]}"
+            except requests.HTTPError as e:
+                _clear_stale_tab(session, e)
             except Exception:
                 pass
 

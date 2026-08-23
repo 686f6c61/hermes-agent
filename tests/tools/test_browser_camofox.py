@@ -150,10 +150,44 @@ class TestCamofoxNavigate:
             result = json.loads(camofox_navigate("https://example.com/next", task_id="t_410"))
 
         assert result["success"] is True
-        assert "/tabs/dead-tab/navigate" in navigate_calls
+        assert navigate_calls[0] == "/tabs/dead-tab/navigate"
+        assert navigate_calls[1] == "/tabs/fresh-tab/navigate"
+        assert result["url"] == "https://example.com/next"
         mock_ensure.assert_called()
         with mod._sessions_lock:
             assert mod._sessions["t_410"]["tab_id"] == "fresh-tab"
+
+    def test_navigate_posts_to_adopted_tab(self, monkeypatch):
+        """Adopted tabs must receive the requested /navigate, not a synthesized URL."""
+        import tools.browser_camofox as mod
+
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        with mod._sessions_lock:
+            mod._sessions["t_adopt"] = {
+                "user_id": "hermes_test",
+                "tab_id": "adopted-tab",
+                "session_key": "task_t_adopt",
+                "managed": True,
+                "adopt_existing_tab": True,
+            }
+
+        posts: list[tuple[str, str]] = []
+
+        def _post_side_effect(path, body=None, **kwargs):
+            posts.append((path, (body or {}).get("url", "")))
+            return {"ok": True, "url": (body or {}).get("url", ""), "title": "live"}
+
+        with patch.object(mod, "_post", side_effect=_post_side_effect), \
+             patch.object(mod, "_get", return_value={"snapshot": "", "refsCount": 0}), \
+             patch.object(mod, "_ensure_tab") as mock_ensure:
+            result = json.loads(
+                camofox_navigate("https://example.com/target", task_id="t_adopt")
+            )
+
+        mock_ensure.assert_not_called()
+        assert posts == [("/tabs/adopted-tab/navigate", "https://example.com/target")]
+        assert result["success"] is True
+        assert result["url"] == "https://example.com/target"
 
 
 
@@ -528,6 +562,130 @@ class TestStaleTabCleanup:
         assert result["url"] == "https://y.com"
         from tools.browser_camofox import _get_session
         assert _get_session("stale_recover")["tab_id"] == "fresh-tab"
+
+    @patch("tools.browser_camofox.requests.get")
+    @patch("tools.browser_camofox.requests.post")
+    def test_bonus_snapshot_410_clears_tab_after_successful_navigate(
+        self, mock_post, mock_get, monkeypatch
+    ):
+        """Post-navigation bonus snapshot must invalidate a tab that dies mid-call."""
+        mock_get.return_value = _mock_response(json_data={"snapshot": "", "refsCount": 0})
+        self._setup_session(mock_post, monkeypatch, "bonus_snap")
+        mock_post.return_value = _mock_response(
+            json_data={"ok": True, "url": "https://y.com", "title": ""}
+        )
+        mock_get.return_value = _mock_stale_response(410)
+        result = json.loads(camofox_navigate("https://y.com", task_id="bonus_snap"))
+        assert result["success"] is True
+        from tools.browser_camofox import _get_session
+        assert _get_session("bonus_snap")["tab_id"] is None
+
+    @patch("tools.browser_camofox._get")
+    @patch("tools.browser_camofox._get_raw")
+    @patch("tools.browser_camofox.requests.post")
+    def test_vision_annotation_snapshot_410_clears_tab(
+        self, mock_post, mock_get_raw, mock_get, monkeypatch, tmp_path
+    ):
+        mock_get.return_value = {"snapshot": "", "refsCount": 0}
+        self._setup_session(mock_post, monkeypatch, "vis_ann")
+        mock_get_raw.return_value = MagicMock(content=b"\x89PNG\r\n\x1a\nfake")
+        mock_get.side_effect = requests.HTTPError(
+            response=MagicMock(status_code=410, json=lambda: {}),
+        )
+        llm = MagicMock()
+        llm.choices = [MagicMock(message=MagicMock(content="ok"))]
+        with patch("hermes_constants.get_hermes_home", return_value=tmp_path), \
+             patch("agent.auxiliary_client.call_llm", return_value=llm), \
+             patch("agent.redact.redact_sensitive_text", side_effect=lambda s: s):
+            result = json.loads(
+                camofox_vision("what?", annotate=True, task_id="vis_ann")
+            )
+        assert result["success"] is True
+        from tools.browser_camofox import _get_session
+        assert _get_session("vis_ann")["tab_id"] is None
+
+
+class TestCamofoxEvalStaleVsCapability:
+    def _session(self, monkeypatch, task_id="eval_t"):
+        import tools.browser_camofox as mod
+
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        session = {
+            "user_id": "hermes_test",
+            "tab_id": "eval-tab",
+            "session_key": f"task_{task_id}",
+            "managed": False,
+            "adopt_existing_tab": False,
+        }
+        with mod._sessions_lock:
+            mod._sessions[task_id] = session
+        return session
+
+    def test_eval_410_clears_tab_and_asks_navigate(self, monkeypatch):
+        from tools.browser_tool import _camofox_eval
+        import tools.browser_camofox as mod
+
+        session = self._session(monkeypatch)
+        gone = requests.HTTPError("410 Gone")
+        gone.response = MagicMock(status_code=410, json=lambda: {"recovery": "create_new_tab"})
+
+        with patch.object(mod, "_ensure_tab", return_value=session), \
+             patch.object(mod, "_post", side_effect=gone):
+            result = json.loads(_camofox_eval("1+1", task_id="eval_t"))
+
+        assert result["success"] is False
+        assert "browser_navigate" in result["error"]
+        assert session["tab_id"] is None
+
+    def test_eval_404_without_tab_payload_is_capability(self, monkeypatch):
+        from tools.browser_tool import _camofox_eval
+        import tools.browser_camofox as mod
+
+        session = self._session(monkeypatch, "eval_cap")
+        missing = requests.HTTPError("404")
+        missing.response = MagicMock(status_code=404, json=lambda: {}, text="Not Found")
+
+        with patch.object(mod, "_ensure_tab", return_value=session), \
+             patch.object(mod, "_post", side_effect=missing):
+            result = json.loads(_camofox_eval("1+1", task_id="eval_cap"))
+
+        assert result["success"] is False
+        assert "not supported" in result["error"]
+        assert session["tab_id"] == "eval-tab"
+
+    def test_eval_404_tab_missing_payload_is_stale(self, monkeypatch):
+        from tools.browser_tool import _camofox_eval
+        import tools.browser_camofox as mod
+
+        session = self._session(monkeypatch, "eval_miss")
+        missing = requests.HTTPError("404")
+        missing.response = MagicMock(
+            status_code=404,
+            json=lambda: {"code": "tab_destroyed", "recovery": "create_new_tab"},
+            text="tab destroyed",
+        )
+
+        with patch.object(mod, "_ensure_tab", return_value=session), \
+             patch.object(mod, "_post", side_effect=missing):
+            result = json.loads(_camofox_eval("1+1", task_id="eval_miss"))
+
+        assert result["success"] is False
+        assert "browser_navigate" in result["error"]
+        assert session["tab_id"] is None
+
+    def test_ssrf_probe_410_clears_tab(self, monkeypatch):
+        from tools.browser_tool import _camofox_current_page_private_url
+        import tools.browser_camofox as mod
+
+        session = self._session(monkeypatch, "probe_t")
+        gone = requests.HTTPError("410 Gone")
+        gone.response = MagicMock(status_code=410, json=lambda: {})
+
+        with patch.object(mod, "_post", side_effect=gone):
+            assert _camofox_current_page_private_url(
+                "eval-tab", "hermes_test", session=session
+            ) is None
+        assert session["tab_id"] is None
 
 
 # ---------------------------------------------------------------------------

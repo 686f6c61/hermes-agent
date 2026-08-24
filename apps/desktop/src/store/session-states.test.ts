@@ -696,6 +696,45 @@ describe('dropTilesForProfile', () => {
   })
 })
 
+
+describe('session tile tab titles persist without mounting (#94167)', () => {
+  afterEach(() => {
+    $activeGatewayProfile.set('default')
+    $layoutTree.set(null)
+    $selectedStoredSessionId.set(null)
+    $sessionTiles.set([])
+    setSessions([])
+  })
+
+  it('stores the recents title on open so a later recents miss still names the tab', () => {
+    setSessions([{ id: 'old-chat', title: 'Quarterly review' } as never])
+    openSessionTile('old-chat')
+
+    expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Quarterly review')
+
+    setSessions([])
+    expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Quarterly review')
+  })
+
+  it('keeps an explicit Bot tab title', () => {
+    openSessionTile('bot-chat', 'center', undefined, undefined, {
+      workspaceMode: 'bots',
+      workspaceOwnerKey: 'owner-a',
+      workspaceTabTitle: 'Bot Chat'
+    })
+
+    expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Bot Chat')
+  })
+
+  it('updates the persisted title when the session is renamed in recents', () => {
+    setSessions([{ id: 'chat', title: 'Draft' } as never])
+    openSessionTile('chat')
+    setSessions([{ id: 'chat', title: 'Renamed' } as never])
+
+    expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Renamed')
+  })
+})
+
 describe('releaseSessionTranscript', () => {
   afterEach(() => {
     $sessionStates.set({})

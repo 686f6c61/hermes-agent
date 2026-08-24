@@ -31,11 +31,13 @@ import {
 } from '@/components/pane-shell/tree/store'
 import { $workspaceMode, resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
 import type { WorkspaceMode } from '@/contrib/types'
+import { sessionTitle } from '@/lib/chat-runtime'
 import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $activeGatewayProfile, normalizeProfileKey } from './profile'
+import { $projectTree } from './projects'
 import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
 import {
   $activeSessionId,
@@ -913,6 +915,34 @@ if (!isSecondaryWindow() && !isBrowserWindow()) {
   $activeGatewayProfile.subscribe(() => {
     $sessionTiles.set([...(tilesByProfile[profileKey()] ?? []), ...(tilesByProfile[BOTS_TILE_BUCKET] ?? [])])
   })
+
+  // Keep persisted tab names in sync with rename / recents refresh so a
+  // later restart still shows the current title, not the name from open.
+  $sessions.listen(() => {
+    const tiles = $sessionTiles.get()
+
+    if (tiles.length === 0) {
+      return
+    }
+
+    let next: SessionTile[] | null = null
+
+    for (let i = 0; i < tiles.length; i++) {
+      const tile = tiles[i]
+      const title = knownSessionTabTitle(tile.storedSessionId)
+
+      if (!title || title === tile.workspaceTabTitle) {
+        continue
+      }
+
+      next ??= tiles.slice()
+      next[i] = { ...tile, workspaceTabTitle: title }
+    }
+
+    if (next) {
+      saveTiles(next)
+    }
+  })
 }
 
 export function patchSessionTile(storedSessionId: string, patch: Partial<SessionTile>) {
@@ -1115,6 +1145,32 @@ export function isBotChatSession(sessionId: null | string | undefined): boolean 
   return Boolean(stored && $botChatSessionIds.get().has(stored))
 }
 
+/** Title to persist on a tile so the tab strip can name it without mounting
+ *  the pane. Restored background tabs never run the resume/title-resolution
+ *  effect, so without this they stay "New session" until first click (#94167).
+ *  Prefer an explicit scope title (Bot Chat), then the recents/project row. */
+function knownSessionTabTitle(storedSessionId: string, scope?: SessionTileWorkspaceScope): string | undefined {
+  const fromScope = scope?.workspaceTabTitle?.trim()
+
+  if (fromScope) {
+    return fromScope
+  }
+
+  const match = (session: SessionInfo) => sessionMatchesStoredId(session, storedSessionId)
+
+  const row =
+    $sessions.get().find(match) ??
+    $projectTree
+      .get()
+      .flatMap(project => [
+        ...project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions)),
+        ...(project.previewSessions ?? [])
+      ])
+      .find(match)
+
+  return row ? sessionTitle(row) : undefined
+}
+
 export function setSessionTileWorkspaceScope(storedSessionId: string, scope: SessionTileWorkspaceScope): boolean {
   // Before the tile lookup: openSession routes every open through here, and a
   // bot chat usually has no tile to record the scope on.
@@ -1123,7 +1179,7 @@ export function setSessionTileWorkspaceScope(storedSessionId: string, scope: Ses
   const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
   const workspaceOwnerKey = scope.workspaceMode === 'bots' ? scope.workspaceOwnerKey : undefined
   const ownerRoute = scope.workspaceMode === 'bots' ? scope.ownerRoute : undefined
-  const workspaceTabTitle = scope.workspaceMode === 'bots' ? scope.workspaceTabTitle : undefined
+  const workspaceTabTitle = knownSessionTabTitle(storedSessionId, scope) ?? tile?.workspaceTabTitle
 
   if (
     !tile ||
@@ -1390,7 +1446,9 @@ export function openSessionTile(
         storedSessionId,
         workspaceMode: workspaceScope.workspaceMode,
         workspaceOwnerKey,
-        workspaceTabTitle: workspaceScope.workspaceMode === 'bots' ? workspaceScope.workspaceTabTitle : undefined
+        // Persist for Sessions as well as Bots: restored background tabs
+        // do not mount, so they cannot resolve a recents-page miss (#94167).
+        workspaceTabTitle: knownSessionTabTitle(storedSessionId, workspaceScope)
       }
     ])
     // Adoption is async via the registry — order sync runs after the move path

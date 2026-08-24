@@ -447,7 +447,12 @@ export function tileStoredRow(storedSessionId: string): SessionInfo | undefined 
  *  rather than its live composer title (`tabTitle` renders that): re-registering
  *  per keystroke would re-render the strip, and holding the draft's text here
  *  would let the registered name already match the row that lands on send —
- *  skipping the re-register that hands the tab back to this string. */
+ *  skipping the re-register that hands the tab back to this string.
+ *
+ *  Restored background tabs do not mount, so they never pull an unlisted
+ *  session row into `$sessions`. `workspaceTabTitle` is the persisted name
+ *  from open/rename, which is what keeps those tabs from reading
+ *  "New session" until first click (#94167). */
 function tileTitle(storedSessionId: string): string {
   const stored = tileStoredRow(storedSessionId)
   const explicit = $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.workspaceTabTitle

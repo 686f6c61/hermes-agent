@@ -31,7 +31,7 @@ import {
 } from '@/components/pane-shell/tree/store'
 import { $workspaceMode, resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
 import type { WorkspaceMode } from '@/contrib/types'
-import { sessionTitle } from '@/lib/chat-runtime'
+import { NEW_SESSION_TITLE, sessionTitle } from '@/lib/chat-runtime'
 import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
@@ -42,6 +42,7 @@ import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait
 import {
   $activeSessionId,
   $connection,
+  $gatewayState,
   $lastReadAtBySessionId,
   $selectedStoredSessionId,
   $sessions,
@@ -1169,6 +1170,76 @@ function knownSessionTabTitle(storedSessionId: string, scope?: SessionTileWorksp
       .find(match)
 
   return row ? sessionTitle(row) : undefined
+}
+
+export type SessionTileTitleLookup = (
+  storedSessionId: string,
+  ownerRoute?: SessionProfileRoute
+) => Promise<SessionInfo | undefined>
+
+function persistResolvedTileTitle(storedSessionId: string, row: SessionInfo): void {
+  const title = sessionTitle(row).trim()
+
+  // Drafts keep the live composer label. Never stamp the placeholder onto
+  // disk — that would freeze "New session" and skip SessionDraftTitle.
+  if (!title || title === NEW_SESSION_TITLE) {
+    return
+  }
+
+  const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
+
+  if (!tile || tile.workspaceTabTitle?.trim()) {
+    return
+  }
+
+  patchSessionTile(storedSessionId, { workspaceTabTitle: title })
+}
+
+/** Tiles restored from disk have no runtimeId (process-scoped) and, before
+ *  this PR, no persisted title. They never remount `openSessionTile`. */
+export function isUntitledUnrestoredTile(tile: SessionTile): boolean {
+  return !tile.runtimeId && !tile.workspaceTabTitle?.trim()
+}
+
+/** One-shot by-id fill for unrestored untitled tiles (#94167 review).
+ *
+ * Persist-on-open covers new tabs. Tiles already on disk, or opened while
+ * the recents row was uncached, still need a lookup. Prefer `ownerRoute`
+ * so a Bot/cross-profile tile does not resolve against the ambient gateway.
+ * A miss (draft / 404) leaves the composer title in charge. */
+export async function backfillUnrestoredTileTitles(lookup: SessionTileTitleLookup): Promise<void> {
+  const targets = $sessionTiles.get().filter(isUntitledUnrestoredTile)
+
+  await Promise.all(
+    targets.map(async tile => {
+      const row = await lookup(tile.storedSessionId, tile.ownerRoute).catch(() => undefined)
+
+      if (row) {
+        persistResolvedTileTitle(tile.storedSessionId, row)
+      }
+    })
+  )
+}
+
+/** Run {@link backfillUnrestoredTileTitles} once the gateway can answer by-id. */
+export function startUnrestoredTileTitleBackfill(lookup: SessionTileTitleLookup): void {
+  if (isSecondaryWindow()) {
+    return
+  }
+
+  let ran = false
+
+  const run = () => {
+    if (ran || $gatewayState.get() !== 'open') {
+      return
+    }
+
+    ran = true
+    void backfillUnrestoredTileTitles(lookup)
+  }
+
+  run()
+  $gatewayState.listen(run)
 }
 
 export function setSessionTileWorkspaceScope(storedSessionId: string, scope: SessionTileWorkspaceScope): boolean {

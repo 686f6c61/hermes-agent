@@ -19,6 +19,7 @@ import {
   $focusedStoredSessionId,
   $sessionStates,
   $sessionTiles,
+  backfillUnrestoredTileTitles,
   blankDraftTile,
   clearAllSessionStates,
   closeAllOpenSessionTiles,
@@ -732,6 +733,54 @@ describe('session tile tab titles persist without mounting (#94167)', () => {
     setSessions([{ id: 'chat', title: 'Renamed' } as never])
 
     expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Renamed')
+  })
+
+  it('backfills unrestored untitled tiles by id, preferring ownerRoute', async () => {
+    const ownerRoute = { connectionId: 'conn-a', profile: 'writer' }
+
+    const lookup = vi.fn(async (id: string, route?: { connectionId: string; profile: string }) => {
+      expect(id).toBe('old-chat')
+      expect(route).toEqual(ownerRoute)
+
+      return { id: 'old-chat', title: 'Quarterly review' } as never
+    })
+
+    $sessionTiles.set([{ ownerRoute, storedSessionId: 'old-chat' }])
+
+    await backfillUnrestoredTileTitles(lookup)
+
+    expect(lookup).toHaveBeenCalledTimes(1)
+    expect($sessionTiles.get()[0]?.workspaceTabTitle).toBe('Quarterly review')
+  })
+
+  it('does not backfill drafts, live runtimes, titled tiles, or the New session placeholder', async () => {
+    const lookup = vi.fn(async (id: string) => {
+      if (id === 'draft') {
+        return undefined
+      }
+
+      if (id === 'placeholder') {
+        return { id, title: 'New session' } as never
+      }
+
+      return { id, title: 'Should not apply' } as never
+    })
+
+    $sessionTiles.set([
+      { storedSessionId: 'draft' },
+      { runtimeId: 'rt-live', storedSessionId: 'live' },
+      { storedSessionId: 'named', workspaceTabTitle: 'Kept' },
+      { storedSessionId: 'placeholder' }
+    ])
+    await backfillUnrestoredTileTitles(lookup)
+
+    expect(lookup.mock.calls.map(call => call[0])).toEqual(['draft', 'placeholder'])
+    expect($sessionTiles.get()).toEqual([
+      { storedSessionId: 'draft' },
+      { runtimeId: 'rt-live', storedSessionId: 'live' },
+      { storedSessionId: 'named', workspaceTabTitle: 'Kept' },
+      { storedSessionId: 'placeholder' }
+    ])
   })
 })
 

@@ -1384,6 +1384,28 @@ _NEWEST_TURN_ONLY_BUDGET_KEYS = (
     "reasoning_content",
 )
 
+# DeepSeek/Kimi thinking chat endpoints echo every historical
+# reasoning_content block on each request. Newest-turn-only accounting
+# then undercounts the tail, compaction fires late, and the session
+# hits an upstream 400 (#80246). Anthropic still strips all-but-newest
+# at convert time; Bedrock Converse never replays thinking.
+_STALE_THINKING_REPLAY_MARKERS = (
+    "deepseek",
+    "kimi",
+    "moonshot",
+)
+
+
+def _stale_thinking_reaches_the_wire(model: str = "", provider: str = "") -> bool:
+    """True when older-turn thinking is still sent on the wire.
+
+    Match model id and provider slug so ``deepseek-v4-flash``,
+    ``kimi-k2.5``, and a ``moonshot`` provider all charge historical
+    reasoning_content. Unrelated models keep the #73624 skip.
+    """
+    blob = f"{model} {provider}".lower()
+    return any(token in blob for token in _STALE_THINKING_REPLAY_MARKERS)
+
 # Replay keys that can be safely pruned from stale assistant messages during
 # compaction.  ``codex_reasoning_items`` carries encrypted reasoning blobs that
 # are only needed for the current turn's replay — prior-turn items are pure
@@ -3784,14 +3806,19 @@ class ContextCompressor(ContextEngine):
                 len(result),
                 _MAX_TAIL_MESSAGE_FLOOR,
             )
-            # Same newest-turn-only thinking charge as the tail-cut walk
-            # (#73624) — this boundary decides which tool results stay
-            # prunable, and overcharging stale thinking shrinks that window.
+            # Same thinking charge as the tail-cut walk: newest-turn-only
+            # except DeepSeek/Kimi, which replay historical reasoning
+            # (#73624, #80246). This boundary decides which tool results
+            # stay prunable.
             _newest_asst_idx = _last_assistant_index(result)
+            _charge_all_thinking = _stale_thinking_reaches_the_wire(
+                getattr(self, "model", ""), getattr(self, "provider", "")
+            )
             for i in range(len(result) - 1, -1, -1):
                 msg = result[i]
                 msg_tokens = _estimate_msg_budget_tokens(
-                    msg, charge_stale_thinking=(i == _newest_asst_idx)
+                    msg,
+                    charge_stale_thinking=_charge_all_thinking or (i == _newest_asst_idx),
                 )
                 if accumulated + msg_tokens > protect_tail_tokens and (len(result) - i) >= min_protect:
                     boundary = i
@@ -6352,16 +6379,21 @@ This compaction should PRIORITISE preserving all information related to the focu
         accumulated = 0
         cut_idx = n  # start from beyond the end
 
-        # Newest assistant turn: the only message whose generic thinking
-        # fields any transport still replays (#73624) — every older turn's
-        # reasoning/reasoning_content is stripped or padded at send time,
-        # so charging it here spends tail budget on bytes that never ship.
+        # Anthropic/Bedrock only replay newest-turn thinking, so charging
+        # older reasoning_content here would spend tail budget on bytes
+        # that never ship (#73624). DeepSeek/Kimi echo every historical
+        # block, so those transports MUST charge stale thinking or the
+        # cut lands late and the next request 400s (#80246).
         _newest_asst_idx = _last_assistant_index(messages)
+        _charge_all_thinking = _stale_thinking_reaches_the_wire(
+            getattr(self, "model", ""), getattr(self, "provider", "")
+        )
 
         for i in range(n - 1, head_end - 1, -1):
             msg = messages[i]
             msg_tokens = _estimate_msg_budget_tokens(
-                msg, charge_stale_thinking=(i == _newest_asst_idx)
+                msg,
+                charge_stale_thinking=_charge_all_thinking or (i == _newest_asst_idx),
             )
             # Stop once we exceed the soft ceiling (unless we haven't hit min_tail yet)
             if accumulated + msg_tokens > soft_ceiling and (n - i) >= min_tail:
@@ -6389,7 +6421,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             for j in range(n - 1, head_end - 1, -1):
                 raw_msg = messages[j]
                 raw_tok = _estimate_msg_budget_tokens(
-                    raw_msg, charge_stale_thinking=(j == _newest_asst_idx)
+                    raw_msg,
+                    charge_stale_thinking=_charge_all_thinking or (j == _newest_asst_idx),
                 )
                 if raw_accumulated + raw_tok > raw_budget and (n - j) >= min_tail:
                     cut_idx = j

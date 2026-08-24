@@ -1,11 +1,14 @@
-"""Tests for provider-aware replay-field accounting in tail-budget walks (#73624).
+"""Tests for provider-aware replay-field accounting in tail-budget walks (#73624, #80246).
 
 Generic thinking fields (``reasoning`` / ``reasoning_content`` + the
 ``reasoning_details`` text charge) are replayed for at most the NEWEST
-assistant turn on every transport — Anthropic strips all-but-newest at
-convert time, Bedrock never replays thinking, strict chat-completions
-providers reject or one-space-pad the field. Charging them on every message
-spent 19-24% of the tail budget on bytes that never reach the wire.
+assistant turn on Anthropic (strips all-but-newest at convert time) and
+Bedrock (never replays thinking). Charging them on every message spent
+19-24% of the tail budget on bytes that never reach the wire (#73624).
+
+DeepSeek and Kimi thinking-mode chat endpoints echo every historical
+``reasoning_content`` block. Skipping those bytes undercounts the tail,
+compaction fires late, and the session hits an upstream 400 (#80246).
 
 Codex sidecar fields (``codex_reasoning_items`` / ``codex_message_items``)
 ARE wire-replayed on every retained turn and stay charged unconditionally
@@ -18,6 +21,7 @@ from agent.context_compressor import (
     _REPLAY_BUDGET_KEYS,
     _estimate_msg_budget_tokens,
     _last_assistant_index,
+    _stale_thinking_reaches_the_wire,
 )
 
 
@@ -156,3 +160,87 @@ class TestTailCutBehavior:
         # index = more messages in the tail), and strictly more here because
         # the stale thinking dominates each message's old-cost.
         assert cut < old_cut
+
+    def test_deepseek_charges_stale_thinking_so_tail_is_smaller_than_skip_stale(self):
+        """DeepSeek echoes historical reasoning_content; skip-stale undercounts (#80246).
+
+        Do not reimplement the compressor's min_tail / fallback / align
+        walk here — those steps move the cut independently of thinking
+        charge. Compare two compressors on the same transcript instead.
+        """
+        from agent.context_compressor import ContextCompressor
+
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(30):
+            msgs.append({"role": "user", "content": f"question {i}"})
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": f"answer {i}",
+                    "reasoning": BIG_THINKING,
+                    "reasoning_content": BIG_THINKING,
+                }
+            )
+        budget = 3_000
+        skip_stale = ContextCompressor(
+            model="claude-opus-5",
+            provider="anthropic",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        charge_stale = ContextCompressor(
+            model="deepseek-v4-flash",
+            provider="deepseek",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        skip_cut = skip_stale._find_tail_cut_by_tokens(msgs, 1, token_budget=budget)
+        charge_cut = charge_stale._find_tail_cut_by_tokens(msgs, 1, token_budget=budget)
+        # Higher cut index = fewer messages kept verbatim. Charging the
+        # echoed thinking spends the budget faster so compaction fires
+        # before the wire request exceeds the model limit.
+        assert charge_cut > skip_cut
+
+    def test_kimi_matches_deepseek_stale_thinking_charge(self):
+        """Kimi thinking mode has the same historical-echo requirement as DeepSeek."""
+        from agent.context_compressor import ContextCompressor
+
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(30):
+            msgs.append({"role": "user", "content": f"question {i}"})
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": f"answer {i}",
+                    "reasoning": BIG_THINKING,
+                    "reasoning_content": BIG_THINKING,
+                }
+            )
+        budget = 3_000
+        deepseek = ContextCompressor(
+            model="deepseek-v4-flash",
+            provider="deepseek",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        kimi = ContextCompressor(
+            model="kimi-k2.5",
+            provider="moonshot",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        assert deepseek._find_tail_cut_by_tokens(msgs, 1, token_budget=budget) == kimi._find_tail_cut_by_tokens(
+            msgs, 1, token_budget=budget
+        )
+
+
+class TestStaleThinkingWireReplay:
+    def test_deepseek_and_kimi_replay_stale_thinking(self):
+        assert _stale_thinking_reaches_the_wire("deepseek-v4-flash", "deepseek")
+        assert _stale_thinking_reaches_the_wire("kimi-k2.5", "")
+        assert _stale_thinking_reaches_the_wire("moonshot-v1", "moonshot")
+        # Custom-provider DeepSeek still matches on the model id.
+        assert _stale_thinking_reaches_the_wire("deepseek-v4-flash", "custom")
+        assert not _stale_thinking_reaches_the_wire("claude-opus-5", "anthropic")
+        assert not _stale_thinking_reaches_the_wire("gpt-5", "openai")
+        assert not _stale_thinking_reaches_the_wire("", "")

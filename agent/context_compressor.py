@@ -2101,6 +2101,12 @@ class ContextCompressor(ContextEngine):
       5. On subsequent compactions, iteratively update the previous summary
     """
 
+    # Tests (and any object.__new__ stub) can call tail/prune walks
+    # without __init__. Empty defaults keep newest-turn-only accounting
+    # — the same as an unset provider in production.
+    model = ""
+    provider = ""
+
     @property
     def name(self) -> str:
         return "compressor"

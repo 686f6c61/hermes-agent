@@ -3812,7 +3812,7 @@ class ContextCompressor(ContextEngine):
             # stay prunable.
             _newest_asst_idx = _last_assistant_index(result)
             _charge_all_thinking = _stale_thinking_reaches_the_wire(
-                getattr(self, "model", ""), getattr(self, "provider", "")
+                self.model, self.provider
             )
             for i in range(len(result) - 1, -1, -1):
                 msg = result[i]
@@ -6386,7 +6386,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # cut lands late and the next request 400s (#80246).
         _newest_asst_idx = _last_assistant_index(messages)
         _charge_all_thinking = _stale_thinking_reaches_the_wire(
-            getattr(self, "model", ""), getattr(self, "provider", "")
+            self.model, self.provider
         )
 
         for i in range(n - 1, head_end - 1, -1):

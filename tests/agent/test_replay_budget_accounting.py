@@ -201,6 +201,62 @@ class TestTailCutBehavior:
         # before the wire request exceeds the model limit.
         assert charge_cut > skip_cut
 
+    def test_deepseek_prune_boundary_charges_stale_thinking(self):
+        """The tool-result prune walk must use the same charge-all flag as tail-cut."""
+        from agent.context_compressor import ContextCompressor
+
+        msgs = [{"role": "system", "content": "sys"}]
+        bulky = "tool output " * 80  # well above _PRUNE_MIN_CHARS
+        for i in range(20):
+            msgs.append({"role": "user", "content": f"question {i}"})
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": f"answer {i}",
+                    "reasoning": BIG_THINKING,
+                    "reasoning_content": BIG_THINKING,
+                    "tool_calls": [
+                        {
+                            "id": f"call-{i}",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }
+                    ],
+                }
+            )
+            msgs.append({"role": "tool", "tool_call_id": f"call-{i}", "content": bulky})
+
+        def surviving_full_tools(messages):
+            return [
+                i
+                for i, msg in enumerate(messages)
+                if msg.get("role") == "tool"
+                and str(msg.get("content") or "").startswith("tool output")
+            ]
+
+        skip_stale = ContextCompressor(
+            model="claude-opus-5",
+            provider="anthropic",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        charge_stale = ContextCompressor(
+            model="deepseek-v4-flash",
+            provider="deepseek",
+            quiet_mode=True,
+            config_context_length=200_000,
+        )
+        # 8k is large enough that the two charge policies land different
+        # prune boundaries; a tight budget collapses both onto the floor
+        # and the later pressure pass hides the difference.
+        skip_msgs, _ = skip_stale._prune_old_tool_results(
+            msgs, protect_tail_count=20, protect_tail_tokens=8_000
+        )
+        charge_msgs, _ = charge_stale._prune_old_tool_results(
+            msgs, protect_tail_count=20, protect_tail_tokens=8_000
+        )
+        assert surviving_full_tools(skip_msgs) != surviving_full_tools(charge_msgs)
+
     def test_kimi_matches_deepseek_stale_thinking_charge(self):
         """Kimi thinking mode has the same historical-echo requirement as DeepSeek."""
         from agent.context_compressor import ContextCompressor

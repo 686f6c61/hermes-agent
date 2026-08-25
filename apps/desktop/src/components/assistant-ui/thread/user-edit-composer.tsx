@@ -56,6 +56,7 @@ import {
 } from '@/app/chat/hooks/use-composer-actions'
 import { uploadComposerAttachment } from '@/app/session/hooks/use-prompt-actions'
 import { hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
+import { createTimeoutBag } from '@/components/assistant-ui/thread/timeout-bag'
 import {
   StickyHumanMessageContainer,
   StopGlyph,
@@ -96,6 +97,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   const initialDraftRef = useRef<string | null>(null)
   const draftRef = useRef(draft)
   const composingRef = useRef(false)
+  const timeoutsRef = useRef(createTimeoutBag())
   const dragDepthRef = useRef(0)
   const [dragActive, setDragActive] = useState(false)
   const [trigger, setTrigger] = useState<TriggerState | null>(null)
@@ -124,6 +126,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   // cleanup so keyboard routing falls back to the visible chat composer.
   useEffect(
     () => () => {
+      timeoutsRef.current.clearAll()
       notifyThreadEditClose()
       releaseActiveComposer('edit')
     },
@@ -341,7 +344,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
         draftRef.current = composerPlainText(editor)
         aui.composer().setText(draftRef.current)
         requestEditFocus()
-        starter ? window.setTimeout(refreshTrigger, 0) : closeTrigger()
+        starter ? timeoutsRef.current.schedule(refreshTrigger, 0) : closeTrigger()
       }
 
       // In place first, spanning Chromium's split text nodes (see
@@ -526,7 +529,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
       rememberInitialDraft()
       const nextDraft = syncDraftFromEditor(editor)
-      window.setTimeout(refreshTrigger, 0)
+      timeoutsRef.current.schedule(refreshTrigger, 0)
 
       return nextDraft
     },
@@ -602,7 +605,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       // Clear latch after cooldown to allow re-submission. This prevents rapid
       // double-Enter but doesn't require tracking when onEdit settles (which may
       // be synchronous or async, and whose promise we don't have access to).
-      window.setTimeout(() => {
+      timeoutsRef.current.schedule(() => {
         setSubmitting(false)
       }, 200)
     } catch {
@@ -618,7 +621,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
         return
       }
 
-      window.setTimeout(() => {
+      timeoutsRef.current.schedule(() => {
         const root = rootRef.current
         const active = document.activeElement
 
@@ -810,7 +813,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
               data-placeholder={copy.editMessage}
               data-slot={RICH_INPUT_SLOT}
               onBeforeInput={handleBeforeInput}
-              onBlur={() => window.setTimeout(closeTrigger, 80)}
+              onBlur={() => timeoutsRef.current.schedule(closeTrigger, 80)}
               onCompositionEnd={event => {
                 composingRef.current = false
                 flushEditorToDraft(event.currentTarget)

@@ -125,6 +125,24 @@ class TestLocalEnvironmentExecute:
         assert "PAYLOAD" in result["output"]
         assert "CMD_ERR" in result["output"]
 
+    def test_split_stderr_kept_when_returncode_is_none(self, env, tmp_path, monkeypatch):
+        """A missing wait code must not drop captured stderr (#94078 review)."""
+        hook = tmp_path / "hook.sh"
+        hook.write_text("printf 'HOOK_WARNING\\n' >&2\n")
+        monkeypatch.setenv("BASH_ENV", str(hook))
+        real_wait = env._wait_for_process
+
+        def wait_without_code(proc, **kwargs):
+            result = real_wait(proc, **kwargs)
+            result["returncode"] = None
+            return result
+
+        monkeypatch.setattr(env, "_wait_for_process", wait_without_code)
+        result = env.execute("printf 'PAYLOAD\\n'; printf 'CMD_ERR\\n' >&2", merge_stderr=False)
+        assert result["returncode"] is None
+        assert "PAYLOAD" in result["output"]
+        assert "CMD_ERR" in result["output"]
+
 
 class TestFileOpsExactStdout:
     def test_read_file_drops_bash_env_hook_warning(self, tmp_path, monkeypatch):

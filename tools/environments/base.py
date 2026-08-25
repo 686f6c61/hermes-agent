@@ -1567,11 +1567,12 @@ class BaseEnvironment(ABC):
         self._update_cwd(result)
 
         if not merge_stderr:
-            # Success: stdout is the data. Failure: keep stderr so callers
-            # still see rg/python diagnostics that used to ride on the
-            # merged pipe.
+            # Success (exit 0): stdout is the data. Any other outcome —
+            # nonzero *or* a missing code (killed/interrupted before
+            # wait set one) — keeps stderr so rg/python diagnostics
+            # that used to ride the merged pipe are not dropped.
             extra = result.pop("stderr", "") or ""
-            if result.get("returncode"):
+            if result.get("returncode") != 0:
                 result["output"] = f"{result.get('output') or ''}{extra}"
         return result
 

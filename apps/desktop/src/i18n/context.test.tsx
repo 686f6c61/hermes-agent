@@ -97,23 +97,25 @@ describe('I18nProvider', () => {
       </I18nProvider>
     )
 
-    // Four attempts: immediate + 1s + 2s + 4s backoff. Stay on the initial
+    // Four attempts: immediate + 1s + 2s + 4s backoff. Flush the rejected
+    // promise, then the scheduled retry, at each step. Stay on the initial
     // locale while retries are in flight so a slow backend does not flash
     // English before the real display.language arrives.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(
-        CONFIG_LOAD_BASE_DELAY_MS + CONFIG_LOAD_BASE_DELAY_MS * 2 + CONFIG_LOAD_BASE_DELAY_MS * 4
-      )
-    })
+    for (const delay of [0, CONFIG_LOAD_BASE_DELAY_MS, CONFIG_LOAD_BASE_DELAY_MS * 2, CONFIG_LOAD_BASE_DELAY_MS * 4]) {
+      await act(async () => {
+        if (delay > 0) {
+          await vi.advanceTimersByTimeAsync(delay)
+        }
 
-    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'))
+        await Promise.resolve()
+      })
+    }
 
     expect(configClient.getConfig).toHaveBeenCalledTimes(CONFIG_LOAD_MAX_ATTEMPTS)
+    expect(screen.getByTestId('loading').textContent).toBe('false')
     expect(screen.getByTestId('locale').textContent).toBe('en')
     expect(screen.getByTestId('label').textContent).toBe('Language')
     expect(configClient.saveConfig).not.toHaveBeenCalled()
-
-    vi.useRealTimers()
   })
 
   it('retries a cold-start config miss and applies display.language once the gateway answers', async () => {
@@ -137,21 +139,27 @@ describe('I18nProvider', () => {
     expect(screen.getByTestId('locale').textContent).toBe('en')
 
     await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('locale').textContent).toBe('en')
+    expect(screen.getByTestId('loading').textContent).toBe('true')
+
+    await act(async () => {
       await vi.advanceTimersByTimeAsync(CONFIG_LOAD_BASE_DELAY_MS)
+      await Promise.resolve()
     })
     expect(screen.getByTestId('locale').textContent).toBe('en')
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(CONFIG_LOAD_BASE_DELAY_MS * 2)
+      await Promise.resolve()
     })
 
-    await waitFor(() => expect(screen.getByTestId('locale').textContent).toBe('zh'))
+    expect(screen.getByTestId('locale').textContent).toBe('zh')
     expect(screen.getByTestId('label').textContent).toBe('语言')
     expect(screen.getByTestId('loading').textContent).toBe('false')
     expect(configClient.getConfig).toHaveBeenCalledTimes(3)
     expect(configClient.saveConfig).not.toHaveBeenCalled()
-
-    vi.useRealTimers()
   })
 
   it('does not schedule another config retry after unmount', async () => {

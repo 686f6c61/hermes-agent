@@ -31,6 +31,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { shouldClaimReloadShortcut } from './preview-reload-shortcut'
 import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { appIconCandidates, resolveAppIcon } from './app-icon'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
@@ -6689,9 +6690,14 @@ function installPreviewShortcut(window) {
     // see #77845), so a menu accelerator would leave Windows and Linux with no
     // way to reload a page at all. ⇧⌘R is left alone — that is `forceReload`,
     // the unconditional whole-window escape hatch.
+    // Only claim the chord when focus is inside a <webview> guest. Otherwise
+    // preventDefault swallows it before xterm (Ctrl+R reverse-i-search) (#96482).
     if (key === 'r' && accel && !input.shift) {
-      event.preventDefault()
-      sendPreviewNavCommand('reload')
+      const focused = electronWebContents.getFocusedWebContents()
+      if (shouldClaimReloadShortcut(focused)) {
+        event.preventDefault()
+        sendPreviewNavCommand('reload')
+      }
     }
   })
 }

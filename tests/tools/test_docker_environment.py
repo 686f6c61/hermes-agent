@@ -172,6 +172,9 @@ def _make_execute_only_env(forward_env=None):
     env._snapshot_ready = True
     env._last_sync_time = None
     env._init_env_args = []
+    env._init_env_client = {}
+    env._init_unset_passthrough_names = ()
+    env._run_client_env = {}
     return env
 
 
@@ -187,7 +190,9 @@ def test_init_env_args_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert "DATABASE_URL=value_from_dotenv" in args_str
+    assert args == ["-e", "DATABASE_URL"]
+    assert "DATABASE_URL=" not in args_str
+    assert env._init_env_client["DATABASE_URL"] == "value_from_dotenv"
 
 
 def test_init_env_args_prefers_shell_env_over_hermes_dotenv(monkeypatch):
@@ -200,8 +205,10 @@ def test_init_env_args_prefers_shell_env_over_hermes_dotenv(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert "DATABASE_URL=value_from_shell" in args_str
+    assert args == ["-e", "DATABASE_URL"]
     assert "value_from_dotenv" not in args_str
+    assert "value_from_shell" not in args_str
+    assert env._init_env_client["DATABASE_URL"] == "value_from_shell"
 
 
 def test_init_env_args_uses_hermes_dotenv_for_empty_shell_env(monkeypatch):
@@ -218,10 +225,11 @@ def test_init_env_args_uses_hermes_dotenv_for_empty_shell_env(monkeypatch):
 
     args = env._build_init_env_args()
 
-    # Assert on the resolved value, not the printed -e flag: the disk value
-    # must win and a blank "MY_SECRET=" flag must never be emitted.
-    assert "MY_SECRET=value_from_dotenv" in args
+    # Values must not appear in argv (world-readable /proc/pid/cmdline).
+    # A blank "MY_SECRET=" flag must never be emitted; the disk value wins.
+    assert args == ["-e", "MY_SECRET"]
     assert "MY_SECRET=" not in args
+    assert env._init_env_client["MY_SECRET"] == "value_from_dotenv"
 
 
 def test_init_env_args_uses_active_profile_for_forwarded_env(monkeypatch):
@@ -239,8 +247,10 @@ def test_init_env_args_uses_active_profile_for_forwarded_env(monkeypatch):
         ss.reset_secret_scope(token)
         ss.set_multiplex_active(False)
 
-    assert "SERVICE_TOKEN=token-for-routed-profile" in args
-    assert "SERVICE_TOKEN=token-for-default" not in args
+    assert args == ["-e", "SERVICE_TOKEN"]
+    assert "token-for-routed-profile" not in args
+    assert "token-for-default" not in args
+    assert env._init_env_client["SERVICE_TOKEN"] == "token-for-routed-profile"
 
 
 def test_init_env_args_omits_missing_scoped_forwarded_env(monkeypatch):
@@ -260,6 +270,7 @@ def test_init_env_args_omits_missing_scoped_forwarded_env(monkeypatch):
 
     assert "SERVICE_TOKEN=token-for-default" not in args
     assert "SERVICE_TOKEN" not in args
+    assert "SERVICE_TOKEN" not in env._init_env_client
 
 
 def test_runtime_exec_tracks_scope_and_clears_missing_value(monkeypatch):
@@ -273,7 +284,7 @@ def test_runtime_exec_tracks_scope_and_clears_missing_value(monkeypatch):
     monkeypatch.setattr(
         docker_env,
         "_popen_bash",
-        lambda cmd, stdin_data=None: calls.append((cmd, stdin_data)) or object(),
+        lambda cmd, stdin_data=None, **kwargs: calls.append((cmd, stdin_data, kwargs)) or object(),
     )
     ss.set_multiplex_active(True)
     token = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-profile-a"})
@@ -289,10 +300,13 @@ def test_runtime_exec_tracks_scope_and_clears_missing_value(monkeypatch):
         ss.reset_secret_scope(token)
         ss.set_multiplex_active(False)
 
-    first_cmd = calls[0][0]
-    assert "SERVICE_TOKEN=token-for-profile-a" in first_cmd
+    first_cmd, _, first_kwargs = calls[0]
+    assert "SERVICE_TOKEN=token-for-profile-a" not in first_cmd
+    assert first_cmd[first_cmd.index("-e") + 1] == "SERVICE_TOKEN"
+    assert first_kwargs["env"]["SERVICE_TOKEN"] == "token-for-profile-a"
     second_cmd = calls[1][0]
     assert "SERVICE_TOKEN=token-for-profile-a" not in second_cmd
+    assert "SERVICE_TOKEN" not in second_cmd
     assert "unset SERVICE_TOKEN" in second_cmd[-1]
 
 
@@ -312,15 +326,19 @@ def test_wrapped_exec_scopes_explicit_forward_env_across_profiles(monkeypatch, t
     monkeypatch.setenv("EXPLICIT_TOKEN", "token-for-default")
     monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {})
 
-    def _run_fake_docker_exec(cmd, stdin_data=None):
+    def _run_fake_docker_exec(cmd, stdin_data=None, **kwargs):
         """Execute the generated docker exec command in a real local bash."""
         container_index = cmd.index(env._container_id)
         child_env = os.environ.copy()
+        client_env = kwargs.get("env") or {}
         index = 2
+        if index < container_index and cmd[index] == "-i":
+            index += 1
         while index < container_index:
             assert cmd[index] == "-e"
-            key, value = cmd[index + 1].split("=", 1)
-            child_env[key] = value
+            key = cmd[index + 1]
+            assert "=" not in key, "docker exec must use name-only -e KEY (#96268)"
+            child_env[key] = client_env[key]
             index += 2
         assert cmd[container_index + 1 : container_index + 3] == ["bash", "-c"]
         return subprocess.Popen(
@@ -370,20 +388,28 @@ def test_docker_env_appears_in_run_command(monkeypatch):
 
     run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
     assert run_calls, "docker run should have been called"
-    run_args = run_calls[0][0]
+    run_args, run_kwargs = run_calls[0]
     run_args_str = " ".join(run_args)
-    assert "SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock" in run_args_str
-    assert "GNUPGHOME=/root/.gnupg" in run_args_str
+    assert "SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock" not in run_args_str
+    assert "GNUPGHOME=/root/.gnupg" not in run_args_str
+    sock_idx = run_args.index("SSH_AUTH_SOCK")
+    assert run_args[sock_idx - 1] == "-e"
+    gnupg_idx = run_args.index("GNUPGHOME")
+    assert run_args[gnupg_idx - 1] == "-e"
+    client_env = run_kwargs["env"]
+    assert client_env["SSH_AUTH_SOCK"] == "/run/user/1000/ssh-agent.sock"
+    assert client_env["GNUPGHOME"] == "/root/.gnupg"
 
 
 def _node_options_from_run(calls):
     run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
     assert run_calls, "docker run should have been called"
-    args = run_calls[0][0]
-    for i, a in enumerate(args):
-        if a == "-e" and i + 1 < len(args) and args[i + 1].startswith("NODE_OPTIONS="):
-            return args[i + 1].split("=", 1)[1]
-    return None
+    args, kwargs = run_calls[0]
+    assert "NODE_OPTIONS=" not in " ".join(args)
+    if "NODE_OPTIONS" in args:
+        assert args[args.index("NODE_OPTIONS") - 1] == "-e"
+    client_env = kwargs.get("env") or {}
+    return client_env.get("NODE_OPTIONS")
 
 
 def test_egress_node_options_overrides_conflicting_ca_flag(monkeypatch):
@@ -417,8 +443,22 @@ def test_forward_env_overrides_docker_env_in_init_args(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert "MY_KEY=dynamic_value" in args_str
-    assert "MY_KEY=static_value" not in args_str
+    assert args == ["-e", "MY_KEY"]
+    assert "dynamic_value" not in args_str
+    assert "static_value" not in args_str
+    assert env._init_env_client["MY_KEY"] == "dynamic_value"
+
+
+def test_docker_env_flags_keep_values_out_of_argv():
+    """#96268: secrets belong in the client env, not docker argv."""
+    flags, client = docker_env._docker_env_flags_and_client(
+        {"GITLAB_TOKEN": "glpat-secret", "EMPTY": ""}
+    )
+    assert flags == ["-e", "EMPTY", "-e", "GITLAB_TOKEN"]
+    assert client == {"EMPTY": "", "GITLAB_TOKEN": "glpat-secret"}
+    joined = " ".join(flags)
+    assert "glpat-secret" not in joined
+    assert "GITLAB_TOKEN=" not in joined
 
 
 def test_normalize_env_dict_filters_invalid_keys():

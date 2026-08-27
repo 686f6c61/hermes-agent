@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 
+import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { getLatestSessionMessages, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
-import { toChatMessages } from '@/lib/chat-messages'
+import { type ChatMessage, toChatMessages } from '@/lib/chat-messages'
 import { knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 import { publishSessionState, sessionTileOwnerRoute, setSessionTileDelegate } from '@/store/session-states'
@@ -10,11 +11,30 @@ import type { SessionResumeResponse } from '@/types/hermes'
 import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
 import { singleFlightSessionResume } from '../../session/hooks/use-prompt-actions/single-flight-resume'
 import { markSessionRecentlyInterrupted, withSessionNotFoundResume } from '../../session/hooks/use-prompt-actions/utils'
-import { resolveSessionOwner } from '../../session/hooks/use-session-actions/utils'
+import {
+  chatMessageArraysEquivalent,
+  reconcileResumeMessages,
+  resolveSessionOwner
+} from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { GatewayRequester } from '../types'
 
 type SessionStateCache = ReturnType<typeof useSessionStateCache>
+
+function mergeTileTranscript(
+  previous: ChatMessage[],
+  prefetchMessages: SessionResumeResponse['messages'] | undefined
+): ChatMessage[] {
+  const prefetched = toChatMessages(prefetchMessages ?? [])
+
+  if (!prefetched.length) {
+    return previous
+  }
+
+  const persisted = graftRefreshedTailOntoBackfill(prefetched, previous)
+
+  return reconcileResumeMessages(persisted, previous)
+}
 
 interface SessionTileDelegateParams {
   archiveSession: (storedSessionId: string) => Promise<unknown>
@@ -165,9 +185,10 @@ export function useSessionTileDelegate({
           }
         )
       },
-      resumeTile: async storedSessionId => {
+      resumeTile: async (storedSessionId, options) => {
         const existing = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
         const cached = existing ? sessionStateByRuntimeIdRef.current.get(existing) : undefined
+        const refreshTranscript = options?.refreshTranscript === true
 
         // Warm path: reuse a live binding — but only when it still carries a
         // transcript (or is mid-turn, where messages legitimately stream in).
@@ -175,7 +196,17 @@ export function useSessionTileDelegate({
         // transcript or a stale pre-reconnect survivor; reusing it painted the
         // post-sleep/wake tile permanently empty. Fall through to a real
         // resume instead — it's idempotent for a genuinely live session.
-        if (existing && cached?.storedSessionId === storedSessionId && (cached.busy || cached.messages.length > 0)) {
+        //
+        // Explicit reopen (`refreshTranscript`) must still REST-merge: the
+        // warm snapshot is whatever the tile last painted, and cron bot-chat
+        // deliveries that landed while the panel's WS was down never arrive
+        // as realtime events (#96183).
+        if (
+          existing &&
+          cached?.storedSessionId === storedSessionId &&
+          (cached.busy || cached.messages.length > 0) &&
+          !refreshTranscript
+        ) {
           publishSessionState(existing, cached)
 
           return existing
@@ -193,8 +224,23 @@ export function useSessionTileDelegate({
             ? { connectionId: owner.connectionId, profile: owner.targetProfile || owner.profile }
             : owner
 
+        const prefetchPromise = getLatestSessionMessages(storedSessionId, restScope).catch(() => null)
+
+        if (existing && cached?.storedSessionId === storedSessionId && (cached.busy || cached.messages.length > 0)) {
+          const prefetch = await prefetchPromise
+          const merged = mergeTileTranscript(cached.messages, prefetch?.messages)
+
+          if (!chatMessageArraysEquivalent(cached.messages, merged)) {
+            updateSessionState(existing, state => ({ ...state, messages: merged }), storedSessionId)
+          } else {
+            publishSessionState(existing, cached)
+          }
+
+          return existing
+        }
+
         const [prefetch, resumed] = await Promise.all([
-          getLatestSessionMessages(storedSessionId, restScope).catch(() => null),
+          prefetchPromise,
           singleFlightSessionResume(storedSessionId, () =>
             requestForSessionProfile<SessionResumeResponse>(owner, requestGateway, 'session.resume', {
               session_id: storedSessionId,
@@ -224,8 +270,7 @@ export function useSessionTileDelegate({
             ...(typeof info?.provider === 'string' ? { provider: info.provider } : {}),
             ...(typeof info?.reasoning_effort === 'string' ? { reasoningEffort: info.reasoning_effort } : {}),
             ...(typeof info?.fast === 'boolean' ? { fast: info.fast } : {}),
-            messages:
-              state.messages.length > 0 ? state.messages : toChatMessages(prefetch?.messages ?? resumed?.messages ?? [])
+            messages: mergeTileTranscript(state.messages, prefetch?.messages ?? resumed?.messages)
           }),
           storedSessionId
         )

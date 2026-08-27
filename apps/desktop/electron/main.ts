@@ -31,7 +31,6 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
-import { shouldClaimReloadShortcut } from './preview-reload-shortcut'
 import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { appIconCandidates, resolveAppIcon } from './app-icon'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
@@ -279,6 +278,7 @@ import { createPoolStopper } from './pool-stop'
 import { poolTouchKeys } from './pool-touch-scope'
 import { createKeepAwake } from './power-save'
 import { PreviewReachRegistry } from './preview-reach'
+import { shouldClaimReloadShortcut } from './preview-reload-shortcut'
 import {
   createPrimaryRemoteConnection,
   FirstRunSetupResetError,

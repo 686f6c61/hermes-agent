@@ -2466,6 +2466,25 @@ def _run_single_child(
     Run a pre-built child agent. Called from within a thread.
     Returns a structured result dict.
     """
+    # Batch submit copies contextvars *after* construction's
+    # delegated_child_context() has exited, so the copy is False.
+    # Re-enter here so every path (batch, single, timeout inner worker)
+    # sees is_delegated_child_context() == True (#96483).
+    from agent.delegation_context import delegated_child_context, is_delegated_child_context
+
+    if not is_delegated_child_context():
+        with delegated_child_context(str(getattr(child, "session_id", "") or "")):
+            return _run_single_child(
+                task_index,
+                goal,
+                child,
+                parent_agent,
+                owner_session_id=owner_session_id,
+                owner_transport=owner_transport,
+                owner_session_record=owner_session_record,
+                **_kwargs,
+            )
+
     child_start = time.monotonic()
 
     # Get the progress callback from the child agent

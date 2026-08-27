@@ -28,32 +28,9 @@ from tools.environments.local import (
     _HERMES_PROVIDER_ENV_BLOCKLIST,
     _is_hermes_internal_secret,
 )
+from tools.environments.docker_env_transport import open_container_env_file
 
 logger = logging.getLogger(__name__)
-
-
-def _docker_env_flags_and_client(values: dict[str, str]) -> tuple[list[str], dict[str, str]]:
-    """Build docker ``-e KEY`` flags and the client-process env holding the values.
-
-    Docker and Podman resolve a valueless ``--env KEY`` from the client
-    process environment. Emitting ``-e KEY=VALUE`` would put secrets in
-    argv, which Linux exposes via ``/proc/<pid>/cmdline`` to every local
-    user. ``/proc/<pid>/environ`` is owner/root only. See #96268.
-    """
-    flags: list[str] = []
-    client: dict[str, str] = {}
-    for key in sorted(values):
-        flags.extend(["-e", key])
-        client[key] = values[key]
-    return flags, client
-
-
-def _subprocess_env_with(overrides: dict[str, str] | None) -> dict[str, str]:
-    """Return ``os.environ`` plus *overrides* for a docker-client subprocess."""
-    env = os.environ.copy()
-    if overrides:
-        env.update(overrides)
-    return env
 
 
 
@@ -1336,7 +1313,11 @@ class DockerEnvironment(BaseEnvironment):
             if not merged_env["NODE_OPTIONS"]:
                 merged_env.pop("NODE_OPTIONS", None)
 
-        env_args, run_client_env = _docker_env_flags_and_client(merged_env)
+        # Values travel in a 0600 --env-file, not argv and not the docker
+        # client's process environment (DOCKER_HOST in docker_env must not
+        # retarget the daemon). Path is generated per spawn so recovery can
+        # rewrite a fresh file; do not bake it into _all_run_args.
+        run_client_env = dict(merged_env)
 
         # Optional: run the container as the host user so files written into
         # bind-mounted dirs (/workspace, /root, docker_volumes entries) are
@@ -1414,7 +1395,6 @@ class DockerEnvironment(BaseEnvironment):
             + resource_args
             + egress_host_args
             + volume_args
-            + env_args
             + validated_extra
         )
         logger.info("Docker run_args: %s", all_run_args)
@@ -1537,6 +1517,7 @@ class DockerEnvironment(BaseEnvironment):
             # images already provide their own /init PID 1, so adding --init
             # there creates two competing inits and breaks startup (#34628).
             init_args = [] if image_uses_s6_init else ["--init"]
+            env_file = open_container_env_file(run_client_env)
             run_cmd = [
                 self._docker_exe, "run", "-d",
                 *init_args,
@@ -1544,6 +1525,7 @@ class DockerEnvironment(BaseEnvironment):
                 *label_args,
                 "-w", cwd,
                 *all_run_args,
+                *(env_file.args() if env_file else []),
                 image,
                 "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
             ]
@@ -1556,7 +1538,6 @@ class DockerEnvironment(BaseEnvironment):
                     timeout=120,  # image pull may take a while
                     check=True,
                     stdin=subprocess.DEVNULL,
-                    env=_subprocess_env_with(run_client_env),
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 # Docker may create the container object before `docker run`
@@ -1576,6 +1557,9 @@ class DockerEnvironment(BaseEnvironment):
                     stdin=subprocess.DEVNULL,
                 )
                 raise
+            finally:
+                if env_file is not None:
+                    env_file.close()
             self._container_id = result.stdout.strip()
             logger.info("Started container %s (%s)", container_name, self._container_id[:12])
 
@@ -1586,10 +1570,10 @@ class DockerEnvironment(BaseEnvironment):
         self.init_session()
 
     def _build_init_env_args(self) -> list[str]:
-        """Build name-only ``-e KEY`` flags for injecting host env at init_session.
+        """Resolve init-session env values. Argv stays empty of secrets.
 
-        Values travel in ``self._init_env_client`` and are applied via the
-        docker-client subprocess ``env=``, not argv. ``export -p`` inside
+        Values live in ``self._init_env_client`` and are written to a
+        per-spawn ``--env-file`` in ``_run_bash``. ``export -p`` inside
         init_session still captures the configured environment.
         """
         passthrough_env, unset_names = self._resolve_passthrough_env()
@@ -1598,10 +1582,8 @@ class DockerEnvironment(BaseEnvironment):
         for name in unset_names:
             exec_env.pop(name, None)
         self._init_unset_passthrough_names = tuple(sorted(unset_names))
-
-        args, client = _docker_env_flags_and_client(exec_env)
-        self._init_env_client = client
-        return args
+        self._init_env_client = exec_env
+        return []
 
     def _build_passthrough_env(self) -> dict[str, str]:
         """Resolve forwarded host variables through the active profile scope."""
@@ -1649,15 +1631,14 @@ class DockerEnvironment(BaseEnvironment):
 
     def _build_runtime_env_args_with_unsets(
         self,
-    ) -> tuple[list[str], tuple[str, ...], dict[str, str]]:
-        """Build runtime ``-e KEY`` flags, unset names, and client-env values."""
+    ) -> tuple[tuple[str, ...], dict[str, str]]:
+        """Return unset names and runtime forwarded values (no argv secrets)."""
         passthrough_env, unset_names = self._resolve_passthrough_env()
-        args, client = _docker_env_flags_and_client(passthrough_env)
-        return args, tuple(sorted(unset_names)), client
+        return tuple(sorted(unset_names)), passthrough_env
 
     def _build_runtime_env_args(self) -> list[str]:
-        """Build only dynamic forwarded ``-e KEY`` flags for a non-login command."""
-        return self._build_runtime_env_args_with_unsets()[0]
+        """Runtime env is injected via ``--env-file``, not argv flags."""
+        return []
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
@@ -1672,16 +1653,15 @@ class DockerEnvironment(BaseEnvironment):
         # injected on every later command because this container can be shared
         # by multiple routed profiles in one gateway process.
         unset_names: tuple[str, ...] = ()
-        client_overrides: dict[str, str] = {}
+        env_values: dict[str, str] = {}
         if login:
-            cmd.extend(self._init_env_args)
-            client_overrides = dict(getattr(self, "_init_env_client", {}) or {})
+            env_values = dict(getattr(self, "_init_env_client", {}) or {})
         elif self._profile_scoped_passthrough:
-            runtime_args, unset_names, runtime_client = (
-                self._build_runtime_env_args_with_unsets()
-            )
-            cmd.extend(runtime_args)
-            client_overrides = runtime_client
+            unset_names, env_values = self._build_runtime_env_args_with_unsets()
+
+        env_file = open_container_env_file(env_values)
+        if env_file is not None:
+            cmd.extend(env_file.args())
 
         if login:
             unset_names = getattr(self, "_init_unset_passthrough_names", ())
@@ -1696,10 +1676,10 @@ class DockerEnvironment(BaseEnvironment):
         else:
             cmd.extend(["bash", "-c", cmd_string])
 
-        popen_kwargs = {}
-        if client_overrides:
-            popen_kwargs["env"] = _subprocess_env_with(client_overrides)
-        return _popen_bash(cmd, stdin_data, **popen_kwargs)
+        proc = _popen_bash(cmd, stdin_data)
+        if env_file is not None:
+            return env_file.wrap_process(proc)
+        return proc
 
     # ------------------------------------------------------------------
     # "No such container" recovery (issue #36266)
@@ -1764,6 +1744,7 @@ class DockerEnvironment(BaseEnvironment):
                 label_args = []
                 for k, v in self._labels.items():
                     label_args.extend(["--label", f"{k}={v}"])
+                env_file = open_container_env_file(getattr(self, "_run_client_env", None))
                 run_cmd = [
                     self._docker_exe, "run", "-d",
                     *init_args,
@@ -1771,14 +1752,18 @@ class DockerEnvironment(BaseEnvironment):
                     *label_args,
                     "-w", self.cwd,
                     *self._all_run_args,
+                    *(env_file.args() if env_file else []),
                     self._image,
                     "sleep", "infinity",
                 ]
-                result = subprocess.run(
-                    run_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120, check=True,
-                    stdin=subprocess.DEVNULL,
-                    env=_subprocess_env_with(getattr(self, "_run_client_env", None)),
-                )
+                try:
+                    result = subprocess.run(
+                        run_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120, check=True,
+                        stdin=subprocess.DEVNULL,
+                    )
+                finally:
+                    if env_file is not None:
+                        env_file.close()
                 self._container_id = result.stdout.strip()
                 self._container_name = new_name
                 logger.info(

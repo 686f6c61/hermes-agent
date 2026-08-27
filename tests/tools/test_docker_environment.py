@@ -1,11 +1,25 @@
 import logging
 import os
 from io import StringIO
+from pathlib import Path
 import subprocess
 
 import pytest
 
 from tools.environments import docker as docker_env
+
+
+def _capture_env_file(cmd, kwargs):
+    """Snapshot --env-file contents before the caller unlinks the temp file."""
+    captured = dict(kwargs)
+    if isinstance(cmd, list) and "--env-file" in cmd:
+        idx = cmd.index("--env-file")
+        if idx + 1 < len(cmd):
+            try:
+                captured["_env_file_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+            except OSError:
+                captured["_env_file_text"] = ""
+    return captured
 
 
 def _mock_subprocess_run(monkeypatch):
@@ -22,7 +36,8 @@ def _mock_subprocess_run(monkeypatch):
     calls = []
 
     def _run(cmd, **kwargs):
-        calls.append((list(cmd) if isinstance(cmd, list) else cmd, kwargs))
+        captured = _capture_env_file(cmd, kwargs)
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, captured))
         if isinstance(cmd, list) and len(cmd) >= 2:
             if cmd[1] == "version":
                 return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
@@ -190,7 +205,7 @@ def test_init_env_args_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert args == ["-e", "DATABASE_URL"]
+    assert "DATABASE_URL" not in args
     assert "DATABASE_URL=" not in args_str
     assert env._init_env_client["DATABASE_URL"] == "value_from_dotenv"
 
@@ -205,7 +220,7 @@ def test_init_env_args_prefers_shell_env_over_hermes_dotenv(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert args == ["-e", "DATABASE_URL"]
+    assert "DATABASE_URL" not in args
     assert "value_from_dotenv" not in args_str
     assert "value_from_shell" not in args_str
     assert env._init_env_client["DATABASE_URL"] == "value_from_shell"
@@ -227,7 +242,7 @@ def test_init_env_args_uses_hermes_dotenv_for_empty_shell_env(monkeypatch):
 
     # Values must not appear in argv (world-readable /proc/pid/cmdline).
     # A blank "MY_SECRET=" flag must never be emitted; the disk value wins.
-    assert args == ["-e", "MY_SECRET"]
+    assert "MY_SECRET" not in args
     assert "MY_SECRET=" not in args
     assert env._init_env_client["MY_SECRET"] == "value_from_dotenv"
 
@@ -247,7 +262,7 @@ def test_init_env_args_uses_active_profile_for_forwarded_env(monkeypatch):
         ss.reset_secret_scope(token)
         ss.set_multiplex_active(False)
 
-    assert args == ["-e", "SERVICE_TOKEN"]
+    assert "SERVICE_TOKEN" not in args
     assert "token-for-routed-profile" not in args
     assert "token-for-default" not in args
     assert env._init_env_client["SERVICE_TOKEN"] == "token-for-routed-profile"
@@ -281,11 +296,14 @@ def test_runtime_exec_tracks_scope_and_clears_missing_value(monkeypatch):
     monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
     monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {})
     calls = []
-    monkeypatch.setattr(
-        docker_env,
-        "_popen_bash",
-        lambda cmd, stdin_data=None, **kwargs: calls.append((cmd, stdin_data, kwargs)) or object(),
-    )
+    def _popen(cmd, stdin_data=None, **kwargs):
+        text = ""
+        if "--env-file" in cmd:
+            text = Path(cmd[cmd.index("--env-file") + 1]).read_text(encoding="utf-8")
+        calls.append((cmd, stdin_data, kwargs, text))
+        return object()
+
+    monkeypatch.setattr(docker_env, "_popen_bash", _popen)
     ss.set_multiplex_active(True)
     token = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-profile-a"})
     try:
@@ -300,10 +318,11 @@ def test_runtime_exec_tracks_scope_and_clears_missing_value(monkeypatch):
         ss.reset_secret_scope(token)
         ss.set_multiplex_active(False)
 
-    first_cmd, _, first_kwargs = calls[0]
+    first_cmd, _, first_kwargs, first_text = calls[0]
     assert "SERVICE_TOKEN=token-for-profile-a" not in first_cmd
-    assert first_cmd[first_cmd.index("-e") + 1] == "SERVICE_TOKEN"
-    assert first_kwargs["env"]["SERVICE_TOKEN"] == "token-for-profile-a"
+    assert "--env-file" in first_cmd
+    assert "env" not in first_kwargs
+    assert "SERVICE_TOKEN=token-for-profile-a" in first_text
     second_cmd = calls[1][0]
     assert "SERVICE_TOKEN=token-for-profile-a" not in second_cmd
     assert "SERVICE_TOKEN" not in second_cmd
@@ -330,16 +349,20 @@ def test_wrapped_exec_scopes_explicit_forward_env_across_profiles(monkeypatch, t
         """Execute the generated docker exec command in a real local bash."""
         container_index = cmd.index(env._container_id)
         child_env = os.environ.copy()
-        client_env = kwargs.get("env") or {}
+        assert kwargs.get("env") in (None, {}), "container values must not enter the docker-client env"
         index = 2
         if index < container_index and cmd[index] == "-i":
             index += 1
         while index < container_index:
-            assert cmd[index] == "-e"
-            key = cmd[index + 1]
-            assert "=" not in key, "docker exec must use name-only -e KEY (#96268)"
-            child_env[key] = client_env[key]
-            index += 2
+            if cmd[index] == "--env-file":
+                for line in Path(cmd[index + 1]).read_text(encoding="utf-8").splitlines():
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    child_env[key] = value
+                index += 2
+                continue
+            raise AssertionError(f"unexpected docker exec flag {cmd[index]!r}")
         assert cmd[container_index + 1 : container_index + 3] == ["bash", "-c"]
         return subprocess.Popen(
             ["bash", "-c", cmd[container_index + 3]],
@@ -380,7 +403,7 @@ def test_wrapped_exec_scopes_explicit_forward_env_across_profiles(monkeypatch, t
 
 
 def test_docker_env_appears_in_run_command(monkeypatch):
-    """Explicit docker_env values should be passed via -e at docker run time."""
+    """Explicit docker_env values should reach the container via --env-file."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     calls = _mock_subprocess_run(monkeypatch)
 
@@ -392,13 +415,97 @@ def test_docker_env_appears_in_run_command(monkeypatch):
     run_args_str = " ".join(run_args)
     assert "SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock" not in run_args_str
     assert "GNUPGHOME=/root/.gnupg" not in run_args_str
-    sock_idx = run_args.index("SSH_AUTH_SOCK")
-    assert run_args[sock_idx - 1] == "-e"
-    gnupg_idx = run_args.index("GNUPGHOME")
-    assert run_args[gnupg_idx - 1] == "-e"
-    client_env = run_kwargs["env"]
-    assert client_env["SSH_AUTH_SOCK"] == "/run/user/1000/ssh-agent.sock"
-    assert client_env["GNUPGHOME"] == "/root/.gnupg"
+    assert "--env-file" in run_args
+    text = run_kwargs["_env_file_text"]
+    assert "SSH_AUTH_SOCK=/run/user/1000/ssh-agent.sock" in text
+    assert "GNUPGHOME=/root/.gnupg" in text
+    assert "env" not in run_kwargs
+
+
+def test_container_docker_host_does_not_retarget_client(monkeypatch):
+    """#96316 review: docker_env.DOCKER_HOST must not change the CLI daemon."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(env={
+        "DOCKER_HOST": "tcp://evil:2375",
+        "DOCKER_CONTEXT": "other",
+        "GITLAB_TOKEN": "glpat-secret",
+    })
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    cmd, kwargs = run_calls[0]
+    joined = " ".join(cmd)
+    assert "tcp://evil:2375" not in joined
+    assert "glpat-secret" not in joined
+    assert "--env-file" in cmd
+    text = kwargs["_env_file_text"]
+    assert "DOCKER_HOST=tcp://evil:2375" in text
+    assert "DOCKER_CONTEXT=other" in text
+    assert "GITLAB_TOKEN=glpat-secret" in text
+    assert "env" not in kwargs
+
+
+def test_exec_env_file_keeps_client_docker_host(monkeypatch):
+    env = _make_execute_only_env()
+    env._init_env_client = {
+        "DOCKER_HOST": "tcp://evil:2375",
+        "GITLAB_TOKEN": "tok",
+    }
+    calls = []
+
+    def _popen(cmd, stdin_data=None, **kwargs):
+        text = ""
+        if "--env-file" in cmd:
+            text = Path(cmd[cmd.index("--env-file") + 1]).read_text(encoding="utf-8")
+        calls.append((cmd, kwargs, text))
+        return object()
+
+    monkeypatch.setattr(docker_env, "_popen_bash", _popen)
+    env._run_bash("true", login=True)
+    cmd, kwargs, text = calls[0]
+    assert kwargs.get("env") in (None, {})
+    assert "tcp://evil:2375" not in " ".join(cmd)
+    assert "tok" not in " ".join(cmd)
+    assert "DOCKER_HOST=tcp://evil:2375" in text
+    assert "GITLAB_TOKEN=tok" in text
+
+
+def test_recovery_run_uses_env_file_not_client_env(monkeypatch):
+    env = docker_env.DockerEnvironment.__new__(docker_env.DockerEnvironment)
+    env._container_id = None
+    env._image = "python:3.11"
+    env._image_uses_s6_init = False
+    env.cwd = "/root"
+    env._labels = {"hermes-task-id": "t", "hermes-profile": "p"}
+    env._all_run_args = []
+    env._run_client_env = {
+        "DOCKER_HOST": "tcp://evil:2375",
+        "GITLAB_TOKEN": "tok",
+    }
+    env._docker_exe = "/usr/bin/docker"
+    env._find_reusable_container = lambda *a, **k: None
+    env.init_session = lambda: None
+    env._snapshot_ready = False
+    calls = []
+
+    def _run(cmd, **kwargs):
+        captured = _capture_env_file(cmd, kwargs)
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, captured))
+        return subprocess.CompletedProcess(cmd, 0, stdout="new-id\n", stderr="")
+
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+    assert env._recreate_container() is True
+    run_calls = [c for c in calls if isinstance(c[0], list) and c[0][1] == "run"]
+    assert run_calls
+    cmd, kwargs = run_calls[0]
+    assert "tcp://evil:2375" not in " ".join(cmd)
+    assert "tok" not in " ".join(cmd)
+    assert "DOCKER_HOST=tcp://evil:2375" in kwargs["_env_file_text"]
+    assert "GITLAB_TOKEN=tok" in kwargs["_env_file_text"]
+    assert "env" not in kwargs
 
 
 def _node_options_from_run(calls):
@@ -406,10 +513,11 @@ def _node_options_from_run(calls):
     assert run_calls, "docker run should have been called"
     args, kwargs = run_calls[0]
     assert "NODE_OPTIONS=" not in " ".join(args)
-    if "NODE_OPTIONS" in args:
-        assert args[args.index("NODE_OPTIONS") - 1] == "-e"
-    client_env = kwargs.get("env") or {}
-    return client_env.get("NODE_OPTIONS")
+    text = kwargs.get("_env_file_text") or ""
+    for line in text.splitlines():
+        if line.startswith("NODE_OPTIONS="):
+            return line.split("=", 1)[1]
+    return None
 
 
 def test_egress_node_options_overrides_conflicting_ca_flag(monkeypatch):
@@ -443,22 +551,10 @@ def test_forward_env_overrides_docker_env_in_init_args(monkeypatch):
     args = env._build_init_env_args()
     args_str = " ".join(args)
 
-    assert args == ["-e", "MY_KEY"]
+    assert "MY_KEY" not in args
     assert "dynamic_value" not in args_str
     assert "static_value" not in args_str
     assert env._init_env_client["MY_KEY"] == "dynamic_value"
-
-
-def test_docker_env_flags_keep_values_out_of_argv():
-    """#96268: secrets belong in the client env, not docker argv."""
-    flags, client = docker_env._docker_env_flags_and_client(
-        {"GITLAB_TOKEN": "glpat-secret", "EMPTY": ""}
-    )
-    assert flags == ["-e", "EMPTY", "-e", "GITLAB_TOKEN"]
-    assert client == {"EMPTY": "", "GITLAB_TOKEN": "glpat-secret"}
-    joined = " ".join(flags)
-    assert "glpat-secret" not in joined
-    assert "GITLAB_TOKEN=" not in joined
 
 
 def test_normalize_env_dict_filters_invalid_keys():

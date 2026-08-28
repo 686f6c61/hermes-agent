@@ -17,8 +17,8 @@
 
 import { getOlderSessionMessages, getSessionMessages } from '@/hermes'
 import { type ChatMessage, toChatMessages } from '@/lib/chat-messages'
-import type { SessionMessage } from '@/types/hermes'
 import { recordTranscriptBackfillPage, type TranscriptProfileScope, transcriptTailState } from '@/store/transcript-tail'
+import type { SessionMessage } from '@/types/hermes'
 
 /** Compaction projection can stamp the session's opening user as hidden. */
 export function unhideOpeningUserRows(messages: SessionMessage[]): SessionMessage[] {

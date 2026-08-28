@@ -395,13 +395,10 @@ export function useModelControls({
             // bail (with a notice) if the live state no longer matches the
             // snapshot this prompt was created for.
             isStale: () =>
-              touchesPrimary
-                ? $activeSessionId.get() !== liveSessionId ||
-                  $currentModel.get() !== prevModel ||
-                  $currentProvider.get() !== prevProvider
-                : !liveSessionId ||
-                  $sessionStates.get()[liveSessionId]?.model !== prevModel ||
-                  $sessionStates.get()[liveSessionId]?.provider !== prevProvider,
+              $activeSessionId.get() !== liveSessionId ||
+              !liveSessionId ||
+              $sessionStates.get()[liveSessionId]?.model !== (prevSlice?.model ?? prevModel) ||
+              $sessionStates.get()[liveSessionId]?.provider !== (prevSlice?.provider ?? prevProvider),
             model: selection.model,
             repaint: () => {
               paintSelection()

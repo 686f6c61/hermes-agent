@@ -1660,23 +1660,30 @@ class DockerEnvironment(BaseEnvironment):
             unset_names, env_values = self._build_runtime_env_args_with_unsets()
 
         env_file = open_container_env_file(env_values)
-        if env_file is not None:
-            cmd.extend(env_file.args())
+        try:
+            if env_file is not None:
+                cmd.extend(env_file.args())
 
-        if login:
-            unset_names = getattr(self, "_init_unset_passthrough_names", ())
-        if unset_names:
-            quoted_names = " ".join(shlex.quote(name) for name in unset_names)
-            cmd_string = f"unset {quoted_names} 2>/dev/null || true\n{cmd_string}"
+            if login:
+                unset_names = getattr(self, "_init_unset_passthrough_names", ())
+            if unset_names:
+                quoted_names = " ".join(shlex.quote(name) for name in unset_names)
+                cmd_string = f"unset {quoted_names} 2>/dev/null || true\n{cmd_string}"
 
-        cmd.extend([self._container_id])
+            cmd.extend([self._container_id])
 
-        if login:
-            cmd.extend(["bash", "-l", "-c", cmd_string])
-        else:
-            cmd.extend(["bash", "-c", cmd_string])
+            if login:
+                cmd.extend(["bash", "-l", "-c", cmd_string])
+            else:
+                cmd.extend(["bash", "-c", cmd_string])
 
-        proc = _popen_bash(cmd, stdin_data)
+            proc = _popen_bash(cmd, stdin_data)
+        except BaseException:
+            # Popen can fail after the 0600 env-file exists; unlink before
+            # the exception leaves the secret on disk (#96316 review).
+            if env_file is not None:
+                env_file.close()
+            raise
         if env_file is not None:
             return env_file.wrap_process(proc)
         return proc

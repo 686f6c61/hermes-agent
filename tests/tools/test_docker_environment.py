@@ -473,6 +473,37 @@ def test_exec_env_file_keeps_client_docker_host(monkeypatch):
     assert "GITLAB_TOKEN=tok" in text
 
 
+def test_exec_spawn_failure_unlinks_env_file(monkeypatch, tmp_path):
+    """If docker exec Popen raises, the 0600 env-file must not remain (#96316)."""
+    env = _make_execute_only_env()
+    env._init_env_client = {"GITLAB_TOKEN": "glpat-secret"}
+    opened = []
+    real_open = docker_env.open_container_env_file
+
+    def _open(values, directory=None, **kwargs):
+        handle = real_open(values, directory=str(tmp_path), **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(docker_env, "open_container_env_file", _open)
+
+    def _boom(*_a, **_k):
+        raise OSError("docker missing")
+
+    monkeypatch.setattr(docker_env, "_popen_bash", _boom)
+
+    with pytest.raises(OSError, match="docker missing"):
+        env._run_bash("true", login=True)
+
+    assert opened, "env file should have been created before spawn failed"
+    handle = opened[0]
+    assert handle is not None
+    assert handle._closed is True
+    assert not Path(handle.path).exists()
+    leftovers = list(tmp_path.glob("hermes-docker-env-*"))
+    assert leftovers == []
+
+
 def test_recovery_run_uses_env_file_not_client_env(monkeypatch):
     env = docker_env.DockerEnvironment.__new__(docker_env.DockerEnvironment)
     env._container_id = None

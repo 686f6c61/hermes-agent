@@ -20,7 +20,7 @@ import {
   setCurrentModelSource,
   setCurrentProvider
 } from '@/store/session'
-import { $sessionStates, publishSessionState, sessionTileDelegate } from '@/store/session-states'
+import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 interface ModelControlsOptions {
@@ -194,11 +194,10 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
       const liveSessionId = 'sessionId' in selection ? (selection.sessionId ?? null) : primaryRuntimeId
       const touchesPrimary = !liveSessionId || liveSessionId === primaryRuntimeId
 
-      const prevModel = touchesPrimary ? $currentModel.get() : ($sessionStates.get()[liveSessionId!]?.model ?? '')
+      const prevSlice = liveSessionId ? $sessionStates.get()[liveSessionId] : undefined
+      const prevModel = touchesPrimary ? $currentModel.get() : (prevSlice?.model ?? '')
 
-      const prevProvider = touchesPrimary
-        ? $currentProvider.get()
-        : ($sessionStates.get()[liveSessionId!]?.provider ?? '')
+      const prevProvider = touchesPrimary ? $currentProvider.get() : (prevSlice?.provider ?? '')
 
       const prevSource = getCurrentModelSource()
       const liveGatewayProfile = $activeGatewayProfile.get()
@@ -206,30 +205,18 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
       // PRIMARY_SESSION_VIEW treats `$sessionStates[runtimeId]` as
       // authoritative for model/provider once a runtime exists. Painting only
       // the composer atoms left the visible selector on the previous pair.
+      // Writes go through the session-tile delegate (updateSessionState) so
+      // the wiring cache, $sessionStates, and the focused view stay aligned.
       const paintLiveSlice = (model: string, provider: string) => {
         if (!liveSessionId) {
           return
         }
 
-        const delegate = sessionTileDelegate()
-
-        if (delegate) {
-          delegate.updateSession(liveSessionId, state => ({
-            ...state,
-            model,
-            provider
-          }))
-
-          return
-        }
-
-        const current = $sessionStates.get()[liveSessionId]
-
-        if (!current) {
-          return
-        }
-
-        publishSessionState(liveSessionId, { ...current, model, provider })
+        sessionTileDelegate()?.updateSession(liveSessionId, state => ({
+          ...state,
+          model,
+          provider
+        }))
       }
 
       const paintSelection = () => {
@@ -253,7 +240,7 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
           setCurrentModelSource(prevSource)
         }
 
-        paintLiveSlice(prevModel, prevProvider)
+        paintLiveSlice(prevSlice?.model ?? prevModel, prevSlice?.provider ?? prevProvider)
         cacheSelection(prevProvider, prevModel)
       }
 
@@ -320,13 +307,10 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
             // not clobber the newer choice: bail if the live state no longer
             // matches the snapshot this notification was created for.
             isStale: () =>
-              touchesPrimary
-                ? $activeSessionId.get() !== liveSessionId ||
-                  $currentModel.get() !== prevModel ||
-                  $currentProvider.get() !== prevProvider
-                : !liveSessionId ||
-                  $sessionStates.get()[liveSessionId]?.model !== prevModel ||
-                  $sessionStates.get()[liveSessionId]?.provider !== prevProvider,
+              $activeSessionId.get() !== liveSessionId ||
+              !liveSessionId ||
+              $sessionStates.get()[liveSessionId]?.model !== (prevSlice?.model ?? prevModel) ||
+              $sessionStates.get()[liveSessionId]?.provider !== (prevSlice?.provider ?? prevProvider),
             repaint: () => {
               paintSelection()
               cacheSelection(selection.provider, selection.model)

@@ -2257,13 +2257,20 @@ def _git_env() -> dict:
     ``git stash push`` has been observed to die with SIGPIPE when a pager or
     rewritten-history checkout leaves the pipe reader gone (#96958). Forcing
     a non-pager, non-prompt environment keeps the captured-output path
-    deterministic.
+    deterministic. Built through ``build_subprocess_env`` so this is not a
+    raw ``os.environ.copy()`` spawn site.
     """
-    env = os.environ.copy()
-    env["GIT_PAGER"] = "cat"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env.setdefault("PAGER", "cat")
-    return env
+    from tools.environments.local import build_subprocess_env
+
+    return build_subprocess_env(
+        scrub_secrets=False,
+        inherit_profile_home=False,
+        extra={
+            "GIT_PAGER": "cat",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PAGER": "cat",
+        },
+    )
 
 
 def _ensure_shared_git_history(git_cmd: list[str], cwd: Path, branch: str) -> None:

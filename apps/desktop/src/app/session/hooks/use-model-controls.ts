@@ -20,7 +20,7 @@ import {
   setCurrentModelSource,
   setCurrentProvider
 } from '@/store/session'
-import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
+import { $sessionStates, publishSessionState, sessionTileDelegate } from '@/store/session-states'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 interface ModelControlsOptions {
@@ -203,19 +203,43 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
       const prevSource = getCurrentModelSource()
       const liveGatewayProfile = $activeGatewayProfile.get()
 
+      // PRIMARY_SESSION_VIEW treats `$sessionStates[runtimeId]` as
+      // authoritative for model/provider once a runtime exists. Painting only
+      // the composer atoms left the visible selector on the previous pair.
+      const paintLiveSlice = (model: string, provider: string) => {
+        if (!liveSessionId) {
+          return
+        }
+
+        const delegate = sessionTileDelegate()
+
+        if (delegate) {
+          delegate.updateSession(liveSessionId, state => ({
+            ...state,
+            model,
+            provider
+          }))
+
+          return
+        }
+
+        const current = $sessionStates.get()[liveSessionId]
+
+        if (!current) {
+          return
+        }
+
+        publishSessionState(liveSessionId, { ...current, model, provider })
+      }
+
       const paintSelection = () => {
         if (touchesPrimary) {
           setCurrentModel(selection.model)
           setCurrentProvider(selection.provider)
           markComposerSelectionManual()
-        } else if (liveSessionId) {
-          // Optimistic tile paint — session.info will confirm; rollback on error.
-          sessionTileDelegate()?.updateSession(liveSessionId, state => ({
-            ...state,
-            model: selection.model,
-            provider: selection.provider
-          }))
         }
+
+        paintLiveSlice(selection.model, selection.provider)
       }
 
       const cacheSelection = (provider: string, model: string) => {
@@ -227,14 +251,9 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
           setCurrentModel(prevModel)
           setCurrentProvider(prevProvider)
           setCurrentModelSource(prevSource)
-        } else if (liveSessionId) {
-          sessionTileDelegate()?.updateSession(liveSessionId, state => ({
-            ...state,
-            model: prevModel,
-            provider: prevProvider
-          }))
         }
 
+        paintLiveSlice(prevModel, prevProvider)
         cacheSelection(prevProvider, prevModel)
       }
 

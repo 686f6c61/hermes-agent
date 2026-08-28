@@ -43,6 +43,10 @@ _AUTH_SCHEME_VALUE_RE = re.compile(
     r"\b((?:Bearer|Basic|Token|Digest)\s+)([^\s\"']+)",
     re.IGNORECASE,
 )
+_AUTH_SCHEME_PREFIX_RE = re.compile(
+    r"^(?:Bearer|Basic|Token|Digest)\s+",
+    re.IGNORECASE,
+)
 
 
 def redact_mcp_probe_text(text: object) -> str:
@@ -60,6 +64,46 @@ def redact_mcp_probe_text(text: object) -> str:
     from agent.redact import redact_sensitive_text
 
     return redact_sensitive_text(redacted, force=True)
+
+
+def _header_value_is_only_env_refs(value: str) -> bool:
+    """True when every non-scheme span in *value* is a ``${VAR}`` reference."""
+    leftover = _ENV_VAR_PATTERN.sub("", value)
+    leftover = _AUTH_SCHEME_PREFIX_RE.sub("", leftover)
+    return leftover.strip(" \t;,") == ""
+
+
+def redact_mcp_header_display(name: str, value: object) -> str:
+    """Fail-closed CLI display for a credential-shaped MCP header.
+
+    A value that is only ``${ENV}`` references (optionally with an auth scheme
+    word) may be shown — it carries no secret. Anything else, including opaque
+    API keys and mixed template+literal strings, is replaced with ``***``.
+    ``name`` stays paired with the value so callers cannot drop the header
+    identity before this policy runs.
+    """
+    raw = "" if value is None else str(value)
+    if raw and _header_value_is_only_env_refs(raw):
+        return raw
+    # Pair name+value for the generic redactor, then still fail closed — an
+    # opaque token with no recognized scheme must not print.
+    redact_mcp_probe_text(f"{name}: {raw}")
+    return "***"
+
+
+def _redact_probe_exception(exc: BaseException) -> Exception:
+    """Return a raise-able exception whose ``str()`` is safe to print."""
+    root = _unwrap_exception_group(exc)
+    safe = redact_mcp_probe_text(root)
+    if safe == str(root) and isinstance(root, Exception):
+        return root
+    try:
+        rebuilt = type(root)(safe)
+        if str(rebuilt) == safe and isinstance(rebuilt, Exception):
+            return rebuilt
+    except Exception:
+        pass
+    return RuntimeError(safe)
 
 
 _MCP_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -423,7 +467,7 @@ def _probe_single_server(
     try:
         _run_on_mcp_loop(_probe(), timeout=connect_timeout + 10)
     except BaseException as exc:
-        raise _unwrap_exception_group(exc) from None
+        raise _redact_probe_exception(exc) from None
     finally:
         _stop_mcp_loop_if_idle()
 
@@ -594,7 +638,7 @@ def cmd_mcp_add(args):
     try:
         tools = _probe_single_server(name, server_config)
     except Exception as exc:
-        _error(f"Failed to connect: {exc}")
+        _error(f"Failed to connect: {redact_mcp_probe_text(exc)}")
         if _confirm("Save config anyway (you can test later)?", default=False):
             server_config["enabled"] = False
             if _save_mcp_server(name, server_config):
@@ -803,12 +847,9 @@ def cmd_mcp_test(args):
     elif headers:
         for k, v in headers.items():
             if isinstance(v, str) and ("key" in k.lower() or "auth" in k.lower()):
-                # Keep ${ENV_VAR} templates as the display form. Never interpolate
-                # a resolved secret into the CLI — first4/last4 is still reusable.
-                if _ENV_VAR_PATTERN.search(v):
-                    print(f"    {k}: {v}")
-                else:
-                    print(f"    {k}: {redact_mcp_probe_text(v)}")
+                # Keep header identity with the value. A ${ENV} substring is
+                # not proof the rest of the header is non-secret.
+                print(f"    {k}: {redact_mcp_header_display(k, v)}")
     else:
         _info("Auth: none")
 
@@ -931,7 +972,7 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
             )
         except Exception:
             humanized = None
-        _error(f"Authentication failed: {humanized or exc}")
+        _error(f"Authentication failed: {redact_mcp_probe_text(humanized or exc)}")
         return False
 
 
@@ -1037,7 +1078,7 @@ def cmd_mcp_configure(args):
     try:
         all_tools = _probe_single_server(name, cfg)
     except Exception as exc:
-        _error(f"Failed to connect: {exc}")
+        _error(f"Failed to connect: {redact_mcp_probe_text(exc)}")
         return
 
     if not all_tools:

@@ -32,6 +32,35 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# MCP test/dashboard surfaces must not fingerprint Authorization values
+# (firstN/lastN is a reusable credential fragment). Replace the credential
+# entirely, then run the generic redactor as defense in depth.
+_AUTH_HEADER_VALUE_RE = re.compile(
+    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)([^\s\"']+)",
+    re.IGNORECASE,
+)
+_AUTH_SCHEME_VALUE_RE = re.compile(
+    r"\b((?:Bearer|Basic|Token|Digest)\s+)([^\s\"']+)",
+    re.IGNORECASE,
+)
+
+
+def redact_mcp_probe_text(text: object) -> str:
+    """Fully redact MCP probe/display strings before they leave the process.
+
+    Authorization/Bearer credentials become ``***`` (no prefix/suffix). The
+    generic secret redactor then runs with ``force=True`` so other credential
+    shapes in the same exception still cannot leak.
+    """
+    raw = "" if text is None else str(text)
+    if not raw:
+        return raw
+    redacted = _AUTH_HEADER_VALUE_RE.sub(lambda m: f"{m.group(1)}***", raw)
+    redacted = _AUTH_SCHEME_VALUE_RE.sub(lambda m: f"{m.group(1)}***", redacted)
+    from agent.redact import redact_sensitive_text
+
+    return redact_sensitive_text(redacted, force=True)
+
 
 _MCP_PRESETS: Dict[str, Dict[str, Any]] = {
     "codex": {
@@ -774,13 +803,12 @@ def cmd_mcp_test(args):
     elif headers:
         for k, v in headers.items():
             if isinstance(v, str) and ("key" in k.lower() or "auth" in k.lower()):
-                # Mask the value (accepts ${VAR} and Cursor-style ${env:VAR})
-                resolved = _ENV_VAR_PATTERN.sub(lambda m: os.getenv(_env_ref_name(m.group(1)), ""), v)
-                if len(resolved) > 8:
-                    masked = resolved[:4] + "***" + resolved[-4:]
+                # Keep ${ENV_VAR} templates as the display form. Never interpolate
+                # a resolved secret into the CLI — first4/last4 is still reusable.
+                if _ENV_VAR_PATTERN.search(v):
+                    print(f"    {k}: {v}")
                 else:
-                    masked = "***"
-                print(f"    {k}: {masked}")
+                    print(f"    {k}: {redact_mcp_probe_text(v)}")
     else:
         _info("Auth: none")
 
@@ -791,7 +819,7 @@ def cmd_mcp_test(args):
         elapsed_ms = (time.monotonic() - start) * 1000
     except Exception as exc:
         elapsed_ms = (time.monotonic() - start) * 1000
-        _error(f"Connection failed ({elapsed_ms:.0f}ms): {exc}")
+        _error(f"Connection failed ({elapsed_ms:.0f}ms): {redact_mcp_probe_text(exc)}")
         return
 
     _success(f"Connected ({elapsed_ms:.0f}ms)")

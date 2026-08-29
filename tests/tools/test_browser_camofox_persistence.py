@@ -102,7 +102,7 @@ class TestManagedPersistenceMode:
         requests_seen = []
 
         def _capture_post(url, json=None, timeout=None, headers=None):
-            requests_seen.append(json)
+            requests_seen.append({"url": url, "json": json})
             return _mock_response(
                 json_data={"tabId": f"tab-{len(requests_seen)}", "url": "https://example.com"}
             )
@@ -118,9 +118,15 @@ class TestManagedPersistenceMode:
 
         assert first["success"] is True
         assert second["success"] is True
-        tab_requests = [req for req in requests_seen if "userId" in req]
-        assert len(tab_requests) == 2
-        assert tab_requests[0]["userId"] == tab_requests[1]["userId"]
+        create_requests = [
+            req for req in requests_seen if str(req["url"]).endswith("/tabs")
+        ]
+        navigate_requests = [
+            req for req in requests_seen if str(req["url"]).endswith("/navigate")
+        ]
+        assert len(create_requests) == 2
+        assert len(navigate_requests) == 2
+        assert create_requests[0]["json"]["userId"] == create_requests[1]["json"]["userId"]
 
 
 class TestConfiguredCamofoxIdentity:
@@ -162,14 +168,17 @@ class TestConfiguredCamofoxIdentity:
                 result = json.loads(
                     camofox_navigate("https://example.com", task_id="scoped-precedence")
                 )
-                request_url = mock_post.call_args.args[0]
-                request_body = mock_post.call_args.kwargs["json"]
+                calls = mock_post.call_args_list
         finally:
             secret_scope.reset_secret_scope(token)
             secret_scope.set_multiplex_active(False)
 
         assert result["success"] is True
-        assert request_url == "https://secondary.example/tabs"
+        urls = [call.args[0] for call in calls]
+        assert "https://secondary.example/tabs" in urls
+        assert any(url.endswith("/tabs/scoped-tab/navigate") for url in urls)
+        create = next(call for call in calls if call.args[0].endswith("/tabs"))
+        request_body = create.kwargs["json"]
         assert request_body["userId"] == "secondary-scope-user"
         assert request_body["listItemId"] == "secondary-scope-session"
 

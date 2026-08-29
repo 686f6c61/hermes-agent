@@ -390,16 +390,33 @@ export function useModelControls({
             confirmMessage: result.confirm_message,
             failureMessage: copy.modelSwitchFailed,
             finish: finishSwitch,
-            // Staleness guard — the session or model can move on while the
-            // dialog is open. Answering it must not clobber the newer choice:
-            // bail (with a notice) if the live state no longer matches the
-            // snapshot this prompt was created for.
-            isStale: () =>
-              $activeSessionId.get() !== liveSessionId ||
-              !liveSessionId ||
-              $sessionStates.get()[liveSessionId]?.model !== (prevSlice?.model ?? prevModel) ||
-              $sessionStates.get()[liveSessionId]?.provider !== (prevSlice?.provider ?? prevProvider),
-            model: selection.model,
+            // Staleness guard — the warning can linger while the user picks
+            // a different model or switches sessions. Clicking Confirm must
+            // not clobber the newer choice: bail if the live state no longer
+            // matches the snapshot this notification was created for.
+            isStale: () => {
+              if ($activeSessionId.get() !== liveSessionId) {
+                return true
+              }
+
+              if (!liveSessionId) {
+                return $currentModel.get() !== prevModel || $currentProvider.get() !== prevProvider
+              }
+
+              const live = $sessionStates.get()[liveSessionId]
+
+              // No slice yet (fresh runtime / tests without a cache entry):
+              // compare composer atoms, the same snapshot the confirm toast
+              // rolled back to.
+              if (!live) {
+                return $currentModel.get() !== prevModel || $currentProvider.get() !== prevProvider
+              }
+
+              return (
+                live.model !== (prevSlice?.model ?? prevModel) ||
+                live.provider !== (prevSlice?.provider ?? prevProvider)
+              )
+            },
             repaint: () => {
               paintSelection()
               cacheSelection(selection.provider, selection.model)

@@ -23,8 +23,8 @@ import {
   $sessionStates,
   publishSessionState,
   sessionTileDelegate,
-  setSessionTileDelegate,
-  type SessionTileDelegate
+  type SessionTileDelegate,
+  setSessionTileDelegate
 } from '@/store/session-states'
 import type * as SessionStates from '@/store/session-states'
 
@@ -112,6 +112,7 @@ function installSessionDelegate() {
     updateSession: (runtimeId, updater) => {
       const previous =
         sessionStateCache.get(runtimeId) ?? $sessionStates.get()[runtimeId] ?? createClientSessionState()
+
       const next = updater(previous)
 
       if (next === previous) {
@@ -770,6 +771,7 @@ describe('useModelControls', () => {
     const requestGateway = vi.fn(async () => {
       throw new Error('no such model')
     })
+
     let controls!: Controls
 
     render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
@@ -791,6 +793,7 @@ describe('useModelControls', () => {
     const requestGateway = vi.fn(async () => {
       throw new Error('no such model')
     })
+
     let controls!: Controls
 
     render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
@@ -1209,6 +1212,7 @@ describe('useModelControls', () => {
     setCurrentModel('primary/model')
     setCurrentProvider('openai')
     seedRuntimeSlice('primary-runtime', 'primary/model', 'openai')
+
     seedRuntimeSlice('tile-runtime', 'old-tile', 'nous')
 
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'tile-model' }) as never)

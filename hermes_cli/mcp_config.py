@@ -47,20 +47,33 @@ _AUTH_SCHEME_PREFIX_RE = re.compile(
     r"^(?:Bearer|Basic|Token|Digest)\s+",
     re.IGNORECASE,
 )
+# Opaque API-key headers — fully replace the value (no head/tail fingerprint).
+_MCP_SECRET_HEADER_RE = re.compile(
+    r"((?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|"
+    r"x-auth-token|x-access-token)\s*:\s*)(\S+)",
+    re.IGNORECASE,
+)
+# Digest/params on Authorization: username=, response=, opaque=, …
+_AUTHZ_PARAM_RE = re.compile(
+    r"""\b(username|response|opaque|cnonce|nonce|uri)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,]+)""",
+    re.IGNORECASE,
+)
 
 
 def redact_mcp_probe_text(text: object) -> str:
     """Fully redact MCP probe/display strings before they leave the process.
 
-    Authorization/Bearer credentials become ``***`` (no prefix/suffix). The
-    generic secret redactor then runs with ``force=True`` so other credential
-    shapes in the same exception still cannot leak.
+    Authorization/Bearer credentials and opaque API-key header values become
+    ``***`` (no prefix/suffix). The generic secret redactor then runs with
+    ``force=True`` as defense in depth.
     """
     raw = "" if text is None else str(text)
     if not raw:
         return raw
     redacted = _AUTH_HEADER_VALUE_RE.sub(lambda m: f"{m.group(1)}***", raw)
     redacted = _AUTH_SCHEME_VALUE_RE.sub(lambda m: f"{m.group(1)}***", redacted)
+    redacted = _MCP_SECRET_HEADER_RE.sub(lambda m: f"{m.group(1)}***", redacted)
+    redacted = _AUTHZ_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
     from agent.redact import redact_sensitive_text
 
     return redact_sensitive_text(redacted, force=True)

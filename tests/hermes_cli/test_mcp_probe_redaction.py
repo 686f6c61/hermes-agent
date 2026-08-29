@@ -11,6 +11,8 @@ SYNTHETIC_PREFIX = "SYNTHETIC_MCP_BEARER"
 SYNTHETIC_SUFFIX = "SECRET_123456"
 HEADER = f"Authorization: Bearer {SYNTHETIC}"
 OPAQUE_API_KEY = "opaquecredential1234567890ABCDEF"
+OPAQUE_PREFIX = OPAQUE_API_KEY[:6]
+OPAQUE_SUFFIX = OPAQUE_API_KEY[-4:]
 
 
 def _assert_fully_redacted(text: str) -> None:
@@ -18,6 +20,8 @@ def _assert_fully_redacted(text: str) -> None:
     assert SYNTHETIC_PREFIX not in text
     assert SYNTHETIC_SUFFIX not in text
     assert OPAQUE_API_KEY not in text
+    assert OPAQUE_PREFIX not in text
+    assert OPAQUE_SUFFIX not in text
 
 
 def _make_args(**kwargs):
@@ -69,6 +73,22 @@ class TestRedactMcpProbeText:
         _assert_fully_redacted(out)
         assert "Bearer ***" in out
 
+    def test_opaque_api_key_header_is_fully_replaced(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        out = redact_mcp_probe_text(f"connect failed: X-Api-Key: {OPAQUE_API_KEY}")
+        _assert_fully_redacted(out)
+        assert "X-Api-Key: ***" in out
+
+    def test_digest_authorization_params_are_fully_replaced(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        out = redact_mcp_probe_text(
+            f'Authorization: Digest username="u", response="{OPAQUE_API_KEY}"'
+        )
+        _assert_fully_redacted(out)
+        assert "response=***" in out
+
     def test_header_display_masks_opaque_api_key(self):
         from hermes_cli.mcp_config import redact_mcp_header_display
 
@@ -103,6 +123,24 @@ class TestProbeHelperRedactsBeforeRaise:
             _probe_single_server("ink", {"url": "https://mcp.example/mcp"})
         _assert_fully_redacted(str(caught.value))
         assert "Bearer ***" in str(caught.value)
+
+    def test_probe_exception_redacts_opaque_api_key(self, monkeypatch):
+        import tools.mcp_tool as mcp_tool
+        from hermes_cli.mcp_config import _probe_single_server
+
+        monkeypatch.setattr(mcp_tool, "_ensure_mcp_loop", lambda: None)
+        monkeypatch.setattr(mcp_tool, "_stop_mcp_loop_if_idle", lambda: None)
+
+        def boom(coro, timeout):
+            coro.close()
+            raise RuntimeError(f"connect failed: X-Api-Key: {OPAQUE_API_KEY}")
+
+        monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", boom)
+
+        with pytest.raises(Exception) as caught:
+            _probe_single_server("ink", {"url": "https://mcp.example/mcp"})
+        _assert_fully_redacted(str(caught.value))
+        assert "X-Api-Key: ***" in str(caught.value)
 
 
 class TestCmdMcpTestRedaction:

@@ -32,48 +32,114 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# MCP test/dashboard surfaces must not fingerprint Authorization values
-# (firstN/lastN is a reusable credential fragment). Replace the credential
-# entirely, then run the generic redactor as defense in depth.
-_AUTH_HEADER_VALUE_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)([^\s\"']+)",
-    re.IGNORECASE,
-)
-_AUTH_SCHEME_VALUE_RE = re.compile(
-    r"\b((?:Bearer|Basic|Token|Digest)\s+)([^\s\"']+)",
-    re.IGNORECASE,
-)
+# MCP test/dashboard surfaces must not fingerprint credential header values
+# (firstN/lastN is a reusable fragment). Redact by field identity: once a
+# recognized credential header key is found, replace its complete associated
+# value regardless of scheme, quoting, parameter order, or wire/JSON/Python
+# mapping serialization. Header names come from agent.redact so the lists
+# cannot drift. The generic redactor then runs with force=True.
 _AUTH_SCHEME_PREFIX_RE = re.compile(
     r"^(?:Bearer|Basic|Token|Digest)\s+",
     re.IGNORECASE,
 )
-# Opaque API-key headers — fully replace the value (no head/tail fingerprint).
-_MCP_SECRET_HEADER_RE = re.compile(
-    r"((?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|"
-    r"x-auth-token|x-access-token)\s*:\s*)(\S+)",
-    re.IGNORECASE,
+_DIGEST_PARAM_NAMES = (
+    "username|response|opaque|cnonce|nonce|uri|realm|qop|nc|algorithm"
 )
-# Digest/params on Authorization: username=, response=, opaque=, …
-_AUTHZ_PARAM_RE = re.compile(
-    r"""\b(username|response|opaque|cnonce|nonce|uri)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,]+)""",
-    re.IGNORECASE,
+_DIGEST_PARAM = (
+    rf"(?:{_DIGEST_PARAM_NAMES})\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s,]+)"
 )
+_DIGEST_PARAMS = rf"{_DIGEST_PARAM}(?:\s*,\s*{_DIGEST_PARAM})*"
+_PROBE_REDACTION_RES: Optional[Tuple[re.Pattern[str], ...]] = None
+
+
+def _credential_header_names() -> str:
+    from agent.redact import _SECRET_HEADER_NAMES
+
+    return rf"(?:(?:Proxy-)?Authorization|{_SECRET_HEADER_NAMES})"
+
+
+def _probe_redaction_res() -> Tuple[re.Pattern[str], ...]:
+    global _PROBE_REDACTION_RES
+    if _PROBE_REDACTION_RES is not None:
+        return _PROBE_REDACTION_RES
+    header = _credential_header_names()
+    # Quoted-key mapping/JSON: {'X-Api-Key': '…'} / {"Authorization": "…"}
+    mapping = re.compile(
+        rf"""(['\"])({header})\1(\s*:\s*)(['\"])((?:\\.|(?!\4).)*)\4""",
+        re.IGNORECASE,
+    )
+    unquoted_mapping = re.compile(
+        rf"""(['\"])({header})\1(\s*:\s*)(?!['\"])([^\s,}}\]]+)""",
+        re.IGNORECASE,
+    )
+    # Bare wire header: Authorization: Digest … / X-Api-Key: token
+    wire = re.compile(
+        rf"({header})(\s*:\s*)([^\n\r]+)",
+        re.IGNORECASE,
+    )
+    bare_scheme = re.compile(
+        rf"\b(Bearer|Basic|Token)(\s+)([^\s\"']+)"
+        rf"|\b(Digest)(\s+)({_DIGEST_PARAMS})",
+        re.IGNORECASE,
+    )
+    _PROBE_REDACTION_RES = (mapping, unquoted_mapping, wire, bare_scheme)
+    return _PROBE_REDACTION_RES
+
+
+def _mask_header_field_value(value: str) -> str:
+    """Replace a credential header's complete associated value with ``***``.
+
+    A leading auth scheme word is kept for debugging; Digest parameters are
+    part of the field value and are not tokenized.
+    """
+    scheme = _AUTH_SCHEME_PREFIX_RE.match(value)
+    if scheme:
+        return f"{scheme.group(0)}***"
+    return "***"
+
+
+def _sub_mapping_header(match: re.Match[str]) -> str:
+    return (
+        f"{match.group(1)}{match.group(2)}{match.group(1)}"
+        f"{match.group(3)}{match.group(4)}"
+        f"{_mask_header_field_value(match.group(5))}{match.group(4)}"
+    )
+
+
+def _sub_unquoted_mapping_header(match: re.Match[str]) -> str:
+    return (
+        f"{match.group(1)}{match.group(2)}{match.group(1)}"
+        f"{match.group(3)}{_mask_header_field_value(match.group(4))}"
+    )
+
+
+def _sub_wire_header(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{match.group(2)}{_mask_header_field_value(match.group(3))}"
+
+
+def _sub_bare_scheme(match: re.Match[str]) -> str:
+    if match.group(1):
+        return f"{match.group(1)}{match.group(2)}***"
+    return f"{match.group(4)}{match.group(5)}***"
 
 
 def redact_mcp_probe_text(text: object) -> str:
     """Fully redact MCP probe/display strings before they leave the process.
 
-    Authorization/Bearer credentials and opaque API-key header values become
-    ``***`` (no prefix/suffix). The generic secret redactor then runs with
+    Recognized credential header fields (Authorization / Proxy-Authorization
+    and ``agent.redact._SECRET_HEADER_NAMES``) have their complete associated
+    value replaced with ``***``. Bare Bearer/Basic/Token/Digest spans are
+    covered the same way. The generic secret redactor then runs with
     ``force=True`` as defense in depth.
     """
     raw = "" if text is None else str(text)
     if not raw:
         return raw
-    redacted = _AUTH_HEADER_VALUE_RE.sub(lambda m: f"{m.group(1)}***", raw)
-    redacted = _AUTH_SCHEME_VALUE_RE.sub(lambda m: f"{m.group(1)}***", redacted)
-    redacted = _MCP_SECRET_HEADER_RE.sub(lambda m: f"{m.group(1)}***", redacted)
-    redacted = _AUTHZ_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
+    mapping, unquoted_mapping, wire, bare_scheme = _probe_redaction_res()
+    redacted = mapping.sub(_sub_mapping_header, raw)
+    redacted = unquoted_mapping.sub(_sub_unquoted_mapping_header, redacted)
+    redacted = wire.sub(_sub_wire_header, redacted)
+    redacted = bare_scheme.sub(_sub_bare_scheme, redacted)
     from agent.redact import redact_sensitive_text
 
     return redact_sensitive_text(redacted, force=True)

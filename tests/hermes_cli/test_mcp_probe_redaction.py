@@ -1,6 +1,8 @@
 """MCP test/dashboard must not fingerprint Authorization credentials (#97460)."""
 
 import argparse
+import itertools
+import json
 
 import pytest
 import yaml
@@ -87,7 +89,94 @@ class TestRedactMcpProbeText:
             f'Authorization: Digest username="u", response="{OPAQUE_API_KEY}"'
         )
         _assert_fully_redacted(out)
-        assert "response=***" in out
+        assert "Digest ***" in out
+
+    def test_digest_response_first_does_not_orphan_quoted_value(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        out = redact_mcp_probe_text(
+            f'Authorization: Digest response="{OPAQUE_API_KEY}", username="u"'
+        )
+        _assert_fully_redacted(out)
+        assert "Digest ***" in out
+        assert "response=" not in out
+
+    def test_python_mapping_api_key_is_fully_replaced(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        payload = {"X-Api-Key": OPAQUE_API_KEY}
+        out = redact_mcp_probe_text(f"headers={payload!r}")
+        _assert_fully_redacted(out)
+        assert "***" in out
+
+    def test_json_mapping_api_key_is_fully_replaced(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        out = redact_mcp_probe_text(json.dumps({"X-Api-Key": OPAQUE_API_KEY}))
+        _assert_fully_redacted(out)
+        assert "***" in out
+
+    @pytest.mark.parametrize(
+        "params",
+        list(
+            itertools.permutations(
+                [
+                    ("username", "u"),
+                    ("response", OPAQUE_API_KEY),
+                    ("opaque", OPAQUE_API_KEY),
+                ]
+            )
+        ),
+    )
+    @pytest.mark.parametrize("quoted_values", [True, False])
+    def test_digest_parameter_order_and_quoting(self, params, quoted_values):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        parts = []
+        for key, value in params:
+            parts.append(f'{key}="{value}"' if quoted_values else f"{key}={value}")
+        wire = "Authorization: Digest " + ", ".join(parts)
+        out = redact_mcp_probe_text(wire)
+        _assert_fully_redacted(out)
+        assert "Digest ***" in out
+
+    @pytest.mark.parametrize("key_quote,value_quote", [
+        ("'", "'"),
+        ('"', '"'),
+        ("'", '"'),
+        ('"', "'"),
+    ])
+    def test_mapping_quotes_on_api_key(self, key_quote, value_quote):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        text = (
+            "headers={"
+            f"{key_quote}X-Api-Key{key_quote}: "
+            f"{value_quote}{OPAQUE_API_KEY}{value_quote}"
+            "}"
+        )
+        out = redact_mcp_probe_text(text)
+        _assert_fully_redacted(out)
+        assert "***" in out
+
+    def test_mapping_digest_authorization_is_fully_replaced(self):
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        value = f'Digest response="{OPAQUE_API_KEY}", username="u"'
+        out = redact_mcp_probe_text(f"headers={{'Authorization': {value!r}}}")
+        _assert_fully_redacted(out)
+        assert "Digest ***" in out
+
+    def test_shared_secret_header_vocabulary_is_fully_replaced(self):
+        from agent.redact import _SECRET_HEADER_NAMES
+        from hermes_cli.mcp_config import redact_mcp_probe_text
+
+        inner = _SECRET_HEADER_NAMES
+        if inner.startswith("(?:") and inner.endswith(")"):
+            inner = inner[3:-1]
+        for name in inner.split("|"):
+            out = redact_mcp_probe_text({name: OPAQUE_API_KEY}.__repr__())
+            _assert_fully_redacted(out)
 
     def test_header_display_masks_opaque_api_key(self):
         from hermes_cli.mcp_config import redact_mcp_header_display
@@ -141,6 +230,45 @@ class TestProbeHelperRedactsBeforeRaise:
             _probe_single_server("ink", {"url": "https://mcp.example/mcp"})
         _assert_fully_redacted(str(caught.value))
         assert "X-Api-Key: ***" in str(caught.value)
+
+    def test_probe_exception_redacts_digest_response_first(self, monkeypatch):
+        import tools.mcp_tool as mcp_tool
+        from hermes_cli.mcp_config import _probe_single_server
+
+        monkeypatch.setattr(mcp_tool, "_ensure_mcp_loop", lambda: None)
+        monkeypatch.setattr(mcp_tool, "_stop_mcp_loop_if_idle", lambda: None)
+
+        def boom(coro, timeout):
+            coro.close()
+            raise RuntimeError(
+                f'connect failed: Authorization: Digest '
+                f'response="{OPAQUE_API_KEY}", username="u"'
+            )
+
+        monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", boom)
+
+        with pytest.raises(Exception) as caught:
+            _probe_single_server("ink", {"url": "https://mcp.example/mcp"})
+        _assert_fully_redacted(str(caught.value))
+        assert "Digest ***" in str(caught.value)
+
+    def test_probe_exception_redacts_python_mapping_api_key(self, monkeypatch):
+        import tools.mcp_tool as mcp_tool
+        from hermes_cli.mcp_config import _probe_single_server
+
+        monkeypatch.setattr(mcp_tool, "_ensure_mcp_loop", lambda: None)
+        monkeypatch.setattr(mcp_tool, "_stop_mcp_loop_if_idle", lambda: None)
+
+        def boom(coro, timeout):
+            coro.close()
+            raise RuntimeError(f"headers={{'X-Api-Key': '{OPAQUE_API_KEY}'}}")
+
+        monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", boom)
+
+        with pytest.raises(Exception) as caught:
+            _probe_single_server("ink", {"url": "https://mcp.example/mcp"})
+        _assert_fully_redacted(str(caught.value))
+        assert "***" in str(caught.value)
 
 
 class TestCmdMcpTestRedaction:
@@ -270,6 +398,41 @@ class TestDashboardMcpTestRedaction:
         _assert_fully_redacted(body["error"])
         assert "Bearer ***" in body["error"]
         assert SYNTHETIC not in resp.text
+
+    def test_probe_error_json_redacts_digest_and_mapping(self, tmp_path, monkeypatch):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_cli.mcp_config as mcp_config
+
+        _seed_config(tmp_path, {
+            "ink": {"url": "https://mcp.example/mcp"},
+        })
+
+        def boom(name, config, connect_timeout=30, details=None):
+            raise RuntimeError(
+                f"headers={{'X-Api-Key': '{OPAQUE_API_KEY}'}}; "
+                f'Authorization: Digest response="{OPAQUE_API_KEY}", username="u"'
+            )
+
+        monkeypatch.setattr(mcp_config, "_probe_single_server", boom)
+        monkeypatch.setattr(mcp_config, "_get_mcp_servers", lambda: {
+            "ink": {"url": "https://mcp.example/mcp"},
+        })
+
+        client = TestClient(app)
+        client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        resp = client.post("/api/mcp/servers/ink/test")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        _assert_fully_redacted(body["error"])
+        assert "***" in body["error"]
+        assert SYNTHETIC not in resp.text
+        assert OPAQUE_API_KEY not in resp.text
 
 
 class TestSiblingProbeConsumersRedact:

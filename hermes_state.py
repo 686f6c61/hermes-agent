@@ -4786,48 +4786,35 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         )
 
     @staticmethod
-    def _promote_session_lineage_markers(data: Dict[str, Any]) -> None:
-        """Lift ``_reset_from`` / ``_branched_from`` out of ``model_config``.
-
-        ``/new`` and idle/daily rotation write ``parent_session_id`` the same
-        way a genuine ``/branch`` fork does; only these markers tell them
-        apart. List payloads strip ``model_config`` as a heavy field, so the
-        sidebar needs the markers at the top level to nest forks and leave
-        resets as siblings.
-        """
-        if data.get("_reset_from") and data.get("_branched_from"):
-            return
-        raw = data.get("model_config")
-        if not raw:
-            return
-        if isinstance(raw, str):
-            try:
-                cfg = json.loads(raw)
-            except (TypeError, ValueError):
-                return
-        elif isinstance(raw, dict):
-            cfg = raw
-        else:
-            return
-        if not isinstance(cfg, dict):
-            return
-        if not data.get("_reset_from"):
-            value = cfg.get("_reset_from")
-            if isinstance(value, str) and value.strip():
-                data["_reset_from"] = value.strip()
-        if not data.get("_branched_from"):
-            value = cfg.get("_branched_from")
-            if isinstance(value, str) and value.strip():
-                data["_branched_from"] = value.strip()
-
-    @staticmethod
     def _session_row_dict(row: sqlite3.Row) -> Dict[str, Any]:
         data = dict(row)
         if "_system_prompt_resolved" in data:
             resolved = data.pop("_system_prompt_resolved")
             if "system_prompt" in data:
                 data["system_prompt"] = resolved
-        SessionDB._promote_session_lineage_markers(data)
+        # Lift /new vs /branch markers out of model_config so list payloads
+        # (which strip that heavy field) can still tell a reset sibling from
+        # a genuine fork. Keep this a local helper: tests sometimes replace
+        # the SessionDB name with a factory lambda.
+        if not (data.get("_reset_from") and data.get("_branched_from")):
+            raw = data.get("model_config")
+            cfg = None
+            if isinstance(raw, str) and raw:
+                try:
+                    cfg = json.loads(raw)
+                except (TypeError, ValueError):
+                    cfg = None
+            elif isinstance(raw, dict):
+                cfg = raw
+            if isinstance(cfg, dict):
+                if not data.get("_reset_from"):
+                    value = cfg.get("_reset_from")
+                    if isinstance(value, str) and value.strip():
+                        data["_reset_from"] = value.strip()
+                if not data.get("_branched_from"):
+                    value = cfg.get("_branched_from")
+                    if isinstance(value, str) and value.strip():
+                        data["_branched_from"] = value.strip()
         return data
 
     @staticmethod

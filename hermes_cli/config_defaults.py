@@ -931,7 +931,10 @@ DEFAULT_CONFIG = {
                                       # this bounds user-visible latency once real input is
                                       # waiting. Kept well under chat-transport idle timeouts
                                       # (Telegram ~30s). On expiry the turn proceeds
-                                      # uncompressed — an availability boundary, not a failure.
+                                      # uncompressed and the detached worker keeps commit
+                                      # admission — an availability boundary, not a failure.
+                                      # Thinking-model summarizers may need 300 (or ≥ time-to-
+                                      # first-content) if this turn should wait for compression.
         "context_timeout_seconds": 120,  # inactivity budget for in-agent compress_context
                                       # (conversation loop, /compress, preflight, etc.).
                                       # Same progress-aware semantics as hygiene_timeout_seconds:

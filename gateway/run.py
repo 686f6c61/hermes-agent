@@ -162,14 +162,6 @@ _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
 # retry is cheap and still recovers within a session.
 _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 
-# Flat retry-after recorded when a hygiene compression is ABANDONED because
-# the turn-hold budget expired while the summary was still streaming (not a
-# failure — the compressor was healthy, we just could not keep holding the
-# user's turn). Spaces out re-attempts so sustained traffic does not spawn,
-# hold, and cancel a fresh compressor on every single turn; deliberately
-# outside the failure-streak ladder above.
-_HYGIENE_TURNHOLD_RETRY_SECONDS = 60.0
-
 
 def _hygiene_cooldown_for_failure(
     gateway,
@@ -2456,7 +2448,9 @@ class HygieneTurnHoldExceeded(Exception):
     healthy, but the current user turn cannot wait any longer. It must NOT
     be routed through the idle-timeout failure path (which stamps
     AGENT_COMPRESSION_TIMEOUT, sends a "no output" message, and advances
-    the failure cooldown ladder).
+    the failure cooldown ladder). The detached worker keeps commit
+    admission for the already-running attempt so the summary can adopt at
+    the next safe boundary rather than burning the thinking prefix.
     """
 
 
@@ -21262,13 +21256,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                                 # even if the summary model is
                                                 # still streaming. Past the
                                                 # budget we stop waiting and
-                                                # fall through to the timeout
-                                                # path below, which revokes
-                                                # commit admission and proceeds
-                                                # on the uncompressed
+                                                # proceed on the uncompressed
                                                 # transcript — the wire never
                                                 # stays silent long enough to
                                                 # trip a transport idle-timeout.
+                                                # The detached worker keeps
+                                                # commit admission (#97963);
+                                                # do not cancel the fence.
                                                 if (
                                                     _hyg_waited
                                                     >= _hyg_max_turn_hold_seconds
@@ -21310,22 +21304,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                         # Turn-hold expiry is an availability boundary,
                                         # not a failure. The compressor is healthy and
                                         # still streaming; we simply cannot hold the
-                                        # current user turn any longer. Share the safe
-                                        # mechanics (fence, release, defer, proceed
-                                        # uncompressed) but with distinct provenance,
-                                        # user message, and NO failure-cooldown
-                                        # increment.
-                                        _cancelled = None
-                                        while _cancelled is None:
-                                            if _hyg_commit_fence.commit_in_flight:
-                                                _cancelled = False
-                                                break
-                                            _cancelled = (
-                                                _hyg_commit_fence.try_cancel_before_commit()
-                                            )
-                                            if _cancelled is None:
-                                                await asyncio.sleep(0.025)
-                                        if not _cancelled:
+                                        # current user turn any longer.
+                                        #
+                                        # #97963: keep the already-running attempt's
+                                        # commit admission. Cancelling the fence here
+                                        # burned the thinking prefix on every attempt
+                                        # and a 60s retry-after then blocked preflight,
+                                        # permanently disabling auto-compression for
+                                        # thinking-model summarizers. The detached
+                                        # worker retains the durable lock and watermark
+                                        # so it can adopt the summary at the next safe
+                                        # boundary; sibling hygiene attempts skip via
+                                        # the in-flight lock rather than a cooldown.
+                                        if _hyg_commit_fence.commit_in_flight:
                                             # NOTE: bounded overshoot by design.
                                             # The turn can be held past
                                             # _hyg_max_turn_hold_seconds by up to the
@@ -21337,30 +21328,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             # cancellation.
                                             _compressed, _ = await _hyg_future
                                         else:
-                                            _hyg_commit_fence.release_cancelled_compression_lock()
                                             self._defer_agent_cleanup_until_future_done(
                                                 _hyg_future,
                                                 _hyg_agent,
                                                 context="session hygiene turn-hold",
                                             )
                                             _hyg_cleanup_deferred = True
-                                            # Short, NON-escalating retry-after. Without
-                                            # it, every subsequent turn re-spawns a fresh
-                                            # compressor, holds it for the turn-hold
-                                            # budget, and cancels it again — a per-turn
-                                            # summary-model token burn that never commits
-                                            # under sustained traffic. This is deliberately
-                                            # NOT _hygiene_cooldown_for_failure: the
-                                            # compressor is healthy, so the failure streak
-                                            # must not advance (behavior witness below);
-                                            # only the flat retry spacing is recorded.
-                                            _record_hygiene_cooldown(
-                                                self, session_entry.session_id,
-                                                _HYGIENE_TURNHOLD_RETRY_SECONDS,
-                                                "hygiene compression deferred: "
-                                                "turn-hold budget expired while the "
-                                                "summary was still streaming",
-                                            )
                                             from agent.session_activity import (
                                                 ActivityProvenance,
                                             )
@@ -21374,7 +21347,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             logger.info(
                                                 "Session hygiene compression for session %s "
                                                 "exceeded turn-hold budget (%.1fs); "
-                                                "proceeding without compression this turn",
+                                                "proceeding without compression this turn "
+                                                "(detached worker kept commit admission)",
                                                 session_entry.session_id,
                                                 time.monotonic() - _hyg_wait_started,
                                             )
@@ -21881,6 +21855,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             _hyg_agent, context="session hygiene"
                                         )
 
+                    except HygieneTurnHoldExceeded:
+                        # Availability boundary, not a failure — already logged
+                        # at INFO. Must not hit the generic "auto-compress
+                        # failed" warning: that log (plus the old 60s
+                        # retry-after) is how thinking-model deployments read
+                        # as permanently broken (#97963).
+                        pass
                     except Exception as e:
                         logger.warning(
                             "Session hygiene auto-compress failed: %s", e

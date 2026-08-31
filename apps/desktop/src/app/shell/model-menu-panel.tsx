@@ -109,7 +109,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       // Group / credential swaps can return a catalog that no longer contains
       // the session's current model. The store + currentPickerSelection would
       // otherwise keep painting the stale id (it is not in the new list).
-      const switchTo = reconcileSelectionAfterCatalogRefresh(optionsModel, next.providers)
+      const switchTo = reconcileSelectionAfterCatalogRefresh(optionsModel, next.providers, optionsProvider)
 
       if (switchTo) {
         await onSelectModel({ ...switchTo, sessionId: activeSessionId || null })

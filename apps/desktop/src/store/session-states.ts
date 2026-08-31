@@ -37,7 +37,6 @@ import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $activeGatewayProfile, normalizeProfileKey } from './profile'
-import { $projectTree } from './projects'
 import { clearAllProviderWaits, clearSessionProviderWait } from './provider-wait'
 import {
   $activeSessionId,
@@ -1149,7 +1148,8 @@ export function isBotChatSession(sessionId: null | string | undefined): boolean 
 /** Title to persist on a tile so the tab strip can name it without mounting
  *  the pane. Restored background tabs never run the resume/title-resolution
  *  effect, so without this they stay "New session" until first click (#94167).
- *  Prefer an explicit scope title (Bot Chat), then the recents/project row. */
+ *  Prefer an explicit scope title (Bot Chat), then the recents row.
+ *  Uncached unrestored tiles are filled by {@link backfillUnrestoredTileTitles}. */
 function knownSessionTabTitle(storedSessionId: string, scope?: SessionTileWorkspaceScope): string | undefined {
   const fromScope = scope?.workspaceTabTitle?.trim()
 
@@ -1157,17 +1157,7 @@ function knownSessionTabTitle(storedSessionId: string, scope?: SessionTileWorksp
     return fromScope
   }
 
-  const match = (session: SessionInfo) => sessionMatchesStoredId(session, storedSessionId)
-
-  const row =
-    $sessions.get().find(match) ??
-    $projectTree
-      .get()
-      .flatMap(project => [
-        ...project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions)),
-        ...(project.previewSessions ?? [])
-      ])
-      .find(match)
+  const row = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
   return row ? sessionTitle(row) : undefined
 }

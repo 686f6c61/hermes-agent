@@ -6585,11 +6585,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
             provider_label = get_label(current_provider)
             text = self.format_message(
-                (
-                    f"⚙ *Model Configuration*\n\n"
-                    f"Current model: `{current_model or 'unknown'}`\n"
-                    f"Provider: {provider_label}\n\n"
-                    f"Select a provider:{provider_page_info}"
+                self._model_picker_provider_prompt(
+                    current_model, provider_label, provider_page_info
                 )
             )
 
@@ -6628,6 +6625,23 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=_redact_telegram_error_text(e))
 
     _PROVIDER_PAGE_SIZE = 10
+    _MODEL_PICKER_CLEAR_HINT = (
+        "Use `/model --clear` to drop this session's override."
+    )
+
+    @staticmethod
+    def _model_picker_provider_prompt(
+        current_model: str,
+        provider_label: str,
+        page_info: str = "",
+    ) -> str:
+        return (
+            f"⚙ *Model Configuration*\n\n"
+            f"Current model: `{current_model or 'unknown'}`\n"
+            f"Provider: {provider_label}\n\n"
+            f"Select a provider:{page_info}\n\n"
+            f"{TelegramAdapter._MODEL_PICKER_CLEAR_HINT}"
+        )
 
     async def send_choice_picker(
         self,
@@ -6965,11 +6979,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
             await query.edit_message_text(
                 text=self.format_message(
-                    (
-                        f"⚙ *Model Configuration*\n\n"
-                        f"Current model: `{state['current_model'] or 'unknown'}`\n"
-                        f"Provider: {provider_label}\n\n"
-                        f"Select a provider:{provider_page_info}"
+                    self._model_picker_provider_prompt(
+                        state["current_model"], provider_label, provider_page_info
                     )
                 ),
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -7167,11 +7178,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
             await query.edit_message_text(
                 text=self.format_message(
-                    (
-                        f"⚙ *Model Configuration*\n\n"
-                        f"Current model: `{state['current_model'] or 'unknown'}`\n"
-                        f"Provider: {provider_label}\n\n"
-                        f"Select a provider:{provider_page_info}"
+                    self._model_picker_provider_prompt(
+                        state["current_model"], provider_label, provider_page_info
                     )
                 ),
                 parse_mode=ParseMode.MARKDOWN_V2,

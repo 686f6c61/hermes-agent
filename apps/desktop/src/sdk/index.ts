@@ -343,6 +343,7 @@ export interface PluginOpenSessionOptions {
    *  here set this to guarantee freshness. Honored even without
    *  awaitHydration so a sleep/wake reattach can handshake without the
    *  "waking up" overlay. */
+  forceResume?: boolean
   hydrationTimeoutMs?: number
   intent?: OpenSessionIntent
   keepAllProfilesScope?: boolean

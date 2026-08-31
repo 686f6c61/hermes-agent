@@ -12,7 +12,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const gatewayMocks = vi.hoisted(() => ({
   activeConnectionId: null as null | string,
-  requestGatewayForAgent: vi.fn(async () => ({ routed: true })),
+  requestGatewayForAgent: vi.fn(
+    async (
+      _connectionId?: null | string,
+      _profile?: string,
+      _method?: string,
+      _params?: Record<string, unknown>
+    ): Promise<{ routed?: boolean; session_id?: string }> => ({ routed: true })
+  ),
   requestGatewayForProfile: vi.fn(async () => ({ profiled: true }))
 }))
 

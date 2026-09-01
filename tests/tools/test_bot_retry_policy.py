@@ -198,6 +198,42 @@ def test_run_delivery_retries_transient_and_reemits_stdout(monkeypatch, tmp_path
     assert not dm.exists(), "dm file must be cleaned up"
 
 
+def test_run_delivery_retries_while_recipient_has_live_owner(monkeypatch, tmp_path, capsys):
+    """#100523: a Desktop-owned Bot Chat must not drop the DM."""
+    from tools import bot_mode_dm
+
+    dm = tmp_path / "dm.txt"
+    dm.write_text("hello")
+    calls = []
+    clock = {"t": 0.0}
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(calls) < 3:
+            return _Proc(
+                1,
+                stderr=(
+                    "Session 20260831_213314_60cda6 already has a live owner "
+                    "(desktop, pid 695663, running 11m)."
+                ),
+            )
+        return _Proc(0, stdout="queued-then-delivered")
+
+    monkeypatch.setattr(bot_mode_dm, "_live_owner_wait_seconds", lambda: 30.0)
+    monkeypatch.setattr(bot_mode_dm, "_LIVE_OWNER_POLL_SECONDS", 1.0)
+    monkeypatch.setattr(bot_mode_dm.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(bot_mode_dm.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(bot_mode_dm.subprocess, "run", _fake_run)
+
+    rc = bot_mode_dm._run_delivery(
+        ["hermes", "-p", "ops", "chat"], str(dm), stdin_file=False
+    )
+    assert rc == 0
+    assert len(calls) == 3
+    assert "queued-then-delivered" in capsys.readouterr().out
+    assert not dm.exists()
+
+
 def test_run_delivery_no_retry_for_missing_config(monkeypatch, tmp_path):
     from tools import bot_mode_dm
 

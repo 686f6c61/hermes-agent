@@ -562,6 +562,48 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     return acquire_turn_lock(_hermes_root(home), argv[2])
 
 
+def _is_live_owner_error(text: str) -> bool:
+    return "already has a live owner" in (text or "").lower()
+
+
+def _live_owner_wait_seconds() -> float:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        bot = cfg.get("bot_mode") if isinstance(cfg.get("bot_mode"), dict) else {}
+        raw = bot.get("envelope_ttl_seconds", 900)
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 900.0
+    except Exception:
+        return 900.0
+
+
+_LIVE_OWNER_POLL_SECONDS = 5.0
+
+
+def _wait_out_live_owner(argv: list[str], dm_file: str):
+    """Re-run the local chat until the recipient session is free or TTL."""
+    deadline = time.monotonic() + _live_owner_wait_seconds()
+    proc = None
+    while time.monotonic() < deadline:
+        time.sleep(_LIVE_OWNER_POLL_SECONDS)
+        proc = subprocess.run(
+            [*argv, "--query-file", dm_file],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            return proc
+        detail = (proc.stderr or proc.stdout or "").strip()[-500:]
+        if not _is_live_owner_error(detail):
+            return proc
+    return proc
+
+
 def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     """Run one DM transport and remove its plaintext file after consumption.
 
@@ -607,6 +649,13 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                         capture_output=True,
                         text=True,
                     )
+                    detail = (proc.stderr or proc.stdout or "").strip()[-500:]
+                # Desktop owns Bot Chat: don't drop the DM. Poll until the
+                # lease is gone or the envelope TTL expires (#100523).
+                if proc.returncode != 0 and _is_live_owner_error(detail):
+                    waited = _wait_out_live_owner(argv, dm_file)
+                    if waited is not None:
+                        proc = waited
             # Re-emit the transport's streams: stdout is the reply text the
             # completion notification carries back to the sending agent.
             if proc.stdout:

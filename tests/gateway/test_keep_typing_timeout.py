@@ -308,3 +308,33 @@ class TestKeepTypingPerChatClock:
         await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=1.0)
 
         assert sorted(calls) == ["dm-a", "dm-b"]
+
+    @pytest.mark.asyncio
+    async def test_failed_tick_releases_slot_for_sibling(self, monkeypatch):
+        """A winner whose send_typing errors must not starve the chat (#99676)."""
+        adapter = _StubAdapter()
+        calls = []
+
+        async def failing_then_ok(chat_id, metadata=None):
+            calls.append(chat_id)
+            if len(calls) == 1:
+                raise RuntimeError("transport down")
+
+        monkeypatch.setattr(adapter, "send_typing", failing_then_ok)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+
+        stop_event = asyncio.Event()
+        task_a = asyncio.create_task(
+            adapter._keep_typing("shared-dm", interval=10.0, stop_event=stop_event)
+        )
+        await asyncio.sleep(0.02)
+        task_b = asyncio.create_task(
+            adapter._keep_typing("shared-dm", interval=10.0, stop_event=stop_event)
+        )
+        await asyncio.sleep(0.05)
+        stop_event.set()
+        await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=1.0)
+
+        assert calls == ["shared-dm", "shared-dm"], (
+            f"sibling must pick up the next tick after a failed send, got {calls!r}"
+        )

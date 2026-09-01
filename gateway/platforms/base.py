@@ -5452,6 +5452,16 @@ class BasePlatformAdapter(ABC):
                 if stop_event is not None and stop_event.is_set():
                     return
                 if chat_id not in self._typing_paused:
+                    # Stamp happens inside the claim, before the await. If
+                    # this send never actually delivers, restore the previous
+                    # stamp so a sibling session can take the next tick
+                    # instead of a wedged winner blacking out the chat.
+                    clock = getattr(self, "_typing_clock", None)
+                    if clock is None:
+                        self._typing_clock = {}
+                        clock = self._typing_clock
+                    key = str(chat_id)
+                    prev = clock.get(key, 0.0)
                     if self._claim_typing_tick(chat_id, interval):
                         try:
                             await asyncio.wait_for(
@@ -5461,10 +5471,11 @@ class BasePlatformAdapter(ABC):
                         except asyncio.TimeoutError:
                             # Slow network — abandon this tick, keep the loop
                             # on schedule so the next send_typing fires fresh.
-                            pass
+                            clock[key] = prev
                         except asyncio.CancelledError:
                             raise
                         except Exception as typing_err:
+                            clock[key] = prev
                             logger.debug(
                                 "[%s] send_typing error (non-fatal): %s",
                                 self.name, typing_err,

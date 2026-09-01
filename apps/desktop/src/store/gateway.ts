@@ -533,13 +533,19 @@ async function openSecondary(entry: Secondary): Promise<void> {
 
       // Runtime re-mint also invalidates the status-stack gone-latch: ids
       // the dead runtime 4001'd may be live again once tiles re-resume.
-      // Fire-and-forget: composer-status imports from this module, so the
-      // import must stay dynamic (cycle), and it must NOT sit on the timed
-      // redial path — awaiting the module load here pushed cold-start
-      // redials past test/waitFor budgets. The reset needs no ordering
-      // guarantee relative to the dial.
+      // Scope to THIS secondary — a no-arg clear unlatched every other
+      // profile's corpses and they re-polled 4001 until the next reconnect
+      // (#100327). Fire-and-forget: composer-status imports from this
+      // module, so the import must stay dynamic (cycle), and it must NOT
+      // sit on the timed redial path — awaiting the module load here
+      // pushed cold-start redials past test/waitFor budgets.
       void import('@/store/composer-status')
-        .then(({ resetBackgroundPollingGuard }) => resetBackgroundPollingGuard())
+        .then(({ resetBackgroundPollingGuard }) =>
+          resetBackgroundPollingGuard({
+            connectionId: entry.connectionId || 'local',
+            profile: entry.profile
+          })
+        )
         .catch(() => {
           // Best effort for partial test/HMR graphs, same as above.
         })

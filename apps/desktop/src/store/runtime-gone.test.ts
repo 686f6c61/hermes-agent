@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { refreshBackgroundProcesses, resetBackgroundPollingGuard } from './composer-status'
 import { $gateway } from './gateway'
-import { markRuntimeGone, noteRuntimeAlive, resetRuntimeGoneHealing } from './runtime-gone'
+import {
+  isSessionGone,
+  markRuntimeGone,
+  markSessionGone,
+  noteRuntimeAlive,
+  resetRuntimeGoneHealing
+} from './runtime-gone'
 import { $activeSessionId, $sessionResumeRequest } from './session'
 import { $sessionStates, $sessionTiles } from './session-states'
 
@@ -111,6 +117,53 @@ describe('markRuntimeGone', () => {
 
     $sessionTiles.set([tile(STORED, 'runtime-4')])
     expect(markRuntimeGone('runtime-4')).toBe(true)
+  })
+})
+
+describe('resetBackgroundPollingGuard scope', () => {
+  it('a connection-scoped reset unlatches only that connection\'s gone runtimes', () => {
+    $sessionTiles.set([
+      { ownerRoute: { connectionId: 'homelab', profile: 'writer' }, runtimeId: 'rt-writer', storedSessionId: 'stored-writer' },
+      { ownerRoute: { connectionId: 'homelab', profile: 'coder' }, runtimeId: 'rt-coder', storedSessionId: 'stored-coder' },
+      { ownerRoute: { connectionId: 'tower', profile: 'writer' }, runtimeId: 'rt-tower', storedSessionId: 'stored-tower' }
+    ])
+
+    markSessionGone('rt-writer')
+    markSessionGone('rt-coder')
+    markSessionGone('rt-tower')
+
+    resetBackgroundPollingGuard({ connectionId: 'homelab', profile: 'writer' })
+
+    expect(isSessionGone('rt-writer')).toBe(false)
+    expect(isSessionGone('rt-coder')).toBe(true)
+    expect(isSessionGone('rt-tower')).toBe(true)
+  })
+
+  it('keeps a latched id after its tile unbinds, then still matches the recorded owner', () => {
+    $sessionTiles.set([
+      { ownerRoute: { connectionId: 'homelab', profile: 'writer' }, runtimeId: RUNTIME, storedSessionId: STORED }
+    ])
+
+    markSessionGone(RUNTIME)
+    expect($sessionTiles.get()[0]?.runtimeId).toBeUndefined()
+    expect(isSessionGone(RUNTIME)).toBe(true)
+
+    resetBackgroundPollingGuard({ connectionId: 'homelab', profile: 'writer' })
+    expect(isSessionGone(RUNTIME)).toBe(false)
+  })
+
+  it('a no-arg reset still clears every latch', () => {
+    $sessionTiles.set([
+      { ownerRoute: { connectionId: 'a', profile: 'p' }, runtimeId: 'rt-a', storedSessionId: 's-a' },
+      { ownerRoute: { connectionId: 'b', profile: 'p' }, runtimeId: 'rt-b', storedSessionId: 's-b' }
+    ])
+    markSessionGone('rt-a')
+    markSessionGone('rt-b')
+
+    resetBackgroundPollingGuard()
+
+    expect(isSessionGone('rt-a')).toBe(false)
+    expect(isSessionGone('rt-b')).toBe(false)
   })
 })
 

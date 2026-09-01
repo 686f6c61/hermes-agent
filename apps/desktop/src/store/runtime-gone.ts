@@ -10,6 +10,46 @@ import { $sessionStates, $sessionTiles, unbindTileRuntime } from './session-stat
  *  {@link resetBackgroundPollingGuard} and every poller resumes. */
 const goneSessions = new Set<string>()
 
+/** Owner recorded at latch time so a secondary reconnect can unlatch only its
+ *  own corpses. After {@link markRuntimeGone} unbinds the tile, the runtime id
+ *  is no longer on `$sessionTiles` — without this map a scoped reset would miss
+ *  every already-healed id and a no-arg reset (the previous openSecondary path)
+ *  would unlatch every other profile's dead runtimes and restart the 4001 storm. */
+const goneSessionOwners = new Map<string, { connectionId: string; profile: string }>()
+
+/** Connection/profile whose gone-latch should be cleared on reconnect. */
+export interface BackgroundPollingGuardScope {
+  connectionId: string
+  profile?: null | string
+}
+
+function ownerForRuntime(runtimeId: string): { connectionId: string; profile: string } | null {
+  const route = $sessionTiles.get().find(tile => tile.runtimeId === runtimeId)?.ownerRoute
+  const connectionId = route?.connectionId?.trim()
+
+  if (!connectionId) {
+    return null
+  }
+
+  return {
+    connectionId,
+    profile: (route.targetProfile || route.profile || '').trim()
+  }
+}
+
+function ownerMatchesScope(
+  owner: { connectionId: string; profile: string } | null | undefined,
+  scope: BackgroundPollingGuardScope
+): boolean {
+  if (!owner || owner.connectionId !== scope.connectionId.trim()) {
+    return false
+  }
+
+  const wantedProfile = scope.profile?.trim() || ''
+
+  return !wantedProfile || owner.profile === wantedProfile
+}
+
 /** Gateway JSON-RPC code for "session not found" (tui_gateway `_sess_nowait`). */
 const GATEWAY_SESSION_NOT_FOUND_CODE = 4001
 
@@ -44,21 +84,45 @@ export function markSessionGone(sid: string): void {
     return
   }
 
+  const owner = ownerForRuntime(sid)
+
+  if (owner) {
+    goneSessionOwners.set(sid, owner)
+  }
+
   goneSessions.add(sid)
   markRuntimeGone(sid)
 }
 
-/** Clear the gone-latch. Called with a session id when a fresh runtime binds to
- *  it (so polling resumes), or with no argument to reset everything (tests /
- *  gateway reconnect). */
-export function resetBackgroundPollingGuard(sid?: string): void {
-  if (sid) {
-    goneSessions.delete(sid)
+/** Clear the gone-latch.
+ *
+ *  - session id: a fresh runtime bound to that id, so polling resumes
+ *  - `{ connectionId, profile }`: only that reconnecting secondary's latched
+ *    ids (openSecondary used to pass nothing and unlatch the whole fleet)
+ *  - no argument: tests / a primary backend re-mint that recycles every id */
+export function resetBackgroundPollingGuard(sidOrScope?: BackgroundPollingGuardScope | string): void {
+  if (!sidOrScope) {
+    goneSessions.clear()
+    goneSessionOwners.clear()
 
     return
   }
 
-  goneSessions.clear()
+  if (typeof sidOrScope === 'string') {
+    goneSessions.delete(sidOrScope)
+    goneSessionOwners.delete(sidOrScope)
+
+    return
+  }
+
+  for (const sid of [...goneSessions]) {
+    const owner = goneSessionOwners.get(sid) ?? ownerForRuntime(sid)
+
+    if (ownerMatchesScope(owner, sidOrScope)) {
+      goneSessions.delete(sid)
+      goneSessionOwners.delete(sid)
+    }
+  }
 }
 
 /** Heal a session view whose bound runtime id the gateway no longer holds.

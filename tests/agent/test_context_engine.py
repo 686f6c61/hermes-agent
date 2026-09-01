@@ -411,3 +411,26 @@ class TestClonePluginContextEngine:
         assert clone is None
         assert engine_deepcopy_calls == []
         mock_logger.warning.assert_called_once()
+
+    def test_agent_init_source_routes_plugin_singleton_through_clone_helper(self):
+        """Source-pin for #42449: production init must clone the plugin
+        singleton, not alias it. Full init_agent is too heavy to drive
+        here, so this pins the call site. The helper tests above do not
+        catch `_selected_engine = _candidate`."""
+        import inspect
+        import re
+
+        import agent.agent_init as _ai
+
+        src = inspect.getsource(_ai)
+        assert re.search(
+            r"_try_clone_plugin_context_engine\s*\(\s*_candidate",
+            src,
+        ), (
+            "agent_init must clone the plugin context-engine singleton via "
+            "`_try_clone_plugin_context_engine(_candidate, …)` — a bare "
+            "`_selected_engine = _candidate` re-introduces #42449."
+        )
+        assert not re.search(
+            r"_selected_engine\s*=\s*_candidate\b", src
+        ), "found the #42449 bug-shape alias `_selected_engine = _candidate`"

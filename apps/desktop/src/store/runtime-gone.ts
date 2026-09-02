@@ -27,7 +27,7 @@ function ownerForRuntime(runtimeId: string): { connectionId: string; profile: st
   const route = $sessionTiles.get().find(tile => tile.runtimeId === runtimeId)?.ownerRoute
   const connectionId = route?.connectionId?.trim()
 
-  if (!connectionId) {
+  if (!route || !connectionId) {
     return null
   }
 

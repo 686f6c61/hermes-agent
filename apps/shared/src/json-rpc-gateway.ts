@@ -272,12 +272,11 @@ export class JsonRpcGatewayClient {
       }
 
       const onError = () => {
-        // Bad-token gate closes with 4401 slightly after the error event.
-        // Prefer that close code over the generic connect failure so the
-        // renderer can surface paste-token instead of retrying forever.
-        queueMicrotask(() => {
+        // Bad-token gate closes with 4401 in a later task than `error`.
+        // A microtask would settle the generic failure first and drop 4401.
+        setTimeout(() => {
           failConnect(new Error(this.options.connectErrorMessage))
-        })
+        }, 0)
       }
 
       socket.addEventListener('open', onOpen, { once: true })

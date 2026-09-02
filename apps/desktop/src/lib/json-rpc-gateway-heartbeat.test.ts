@@ -154,4 +154,25 @@ describe('JsonRpcGatewayClient handshake auth close', () => {
       statusCode: 401
     })
   })
+
+  it('prefers a 4401 close over a preceding error event', async () => {
+    vi.stubGlobal('WebSocket', { CONNECTING: FakeSocket.CONNECTING, OPEN: FakeSocket.OPEN })
+    const socket = new FakeSocket()
+    socket.readyState = FakeSocket.CONNECTING
+
+    const client = new JsonRpcGatewayClient({
+      connectErrorMessage: 'Could not connect to Hermes gateway',
+      socketFactory: () => socket as unknown as WebSocket
+    })
+
+    const pending = client.connect('ws://gateway.test/api/ws?token=stale')
+    socket.emit('error', {})
+    await Promise.resolve()
+    socket.emit('close', { code: 4401, reason: 'Unauthorized' })
+
+    await expect(pending).rejects.toMatchObject({
+      message: expect.stringMatching(/4401/),
+      statusCode: 401
+    })
+  })
 })

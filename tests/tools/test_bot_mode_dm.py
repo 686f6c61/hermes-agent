@@ -163,6 +163,20 @@ def test_unknown_target_lists_roster(tmp_path):
     assert set(result["teammates"]) == {"researcher", "coder"}
 
 
+def test_unknown_target_hides_tombstoned_teammate(tmp_path):
+    from hermes_constants import mark_named_profile_deleted
+
+    home = _managed_home(tmp_path, teammates=("researcher", "retired"))
+    mark_named_profile_deleted(home / "profiles" / "retired")
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="nosuchbot", message="hi", agent=agent)
+    )
+
+    assert result["teammates"] == ["researcher"]
+
+
 def test_cannot_message_self(tmp_path):
     home = _managed_home(tmp_path)
     agent = _FakeAgent(home, title="Bot Chat")  # default profile

@@ -151,7 +151,7 @@ class HostedRoomService:
     def local_profiles(self) -> tuple[str, ...]:
         from hermes_constants import live_profile_names
 
-        return tuple(live_profile_names(self.root))
+        return tuple(sorted(live_profile_names(self.root)))
 
     def bindings(self) -> tuple[HostedRoomBinding, ...]:
         local_gateway_id = hosted_rooms.local_authority_gateway_id()

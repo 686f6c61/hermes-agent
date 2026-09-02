@@ -325,12 +325,12 @@ def live_profile_names(hermes_root: str | Path) -> list[str]:
         if not profiles_root.is_dir():
             return names
         for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+            if entry.is_symlink() or not entry.is_dir():
                 continue
             name = entry.name
             if name == "default" or name.startswith("."):
                 continue
-            if not _NAMED_PROFILE_ID_RE.match(name):
+            if not _NAMED_PROFILE_ID_RE.fullmatch(name):
                 continue
             if named_profile_is_deleted(entry):
                 continue

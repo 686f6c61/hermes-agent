@@ -108,9 +108,17 @@ def test_shallow_clone_without_history_does_not_emit_a_false_empty_matrix(
         capture_output=True,
         text=True,
     )
-    # Depth-1 clone of the tip: the oldest tag object is typically missing.
+    # Match the GHA picker: tag names are fetched, commit objects may not be.
+    subprocess.run(
+        ["git", "-C", str(shallow), "fetch", "--tags", "--force", f"file://{repo}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # Depth-1 + tag names: the oldest tag is listed but not ancestral until
+    # the script deepens. After that both tags are ancestors of HEAD.
     result = _pick(shallow, "--count", "5")
     assert result.returncode == 0, result.stderr
     picked = json.loads(result.stdout)
     assert "v2026.5.2" in picked
-    assert "v2026.5.1" not in picked
+    assert "v2026.5.1" in picked

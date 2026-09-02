@@ -1,26 +1,19 @@
 import { $activeSessionId, requestSessionResume } from './session'
+import {
+  healsByStoredId,
+  isSessionGone,
+  isSessionGoneForBackgroundPolling,
+  latchSessionGone,
+  resetBackgroundPollingGuard,
+  resetBackgroundPollingGuardAfterRebind
+} from './session-gone-latch'
 import { $sessionStates, $sessionTiles, unbindTileRuntime } from './session-states'
 
-/** Session ids the gateway has told us are gone. A session-scoped RPC against a
- *  runtime the gateway no longer holds fails 4001 "session not found" — terminal
- *  for THIS runtime id, not a transient socket loss.
- *
- *  Shared by every background poller (process.list, approval.pending, goal
- *  status). One set, one clear path: a fresh-runtime rebind calls
- *  {@link resetBackgroundPollingGuard} and every poller resumes. */
-const goneSessions = new Set<string>()
-
-/** Owner recorded at latch time so a secondary reconnect can unlatch only its
- *  own corpses. After {@link markRuntimeGone} unbinds the tile, the runtime id
- *  is no longer on `$sessionTiles` — without this map a scoped reset would miss
- *  every already-healed id and a no-arg reset (the previous openSecondary path)
- *  would unlatch every other profile's dead runtimes and restart the 4001 storm. */
-const goneSessionOwners = new Map<string, { connectionId: string; profile: string }>()
-
-/** Connection/profile whose gone-latch should be cleared on reconnect. */
-export interface BackgroundPollingGuardScope {
-  connectionId: string
-  profile?: null | string
+export {
+  isSessionGone,
+  isSessionGoneForBackgroundPolling,
+  resetBackgroundPollingGuard,
+  resetBackgroundPollingGuardAfterRebind
 }
 
 function ownerForRuntime(runtimeId: string): { connectionId: string; profile: string } | null {
@@ -31,51 +24,12 @@ function ownerForRuntime(runtimeId: string): { connectionId: string; profile: st
     return null
   }
 
+  // Prefer `profile` so a scoped reset from openSecondary (`entry.profile`)
+  // matches; `targetProfile` is the fallback when the tile only has that.
   return {
     connectionId,
-    profile: (route.targetProfile || route.profile || '').trim()
+    profile: (route.profile || route.targetProfile || '').trim()
   }
-}
-
-function ownerMatchesScope(
-  owner: { connectionId: string; profile: string } | null | undefined,
-  scope: BackgroundPollingGuardScope
-): boolean {
-  if (!owner || owner.connectionId !== scope.connectionId.trim()) {
-    return false
-  }
-
-  const wantedProfile = scope.profile?.trim() || ''
-
-  return !wantedProfile || owner.profile === wantedProfile
-}
-
-/** Gateway JSON-RPC code for "session not found" (tui_gateway `_sess_nowait`). */
-const GATEWAY_SESSION_NOT_FOUND_CODE = 4001
-
-/** A gone session is unrecoverable for THIS runtime id; a timeout or transport
- *  blip is not. Only the former may stop a poll — misclassifying a transient
- *  failure would silently freeze a healthy session.
- *
- *  Match the gateway's 4001 code when the error carries one. The message
- *  fallback survives only for errors with no numeric code at all. */
-export function isSessionGoneForBackgroundPolling(error: unknown): boolean {
-  const code =
-    error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'number'
-      ? (error as { code: number }).code
-      : undefined
-
-  if (code !== undefined) {
-    return code === GATEWAY_SESSION_NOT_FOUND_CODE
-  }
-
-  const message = error instanceof Error ? error.message : String(error ?? '')
-
-  return /session not found/i.test(message)
-}
-
-export function isSessionGone(sid: string): boolean {
-  return goneSessions.has(sid)
 }
 
 /** Latch `sid` off and heal the bound view. Safe to call on every 4001. */
@@ -84,45 +38,8 @@ export function markSessionGone(sid: string): void {
     return
   }
 
-  const owner = ownerForRuntime(sid)
-
-  if (owner) {
-    goneSessionOwners.set(sid, owner)
-  }
-
-  goneSessions.add(sid)
+  latchSessionGone(sid, ownerForRuntime(sid))
   markRuntimeGone(sid)
-}
-
-/** Clear the gone-latch.
- *
- *  - session id: a fresh runtime bound to that id, so polling resumes
- *  - `{ connectionId, profile }`: only that reconnecting secondary's latched
- *    ids (openSecondary used to pass nothing and unlatch the whole fleet)
- *  - no argument: tests / a primary backend re-mint that recycles every id */
-export function resetBackgroundPollingGuard(sidOrScope?: BackgroundPollingGuardScope | string): void {
-  if (!sidOrScope) {
-    goneSessions.clear()
-    goneSessionOwners.clear()
-
-    return
-  }
-
-  if (typeof sidOrScope === 'string') {
-    goneSessions.delete(sidOrScope)
-    goneSessionOwners.delete(sidOrScope)
-
-    return
-  }
-
-  for (const sid of [...goneSessions]) {
-    const owner = goneSessionOwners.get(sid) ?? ownerForRuntime(sid)
-
-    if (ownerMatchesScope(owner, sidOrScope)) {
-      goneSessions.delete(sid)
-      goneSessionOwners.delete(sid)
-    }
-  }
 }
 
 /** Heal a session view whose bound runtime id the gateway no longer holds.
@@ -160,11 +77,12 @@ export function resetBackgroundPollingGuard(sidOrScope?: BackgroundPollingGuardS
  *  for the same id could only come from a duplicate report of the same death. */
 const healedRuntimes = new Set<string>()
 
-/** Consecutive heals per stored session id, reset by {@link noteRuntimeAlive}.
- *  A backend that reaps as fast as we resume would otherwise turn this into the
- *  very storm it exists to stop — one resume per poll tick, forever. Cap it and
- *  let the user's next action (which carries its own recovery) take over. */
-const healsByStoredId = new Map<string, number>()
+/** Consecutive heals per stored session id live in `session-gone-latch`
+ *  (`healsByStoredId`), reset by {@link noteRuntimeAlive} and by a successful
+ *  rebind. A backend that reaps as fast as we resume would otherwise turn this
+ *  into the very storm it exists to stop — one resume per poll tick, forever.
+ *  Cap it and let the user's next action (which carries its own recovery)
+ *  take over. */
 
 /** Enough to ride out a reap that races a resume, low enough that a backend
  *  reaping on sight cannot be turned into a resume loop. */

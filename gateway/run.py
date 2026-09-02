@@ -1027,7 +1027,13 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
 
 _PROVISIONAL_TOOL_STATUS_RE = re.compile(
     r"\b(?:lookup|query|tool(?:\s+call)?)\s+failed\b"
-    r"|\bfailed\b.*\b(?:lookup|query|tool)\b",
+    r"|\bfailed\b.*\b(?:lookup|query|tool)\b"
+    # Localized MCP/tool failure status (#100543 live Discord: "최신 조회 실패").
+    r"|실패|失败|失敗",
+    re.IGNORECASE,
+)
+_PROVISIONAL_COMPRESSION_NOTICE_RE = re.compile(
+    r"compress|압축|压缩|壓縮",
     re.IGNORECASE,
 )
 
@@ -1044,7 +1050,7 @@ def _looks_like_provisional_tool_status(text: str) -> bool:
     body = str(text or "").strip()
     if not body or len(body) > 160 or body.count("\n") > 2:
         return False
-    if re.search(r"compress", body, re.I):
+    if _PROVISIONAL_COMPRESSION_NOTICE_RE.search(body):
         return False
     return bool(_PROVISIONAL_TOOL_STATUS_RE.search(body))
 

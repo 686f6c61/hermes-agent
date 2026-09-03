@@ -1316,6 +1316,7 @@ def _(rid, params: dict) -> dict:
                         session["session_key"],
                         getattr(session.get("agent"), "model", _resolve_model()),
                         profile_home=session.get("profile_home"),
+                        cwd=_session_cwd(session),
                     )
                     _attach_worker(params.get("session_id", ""), session, worker)
                 except Exception as e:
@@ -1323,7 +1324,9 @@ def _(rid, params: dict) -> dict:
 
     try:
         output = worker.run(cmd)
-        warning = _mirror_slash_side_effects(params.get("session_id", ""), session, cmd)
+        warning = _mirror_slash_side_effects(
+            params.get("session_id", ""), session, cmd, output=output
+        )
         payload = {"output": output or "(no output)"}
         if warning:
             payload["warning"] = warning

@@ -644,7 +644,7 @@ export const host = {
    *  live Bot Chat (#101593). */
   navigate: (path: string) => {
     const raw = path.startsWith('#') ? path.slice(1) : path
-    const pathname = raw.split(/[?#]/, 1)[0] || raw
+    const pathname = raw.split(/[?#]/)[0] || raw
 
     if (contributedRoutes().some(route => route.path === pathname)) {
       openRouteTile(pathname)

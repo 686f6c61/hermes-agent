@@ -51,8 +51,8 @@ import {
 } from '@/store/profile'
 import { $projectScope, resolveNewSessionCwd } from '@/store/projects'
 import { setApprovalRequest } from '@/store/prompts'
-import { openRouteTile } from '@/store/route-tiles'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
+import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeSessionStoredIdRotation,
   $connection,

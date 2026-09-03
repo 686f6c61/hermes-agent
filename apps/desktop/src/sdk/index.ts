@@ -56,7 +56,6 @@ import {
   retireLocalProfileGateways
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
-import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -72,6 +71,7 @@ import {
   setActiveProfile,
   setShowAllProfiles
 } from '@/store/profile'
+import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeSessionId,
   $connection,

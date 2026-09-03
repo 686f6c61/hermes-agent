@@ -570,6 +570,7 @@ class _SlashWorker:
             creationflags=windows_hide_flags(),
             start_new_session=True,
         )
+        self.cwd = _slash_worker_cwd(cwd)
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 

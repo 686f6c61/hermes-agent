@@ -35,12 +35,13 @@ def test_slash_worker_popen_uses_session_cwd(tmp_path):
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value.stdout = MagicMock()
             mock_popen.return_value.stderr = MagicMock()
-            server._SlashWorker(
+            worker = server._SlashWorker(
                 session_key="test_key",
                 model="test-model",
                 cwd=str(session_cwd),
             )
             assert mock_popen.call_args[1]["cwd"] == str(session_cwd.resolve())
+            assert worker.cwd == str(session_cwd.resolve())
 
 
 def test_parse_worktree_ready_path_from_worker_output():

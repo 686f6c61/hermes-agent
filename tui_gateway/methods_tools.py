@@ -1299,6 +1299,13 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
 
     worker = session.get("slash_worker")
+    wanted_cwd = _slash_worker_cwd(_session_cwd(session))
+    # A later session.cwd.set (folder tag, workspace.move) does not restart
+    # the persistent worker. Reusing the spawn cwd would create /worktree
+    # in the previous project (#102268 follow-up).
+    if worker is not None and getattr(worker, "cwd", None) != wanted_cwd:
+        _restart_slash_worker(params.get("session_id", ""), session)
+        worker = session.get("slash_worker")
     if not worker:
         # On-demand spawn is now the ONLY spawn path for a fresh session
         # (eager pre-warm removed), and slash.exec handlers run on the RPC

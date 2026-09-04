@@ -1140,6 +1140,7 @@ export const en: Translations = {
       installing: 'Installing runtime…',
       installFailed: 'Runtime install failed',
       hardwareTitle: 'This machine',
+      hardwareTitleRemote: 'Backend server',
       hardwareLoading: 'Checking your hardware…',
       vram: label => `${label} GPU memory`,
       ram: label => `${label} RAM`,

@@ -134,6 +134,7 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
     $autoSpeakReplies.set(true)
 
     const $messages = atom<ChatMessage[]>([])
+
     const pendingReply = () => {
       const messages = $messages.get()
       const last = messages.findLast(m => m.role === 'assistant' && !m.hidden)

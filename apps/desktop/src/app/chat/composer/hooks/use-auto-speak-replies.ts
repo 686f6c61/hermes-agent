@@ -48,6 +48,9 @@ export function useAutoSpeakReplies({
   latest.current = { conversationActive, failureLabel, markSpoken, pendingReply }
   const speakingId = useRef<string | null>(null)
 
+  // speakingId is a same-tick request token ($messages + playback-idle can
+  // both enter speakLatest before markSpoken runs), not an atom mirror.
+  // eslint-disable-next-line no-restricted-syntax -- in-flight token, not atom sync
   useEffect(() => {
     if (!enabled) {
       return undefined

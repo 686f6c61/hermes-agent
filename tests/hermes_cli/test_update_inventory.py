@@ -65,6 +65,28 @@ class TestCollectInventory:
             by_profile["work"].restart_via, "work"
         )
 
+    def test_tombstoned_profile_excluded_while_live_home_is_preserved(
+        self, fleet, monkeypatch
+    ):
+        home = fleet / "home"
+        retired_home = home / "profiles" / "retired"
+        retired_home.mkdir()
+        _write_state(retired_home, 300)
+
+        from hermes_constants import mark_named_profile_deleted
+
+        mark_named_profile_deleted(retired_home)
+        monkeypatch.setattr(
+            "gateway.status._pid_exists", lambda pid: pid in (100, 200, 300)
+        )
+
+        plan = ui.collect_runtime_inventory()
+
+        assert plan.profiles == ["default", "work"]
+        by_profile = {runtime.profile: runtime for runtime in plan.runtimes}
+        assert by_profile["work"].pid == 200
+        assert "retired" not in by_profile
+
     def test_docker_install_not_updatable_in_place(self, fleet, monkeypatch):
         monkeypatch.setattr("hermes_cli.config.detect_install_method", lambda *a, **k: "docker")
         monkeypatch.setattr(

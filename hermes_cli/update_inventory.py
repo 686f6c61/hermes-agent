@@ -199,21 +199,16 @@ def collect_runtime_inventory() -> UpdatePlan:
         from hermes_cli.profiles import (
             _get_default_hermes_home,
             _get_profiles_root,
-            _PROFILE_ID_RE,
         )
+        from hermes_constants import live_profile_names
 
         default_home = _get_default_hermes_home()
-        if default_home.is_dir():
-            profile_homes.append(("default", default_home))
         root = _get_profiles_root()
-        if root.is_dir():
-            for entry in sorted(root.iterdir()):
-                if (
-                    entry.is_dir()
-                    and entry.name != "default"
-                    and _PROFILE_ID_RE.match(entry.name)
-                ):
-                    profile_homes.append((entry.name, entry))
+        for name in live_profile_names(default_home):
+            home = default_home if name == "default" else root / name
+            if name == "default" and not home.is_dir():
+                continue
+            profile_homes.append((name, home))
         plan.profiles = [name for name, _ in profile_homes]
     except Exception as exc:
         logger.debug("Profile enumeration failed: %s", exc)

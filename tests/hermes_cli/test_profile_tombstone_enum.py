@@ -113,3 +113,17 @@ def test_group_chat_and_cron_hide_tombstones(profile_env):
         members=_members("default", "ops"),
     )
     assert after_stale["room_id"] == "room-after-stale"
+
+
+def test_update_inventory_hides_tombstones(profile_env):
+    create_profile("ops", no_alias=True, no_skills=True)
+    create_profile("gone", no_alias=True, no_skills=True)
+    _delete("gone")
+
+    from hermes_cli.update_inventory import collect_runtime_inventory
+
+    plan = collect_runtime_inventory()
+    assert "ops" in plan.profiles
+    assert "default" in plan.profiles
+    assert "gone" not in plan.profiles
+    assert ".deleted" not in plan.profiles

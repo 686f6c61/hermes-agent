@@ -95,16 +95,14 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.bot_mode_dm import MESSAGE_MAX_CHARS
         from tools.bot_relay import acquire_turn_lock, local_delivery_command
+        from hermes_constants import live_profile_names
 
         if len(message) > MESSAGE_MAX_CHARS + 200:  # + attribution headroom
             return _err(rid, 4091, "message too long")
 
         home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
         root = home.parent.parent if home.parent.name == "profiles" else home
-        known = {"default"}
-        profiles_dir = root / "profiles"
-        if profiles_dir.is_dir():
-            known.update(c.name for c in profiles_dir.iterdir() if c.is_dir())
+        known = set(live_profile_names(root))
         resolved = "default" if profile.lower() == "hermes" else profile
         if resolved not in known:
             return _err(rid, 4092, f"no profile '{profile}' on this gateway")

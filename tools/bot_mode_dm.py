@@ -185,17 +185,10 @@ def _self_profile_name(home: Path) -> str:
 
 
 def _local_roster(root: Path) -> list[str]:
-    """Profile names on this install: default + every named profile."""
-    names = ["default"]
-    try:
-        profiles = root / "profiles"
-        if profiles.is_dir():
-            for child in sorted(profiles.iterdir()):
-                if child.is_dir():
-                    names.append(child.name)
-    except Exception:
-        pass
-    return names
+    """Live profile names on this install."""
+    from hermes_constants import live_profile_names
+
+    return live_profile_names(root)
 
 
 def _peers(root: Path) -> list[str]:

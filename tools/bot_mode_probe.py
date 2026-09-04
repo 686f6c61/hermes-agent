@@ -79,17 +79,13 @@ def _is_bot_managed(profile_dir: Path) -> bool:
 
 
 def _roster(root: Path) -> list[tuple[str, Path]]:
-    """(name, dir) for the default profile + every named profile."""
-    entries: list[tuple[str, Path]] = [("default", root)]
-    try:
-        profiles = root / "profiles"
-        if profiles.is_dir():
-            for child in sorted(profiles.iterdir()):
-                if child.is_dir():
-                    entries.append((child.name, child))
-    except Exception:
-        pass
-    return entries
+    """(name, dir) for the default profile and each live named profile."""
+    from hermes_constants import live_profile_names
+
+    return [
+        (name, root if name == "default" else root / "profiles" / name)
+        for name in live_profile_names(root)
+    ]
 
 
 def is_bot_mode_managed(home: str | os.PathLike | None = None) -> bool:

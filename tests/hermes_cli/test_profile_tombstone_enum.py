@@ -61,6 +61,7 @@ def test_live_profile_names_is_scoped_to_passed_root(tmp_path):
     (other / "profiles" / "ops").mkdir(parents=True)
     (other / "profiles" / ".deleted").mkdir()
     (other / "profiles" / "Not-A-Profile").mkdir()
+    (other / "profiles" / "line-break\n").mkdir()
     worker = other / "profiles" / "worker"
     worker.mkdir()
     mark_named_profile_deleted(worker)
@@ -68,6 +69,28 @@ def test_live_profile_names_is_scoped_to_passed_root(tmp_path):
     assert live_profile_names(other) == ["default", "ops"]
     assert "globalone" not in live_profile_names(other)
     assert live_profile_names(global_home) == ["default", "globalone"]
+
+
+def test_live_profile_names_rejects_symlinked_profile(tmp_path):
+    home = tmp_path / ".hermes"
+    profiles = home / "profiles"
+    profiles.mkdir(parents=True)
+    outside = tmp_path / "outside-profile"
+    outside.mkdir()
+    try:
+        (profiles / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+    assert live_profile_names(home) == ["default"]
+
+
+def test_hosted_room_profile_order_remains_lexical(tmp_path):
+    home = tmp_path / ".hermes"
+    (home / "profiles" / "aaa").mkdir(parents=True)
+    service = HostedRoomService(_server(), db_path=home / "state.db")
+
+    assert service.local_profiles() == ("aaa", "default")
 
 
 def test_group_chat_and_cron_hide_tombstones(profile_env):

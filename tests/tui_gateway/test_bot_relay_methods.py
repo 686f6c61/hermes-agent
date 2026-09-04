@@ -101,6 +101,21 @@ def test_deliver_validates_profile_and_runs_transport(home, monkeypatch):
     assert not calls
 
 
+def test_deliver_refuses_tombstoned_profile(home, monkeypatch):
+    from hermes_constants import mark_named_profile_deleted
+
+    mark_named_profile_deleted(home / "profiles" / "ops")
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args))
+
+    err = srv._methods["bot_relay.deliver"](
+        1, {"profile": "ops", "message": "ping"}
+    )
+
+    assert "error" in err and "ops" in err["error"]["message"]
+    assert calls == []
+
+
 def test_deliver_requires_params(home):
     err = srv._methods["bot_relay.deliver"](1, {"profile": "", "message": ""})
     assert "error" in err

@@ -46,6 +46,7 @@ export function useAutoSpeakReplies({
   const { $messages } = useComposerScope()
   const latest = useRef({ conversationActive, failureLabel, markSpoken, pendingReply })
   latest.current = { conversationActive, failureLabel, markSpoken, pendingReply }
+  const speakingId = useRef<string | null>(null)
 
   useEffect(() => {
     if (!enabled) {
@@ -54,6 +55,7 @@ export function useAutoSpeakReplies({
 
     // Don't read whatever reply already sits at the bottom when the toggle flips
     // on (or a chat opens) — consume it so only later replies are spoken.
+    speakingId.current = null
     latest.current.markSpoken()
 
     const speakLatest = () => {
@@ -65,10 +67,11 @@ export function useAutoSpeakReplies({
 
       const reply = pendingReply()
 
-      if (!reply || reply.pending) {
+      if (!reply || reply.pending || speakingId.current === reply.id) {
         return
       }
 
+      speakingId.current = reply.id
       markSpoken()
       // Only one window voices a given reply when the same chat is open in
       // several (reply.id is the shared backend message id). markSpoken already

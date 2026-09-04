@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vite
 import { I18nProvider } from '@/i18n'
 import { queryClient } from '@/lib/query-client'
 import { localModelsKey, localModelsOwner, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
+import { $connection } from '@/store/session'
 import type { LocalCatalogModel, LocalHardware, LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
 
 import { LocalModelsSettings } from './local-models-settings'
@@ -200,9 +201,24 @@ afterEach(async () => {
   // A running job arms the store's 700ms re-poll; drain it so the timer cannot
   // fire into a torn-down test environment.
   queryClient.setQueryData(localModelsKey(localModelsOwner(), 'jobs'), [])
+  $connection.set(null)
 })
 
 describe('LocalModelsSettings', () => {
+  it('labels hardware as the backend host on a remote gateway', async () => {
+    $connection.set({ baseUrl: 'https://gw', mode: 'remote', token: 't' } as never)
+    mocked.getLocalModelsStatus.mockResolvedValue({ ...BASE_STATUS, runtime_installed: true })
+    await renderFullPane()
+    expect(await screen.findByText('Backend server')).toBeTruthy()
+  })
+
+  it('labels hardware as this machine on a local gateway', async () => {
+    $connection.set({ mode: 'local' } as never)
+    mocked.getLocalModelsStatus.mockResolvedValue({ ...BASE_STATUS, runtime_installed: true })
+    await renderFullPane()
+    expect(await screen.findByText('This machine', { exact: true })).toBeTruthy()
+  })
+
   it.each(['starting', 'running'])(
     'keeps the runtime update view visible with no staged models while %s',
     async phase => {

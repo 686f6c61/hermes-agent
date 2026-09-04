@@ -3262,6 +3262,7 @@
     "settings.localModels.ejected",
     "settings.localModels.hardwareLoading",
     "settings.localModels.hardwareTitle",
+    "settings.localModels.hardwareTitleRemote",
     "settings.localModels.installAction",
     "settings.localModels.installDetail",
     "settings.localModels.installDoneToast",

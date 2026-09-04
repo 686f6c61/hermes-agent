@@ -1,7 +1,9 @@
 import type { ReactElement } from 'react'
+import { useStore } from '@nanostores/react'
 
 import { useI18n } from '@/i18n'
 import { Cpu, Monitor, Package, Zap } from '@/lib/icons'
+import { $connection } from '@/store/session'
 import type { LocalHardware } from '@/types/hermes'
 
 import { gbLabel } from './local-model-download-progress'
@@ -14,9 +16,11 @@ export interface LocalModelsHardwareSectionProps {
 export function LocalModelsHardwareSection({ hardware }: LocalModelsHardwareSectionProps): ReactElement {
   const { t } = useI18n()
   const copy = t.settings.localModels
+  const connection = useStore($connection)
+  const remoteBackend = connection?.mode === 'remote'
 
   return (
-    <SettingsSection icon={Monitor} title={copy.hardwareTitle}>
+    <SettingsSection icon={Monitor} title={remoteBackend ? copy.hardwareTitleRemote : copy.hardwareTitle}>
       {hardware ? (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 py-1 text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
           {hardware.gpu_name && (

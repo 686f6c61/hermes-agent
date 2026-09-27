@@ -69,10 +69,12 @@ def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
         payload = {"error": "invalid JSON from send_message_tool", "raw": result_json}
     if json_mode:
         print(json.dumps(payload, indent=2))
+    elif payload.get("error"):
+        # -q suppresses success stdout only. A failed send must still name the
+        # reason on stderr, or scripts log "rc=1" with nothing to act on.
+        print(f"hermes send: {payload['error']}", file=sys.stderr)
     elif not quiet:
-        if payload.get("error"):
-            print(f"hermes send: {payload['error']}", file=sys.stderr)
-        elif payload.get("success"):
+        if payload.get("success"):
             print(payload.get("note") or "sent")
         else:
             print(json.dumps(payload, indent=2))  # unknown shape — dump it, drop nothing

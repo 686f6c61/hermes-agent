@@ -459,3 +459,28 @@ def test_help_and_empty_list_hint_name_the_resolved_home(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert str(home / "channel_directory.json") in out
     assert "~/.hermes" not in out
+
+
+def test_quiet_still_prints_send_errors(capsys):
+    """``-q`` suppresses success stdout only. A failed send must still name the error on stderr."""
+    rc = send_cmd._emit_result(
+        json.dumps({"error": "gateway unreachable"}),
+        json_mode=False,
+        quiet=True,
+    )
+    captured = capsys.readouterr()
+    assert rc == send_cmd._FAILURE_EXIT
+    assert captured.out == ""
+    assert "gateway unreachable" in captured.err
+
+
+def test_quiet_suppresses_success_stdout(capsys):
+    rc = send_cmd._emit_result(
+        json.dumps({"success": True, "note": "sent to telegram"}),
+        json_mode=False,
+        quiet=True,
+    )
+    captured = capsys.readouterr()
+    assert rc == send_cmd._SUCCESS_EXIT
+    assert captured.out == ""
+    assert captured.err == ""

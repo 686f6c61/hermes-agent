@@ -32,6 +32,7 @@ ENTRY_POINT_CAPABILITIES_GROUP = "hermes_agent.plugin_capabilities"
 # parsing it on every discovery pass only spams warnings (#101962).
 _FOREIGN_HARNESS_MANIFEST_DIRS = frozenset({
     ".claude-plugin", ".codex-plugin", ".cursor-plugin", ".devin-plugin", ".kimi-plugin",
+    ".muse-plugin",
 })
 
 

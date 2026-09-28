@@ -64,6 +64,61 @@ def _has_active_children(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_ACTIVE_CHILDREN_SQL, (task_id,)).fetchone() is not None
 
 
+def _workspace_in_use_by_other(
+    conn: sqlite3.Connection, task_id: str, path: Path | str
+) -> bool:
+    """True when another non-terminal task still points at the same scratch dir.
+
+    ``gc``, completion and deferred parent cleanup used to ``rmtree`` a shared
+    ``workspace_path`` as soon as one of its tasks went terminal. Compare the
+    resolved path: a row may store ``~`` or a symlinked spelling.
+    """
+    try:
+        key = _path_key(Path(path).expanduser().resolve(strict=False))
+    except OSError:
+        return True
+    if not key:
+        return False
+    rows = conn.execute(
+        "SELECT workspace_path FROM tasks "
+        "WHERE id != ? AND workspace_path IS NOT NULL "
+        "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        other = row["workspace_path"]
+        if not other:
+            continue
+        try:
+            other_key = _path_key(Path(other).expanduser().resolve(strict=False))
+        except OSError:
+            continue
+        if other_key == key:
+            return True
+    return False
+
+
+def _defer_shared_workspace_cleanup(
+    conn: sqlite3.Connection, task_id: str, path: Path | str
+) -> bool:
+    """Skip removal and record why, when another live task still uses *path*."""
+    if not _workspace_in_use_by_other(conn, task_id, path):
+        return False
+    _kb._log.warning(
+        "Deferring workspace cleanup for task %s: %s is still used by "
+        "another non-terminal task",
+        task_id, path,
+    )
+    try:
+        _kb._append_event(
+            conn, task_id, "workspace_cleanup_deferred_shared",
+            {"path": str(path)},
+        )
+    except Exception:
+        pass
+    return True
+
+
 def _lexical_path(path: Path | str) -> Path:
     """Absolute, ``..``-collapsed, NFC form of *path* WITHOUT following symlinks."""
     return Path(_path_key(os.path.abspath(path)))
@@ -202,10 +257,15 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # lingering worker never has its cwd deleted from under it.
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
-            _cleanup_worktree_workspace(task_id, path, row["branch_name"])
+            if not _defer_shared_workspace_cleanup(conn, task_id, path):
+                _cleanup_worktree_workspace(task_id, path, row["branch_name"])
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         wp = Path(path)
+        if _defer_shared_workspace_cleanup(conn, task_id, path):
+            _cleanup_worker_tmux(conn, task_id)
+            _try_cleanup_parent_workspaces(conn, task_id)
+            return
         if wp.is_dir():
             # Containment guard: a board's ``default_workdir`` can pair
             # ``workspace_kind='scratch'`` with a user path pointing at a real
@@ -325,6 +385,8 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 or not row["workspace_path"]
                 or _has_active_children(conn, parent_id)
             ):
+                continue
+            if _defer_shared_workspace_cleanup(conn, parent_id, row["workspace_path"]):
                 continue
             if row["workspace_kind"] == "worktree":
                 _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])

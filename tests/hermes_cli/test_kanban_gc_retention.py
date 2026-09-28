@@ -128,3 +128,45 @@ def test_cmd_gc_never_removes_the_workspaces_root_itself(board):
             )
     assert kanban_ops._cmd_gc(_args()) == 0
     assert (sibling / "work.txt").exists()
+
+
+def _shared_scratch(conn) -> tuple[str, str, Path]:
+    archived = kb.create_task(conn, title="archived sharer")
+    live = kb.create_task(conn, title="live sharer")
+    shared = kb.workspaces_root() / "shared-scratch"
+    shared.mkdir(parents=True)
+    (shared / "note.txt").write_text("still needed", encoding="utf-8")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='archived', workspace_kind='scratch', "
+            "workspace_path=? WHERE id=?",
+            (str(shared), archived),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', workspace_kind='scratch', "
+            "workspace_path=? WHERE id=?",
+            (str(shared), live),
+        )
+    return archived, live, shared
+
+
+def test_cmd_gc_keeps_a_scratch_dir_a_live_task_still_uses(board):
+    with kbc.connect_closing() as conn:
+        archived, _live, shared = _shared_scratch(conn)
+    assert kanban_ops._cmd_gc(_args()) == 0
+    assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+    with kbc.connect_closing() as conn:
+        kinds = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id=? AND kind=?",
+            (archived, "workspace_cleanup_deferred_shared"),
+        ).fetchall()
+    assert kinds
+
+
+def test_cleanup_workspace_keeps_a_scratch_dir_a_live_task_still_uses(board):
+    from hermes_cli import kanban_db_workspace as kbw
+
+    with kbc.connect_closing() as conn:
+        archived, _live, shared = _shared_scratch(conn)
+        kbw._cleanup_workspace(conn, archived)
+    assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"

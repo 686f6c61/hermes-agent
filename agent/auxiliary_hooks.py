@@ -107,6 +107,7 @@ class _AuxCallHooks:
             model=model,
             provider=provider,
             base_url=str(getattr(client, "base_url", "") or ""),
+            client=client,
             api_mode=api_mode,
             streaming=streaming,
             started_at=self.started_at,

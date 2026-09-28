@@ -53,6 +53,7 @@ def test_call_llm_emits_auxiliary_events_not_api_request_events(manager, aux_cli
     assert pre["aux_task"] == post["aux_task"] == "title_generation"
     assert pre["api_request_id"].startswith("aux-") and post["api_request_id"] == pre["api_request_id"]
     assert pre["provider"] == "openrouter" and pre["model"] == "mock-model"
+    assert pre["client"] is aux_client and post["client"] is aux_client
     assert pre["request_messages"] == [{"role": "user", "content": "hello"}]
     assert pre["request"]["body"]["messages"] == [{"role": "user", "content": "hello"}]
     assert post["finish_reason"] == "stop" and post["error"] is None

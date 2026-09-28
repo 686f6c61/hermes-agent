@@ -193,6 +193,39 @@ def test_null_plugin_platform_uses_synthetic_default():
         platform_registry.unregister(platform)
 
 
+def test_registered_plugin_explicit_synthetic_toolset_is_not_unknown():
+    # Config migration writes platform_toolsets.<plugin> = ["hermes-<plugin>"].
+    # That name is absent from TOOLSETS, but resolve_toolset accepts it, so the
+    # checker must not warn "unknown" or "no tools" — and must not suggest the
+    # same string it just rejected.
+    from gateway.platform_registry import PlatformEntry, platform_registry
+
+    platform = "toolset_validation_listed"
+    synthetic = f"hermes-{platform}"
+    platform_registry.register(
+        PlatformEntry(
+            name=platform,
+            label="Listed Plugin",
+            adapter_factory=lambda _config: object(),
+            check_fn=lambda: True,
+        )
+    )
+    try:
+        warnings = validate_platform_toolsets(
+            {platform: [synthetic], "telegram": ["hermes-telegram"]},
+            _is_valid,
+        )
+        assert warnings == []
+
+        mixed = validate_platform_toolsets({platform: [synthetic, "bogus"]}, _is_valid)
+        assert any("unknown toolset 'bogus'" in w for w in mixed)
+        assert not any(f"unknown toolset '{synthetic}'" in w for w in mixed)
+        assert not any(f"did you mean '{synthetic}'?" in w and f"unknown toolset '{synthetic}'" in w for w in mixed)
+        assert not any("no valid toolsets" in w and f"platform '{platform}'" in w for w in mixed)
+    finally:
+        platform_registry.unregister(platform)
+
+
 def test_all_invalid_platform_warns_even_when_others_are_valid():
     cfg = {"cli": ["bogus"], "telegram": ["hermes-telegram"]}
     warnings = validate_platform_toolsets(cfg, _is_valid)

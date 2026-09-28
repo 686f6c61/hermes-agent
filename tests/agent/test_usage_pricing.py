@@ -254,6 +254,42 @@ def test_bedrock_versioned_inference_profile_resolves_to_bare_pricing():
         assert scoped.cache_write_cost_per_million == bare.cache_write_cost_per_million
 
 
+def test_bedrock_current_models_reuse_native_rates_without_clobbering_bedrock_rows():
+    """Region-scoped Bedrock ids for models that only have a native row must
+    price at that row. A Bedrock-specific snapshot (sonnet-5 at the post-intro
+    rate) must keep its own price."""
+    from decimal import Decimal
+
+    opus = get_pricing_entry("claude-opus-5-5", provider="anthropic")
+    assert opus is not None
+    for model in (
+        "global.anthropic.claude-opus-5-5",
+        "us.anthropic.claude-opus-5-5",
+    ):
+        entry = get_pricing_entry(model, provider="bedrock")
+        assert entry is not None, model
+        assert entry.input_cost_per_million == opus.input_cost_per_million
+        assert entry.output_cost_per_million == opus.output_cost_per_million
+        assert entry.cache_read_cost_per_million == opus.cache_read_cost_per_million
+        assert entry.cache_write_cost_per_million == opus.cache_write_cost_per_million
+
+    for native, bedrock_id in (
+        ("gpt-5.6-sol", "us.openai.gpt-5.6-sol"),
+        ("gpt-6-sol", "global.openai.gpt-6-sol"),
+        ("gpt-6-luna", "global.openai.gpt-6-luna"),
+    ):
+        native_entry = get_pricing_entry(native, provider="openai")
+        entry = get_pricing_entry(bedrock_id, provider="bedrock")
+        assert native_entry is not None and entry is not None, bedrock_id
+        assert entry.input_cost_per_million == native_entry.input_cost_per_million
+        assert entry.output_cost_per_million == native_entry.output_cost_per_million
+
+    sonnet = get_pricing_entry("global.anthropic.claude-sonnet-5", provider="bedrock")
+    assert sonnet is not None
+    assert sonnet.input_cost_per_million == Decimal("3.00")
+    assert sonnet.pricing_version == "bedrock-pricing-2026-06"
+
+
 
 
 

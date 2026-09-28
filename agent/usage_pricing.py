@@ -329,6 +329,18 @@ for _provider, _alias, _canonical in (
     _OFFICIAL_DOCS_PRICING[(_provider, _alias)] = _OFFICIAL_DOCS_PRICING[(_provider, _canonical)]
 del _provider, _alias, _canonical
 
+# Bedrock on-demand uses the native provider's per-token rates. Ids that are
+# not already in the bedrock snapshot borrow that row, vendor prefix included
+# (``anthropic.claude-opus-5-5``, ``openai.gpt-6-sol``). setdefault leaves a
+# bedrock-specific row alone — sonnet-5 stays at the post-intro price, not the
+# cheaper native introductory rate.
+for (_native_provider, _native_model), _native_entry in list(_OFFICIAL_DOCS_PRICING.items()):
+    if _native_provider not in {"anthropic", "openai"}:
+        continue
+    _OFFICIAL_DOCS_PRICING.setdefault(
+        ("bedrock", f"{_native_provider}.{_native_model}"), _native_entry)
+del _native_provider, _native_model, _native_entry
+
 
 def _to_decimal(value: Any) -> Optional[Decimal]:
     try:
@@ -421,9 +433,14 @@ def _strip_prefix(name: str, prefixes: tuple[str, ...]) -> str:
 
 def _normalize_bedrock_model_name(model: str) -> str:
     """Bare foundation-model id: strip the cross-region inference-profile scope
-    (``us.``/``global.``/...), map dotted versions (``4.7`` → ``4-7``), then
-    strip the trailing date/revision/profile components."""
-    name = re.sub(r"(\d+)\.(\d+)", r"\1-\2", _strip_prefix(model.lower().strip(), _BEDROCK_REGION_PREFIXES))
+    (``us.``/``global.``/...), map Anthropic dotted versions (``4.7`` → ``4-7``),
+    then strip the trailing date/revision/profile components.
+
+    OpenAI ids keep their dots (``gpt-5.6-sol``). Rewriting those misses the
+    native rate row."""
+    name = _strip_prefix(model.lower().strip(), _BEDROCK_REGION_PREFIXES)
+    if not name.startswith("openai."):
+        name = re.sub(r"(\d+)\.(\d+)", r"\1-\2", name)
     for pattern in _BEDROCK_TRAILERS:
         name = re.sub(pattern, "", name)
     return name

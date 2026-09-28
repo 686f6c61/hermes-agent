@@ -1197,7 +1197,13 @@ def _relaunch_paused_gateways(token: dict, profiles: dict, unmapped: list) -> tu
     # An exception from a launch (incl. bad pid/argv coercion) logs at debug and reads as a failed relaunch.
     relaunched = []
     failed_profiles = {}
+    # The fleet restart already armed ``gateway run --replace`` for these profiles.
+    # A second resume launch kills that process (#126821).
+    fleet_relaunched = {str(name) for name in (token.get("fleet_relaunched") or [])}
     for profile, old_pid in sorted(profiles.items()):
+        if str(profile) in fleet_relaunched:
+            relaunched.append(str(profile))
+            continue
         if _try_call(lambda p=profile, o=old_pid: launch_detached_profile_gateway_restart(str(p), int(o)),
                      "Could not restart Windows gateway profile %s after update: %s", profile):
             relaunched.append(str(profile))
@@ -1332,6 +1338,10 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
     """Resume gateways paused for a Windows update and fold the token into ``outcome``'s systemd/launchd-style
     bookkeeping so reconciliation never reports a healthy gateway as unaccounted. Must never abort the update."""
     from hermes_cli.update_cmd import _m, _write_gateway_update_exit_code
+    if isinstance(_windows_gateway_resume, dict):
+        already = [str(name) for name in (getattr(outcome, "relaunched_profiles", None) or [])]
+        if already:
+            _windows_gateway_resume["fleet_relaunched"] = already
     try:
         _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
     except Exception as _windows_resume_exc:

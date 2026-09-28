@@ -87,3 +87,23 @@ def test_buildable_pyproject_member_keeps_its_declared_name(tmp_path):
     member = _workspace_member(plugin, root, identity=plugin)
     assert (member / "pyproject.toml").read_text(encoding="utf-8") == (
         plugin / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_virtual_member_without_version_gets_a_placeholder(tmp_path):
+    """A lint-only [project] has a name and no version. uv rejects that member."""
+    import tomllib
+    from pm.workspace import _workspace_member
+
+    plugin = tmp_path / "plugins" / "lcm"
+    plugin.mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname = "hermes-lcm"\ndescription = "lint only"\n',
+        encoding="utf-8",
+    )
+    root = tmp_path / "gen"
+    root.mkdir()
+    member = _workspace_member(plugin, root, identity=plugin)
+    document = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))
+    assert document["project"]["name"].startswith("hermes-plugin-lcm-")
+    assert document["project"]["version"] == "0.0.0"
+    assert document["project"]["description"] == "lint only"

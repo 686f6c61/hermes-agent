@@ -1181,6 +1181,42 @@ def test_bound_model_input_without_hygiene_is_deterministic_and_fail_closed():
     assert bound_model_input_without_hygiene(rows, len(rows) + 5) is rows
 
 
+def test_bound_model_input_without_hygiene_does_not_open_on_assistant_tool_call():
+    """A newest-limit cut that lands on assistant(tool_calls) is still illegal for Gemini.
+
+    The tool-result skip does not move that cut. The kept tail has to open on the next
+    user turn. If the window holds no user turn at all, the old tool-result skip remains.
+    """
+    from gateway.run_turn import bound_model_input_without_hygiene
+
+    rows = [
+        {"role": "system", "content": "setup"},
+        {"role": "user", "content": "older ask"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c0"}]},
+        {"role": "tool", "tool_call_id": "c0", "content": "older result"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "result"},
+        {"role": "user", "content": "anchoring ask"},
+        {"role": "assistant", "content": "newest reply"},
+    ]
+    # limit 5, one setup row -> tail of 4 starts at index 4, an assistant tool call.
+    bounded = bound_model_input_without_hygiene(rows, 5)
+    assert len(bounded) <= 5
+    assert bounded[0]["role"] == "system"
+    assert bounded[1]["role"] == "user"
+    assert bounded[1]["content"] == "anchoring ask"
+    assert bounded[-1]["content"] == "newest reply"
+
+    tool_loop = [{"role": "system", "content": "setup"}]
+    for i in range(6):
+        tool_loop.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}"}]})
+        tool_loop.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"r{i}"})
+    fallback = bound_model_input_without_hygiene(tool_loop, 4)
+    assert fallback[0]["role"] == "system"
+    assert fallback[1]["role"] != "tool"
+    assert all(row["role"] != "user" for row in fallback)
+
+
 @pytest.mark.asyncio
 async def test_hygiene_miss_bounds_the_model_payload(monkeypatch, tmp_path):
     """Turn-hold expiry without a landed summary must not feed the model the whole transcript

@@ -32,6 +32,79 @@ const LEGACY_HEARTBEAT_ROW_RE = /^\[Background process \S+ heartbeat #\d+ /
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
 const CONTEXT_REF_RE = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
 
+// Persisted `reasoning_details` is a replay envelope (signed thinking, native
+// assistant carriers). SQLite hands it back as a string, so treating that
+// string as Thought paints the signature and the public answer. Only the
+// readable reasoning fields are display text; the stored carrier is untouched.
+function readableReasoningDetails(raw: string): string {
+  const trimmed = raw.trim()
+
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return raw
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return raw
+  }
+
+  const parts: string[] = []
+
+  const push = (value: unknown) => {
+    if (typeof value !== 'string') {
+      return
+    }
+
+    const text = value.trim()
+
+    if (text && !parts.includes(text)) {
+      parts.push(text)
+    }
+  }
+
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        walk(item)
+      }
+
+      return
+    }
+
+    if (!node || typeof node !== 'object') {
+      return
+    }
+
+    const record = node as Record<string, unknown>
+    const kind = typeof record.type === 'string' ? record.type : ''
+
+    if (kind === 'reasoning.summary') {
+      push(record.summary)
+    } else if (kind === 'reasoning.text') {
+      push(record.text)
+    } else if (typeof record.thinking === 'string') {
+      push(record.thinking)
+    }
+
+    for (const [key, value] of Object.entries(record)) {
+      if (key === 'signature' || key === 'projection' || key === 'data') {
+        continue
+      }
+
+      if (value && typeof value === 'object') {
+        walk(value)
+      }
+    }
+  }
+
+  walk(parsed)
+
+  return parts.join('\n\n')
+}
+
 // Gateway routing note for Discord turns (gateway/run_inbound.py::discord_triggering_note).
 // Current gateways persist the authored text; this heals rows written before that fix. Only
 // the note is model-facing — the `[Replying to: …]` pointer next to it is kept.
@@ -456,7 +529,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     const rawReasoning =
       message.reasoning ||
       message.reasoning_content ||
-      (typeof message.reasoning_details === 'string' ? message.reasoning_details : '')
+      (typeof message.reasoning_details === 'string' ? readableReasoningDetails(message.reasoning_details) : '')
 
     const reasoning = message.display_reasoning !== undefined ? message.display_reasoning : rawReasoning
 

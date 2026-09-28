@@ -1497,6 +1497,7 @@ export function ChatBar({
                     freshDraft={activeQueueSessionKey === null}
                     onUndone={clearDraft}
                     readLiveText={syncDraftFromEditor}
+                    sessionKeys={[sessionId, activeQueueSessionKey]}
                   />
                   <VoiceActivity state={voiceActivityState} />
                   <VoicePlaybackActivity />

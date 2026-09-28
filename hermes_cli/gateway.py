@@ -1078,6 +1078,14 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
             # Fall back to the original argv: a visible window beats a failed respawn.
             respawn_cwd = ""
             respawn_env_overlay = {}
+    # The overlay is merged last inside the watcher, so a HERMES_HOME taken from
+    # the updater process replaces the scrubbed default-root env the host watcher
+    # was started with. A named profile launching `hermes update` then respawns
+    # the host gateway inside that profile and the multiplexer refuses it (#126470).
+    # Named-profile relaunches still need the overlay's home.
+    is_host_restart = _restart_argv_is_host_gateway(run_argv) if host is None else host
+    if is_host_restart:
+        respawn_env_overlay.pop("HERMES_HOME", None)
 
     # cwd/env overlay are embedded as JSON literals in the watcher source (no extra argv plumbing).
     watcher = textwrap.dedent(
@@ -1166,9 +1174,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
     devnull = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     # Host respawn must not inherit a named launcher's dotenv. The watcher copies os.environ
     # into the gateway child, so the scrub has to be the watcher's own environ.
-    watcher_env = _host_gateway_watcher_env() if (
-        _restart_argv_is_host_gateway(run_argv) if host is None else host
-    ) else None
+    watcher_env = _host_gateway_watcher_env() if is_host_restart else None
     popen_env = {"env": watcher_env} if watcher_env is not None else {}
     # Same detach for the watcher itself, so closing the terminal doesn't kill it.
     try:

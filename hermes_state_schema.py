@@ -801,10 +801,19 @@ class SessionSchemaMixin:
         CREATE then fails with "table already exists", every row is stranded in *legacy_name*
         and the live table is empty. BEGIN IMMEDIATE holds the write lock for the whole rebuild
         so the sibling blocks (and retries under its lock patience) instead of interleaving;
-        any failure rolls the RENAME back."""
+        any failure rolls the RENAME back. When the caller already holds the transaction,
+        the same rollback is a savepoint: a later COMMIT must not persist a half-applied
+        rebuild (#126763)."""
         conn = cursor.connection
         if conn.in_transaction:  # caller already owns the transaction
-            SessionSchemaMixin._rebuild_table_statements(cursor, table, legacy_name, ddl, copy_sql, indexes)
+            cursor.execute("SAVEPOINT hermes_rebuild_table")
+            try:
+                SessionSchemaMixin._rebuild_table_statements(cursor, table, legacy_name, ddl, copy_sql, indexes)
+            except BaseException:
+                cursor.execute("ROLLBACK TO hermes_rebuild_table")
+                cursor.execute("RELEASE hermes_rebuild_table")
+                raise
+            cursor.execute("RELEASE hermes_rebuild_table")
             return
         cursor.execute("BEGIN IMMEDIATE")
         try:

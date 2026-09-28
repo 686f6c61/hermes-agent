@@ -65,3 +65,26 @@ def test_rebuild_failure_rolls_back_rename(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 't_legacy'").fetchone() is None
     conn.close()
+
+
+def test_in_transaction_rebuild_failure_restores_the_live_table(tmp_path):
+    """A caller that already owns the transaction must not keep a failed RENAME.
+
+    The autocommit path rolls the whole transaction back. The ``in_transaction``
+    path used to run the same statements with no savepoint, so a failed copy
+    left every row in ``t_legacy`` and the caller's later COMMIT persisted it.
+    """
+    conn = _db(tmp_path)
+    conn.execute("BEGIN IMMEDIATE")
+    assert conn.in_transaction
+    with pytest.raises(sqlite3.OperationalError):
+        SessionSchemaMixin._rebuild_table(
+            conn.cursor(), "t", "t_legacy", DDL, "INSERT INTO nope SELECT * FROM t_legacy")
+    assert conn.in_transaction
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "t" in names and "t_legacy" not in names
+    assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
+    conn.execute("COMMIT")
+    assert not conn.in_transaction
+    assert conn.execute("SELECT b FROM t WHERE a = 1").fetchone()[0] == "x"
+    conn.close()

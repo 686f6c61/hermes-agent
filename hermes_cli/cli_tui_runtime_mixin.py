@@ -102,7 +102,14 @@ class CLITuiRuntimeMixin:
                 if self.handle_bang_shell(user_input):
                     return
                 if _looks_like_slash_command(user_input):
-                    user_input = self._tui_run_slash_input(user_input)
+                    # Skill slash-commands queue a follow-up turn. Hand the composer
+                    # images to that turn instead of dropping them on the early return
+                    # (#126379).
+                    self._slash_submit_images = list(submit_images) if submit_images else None
+                    try:
+                        user_input = self._tui_run_slash_input(user_input)
+                    finally:
+                        self._slash_submit_images = None
                     if user_input is None:
                         return
 

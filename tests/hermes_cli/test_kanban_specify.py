@@ -66,6 +66,33 @@ def _patch_aux_client(content: str, *, model: str = "test-model"):
 
 
 # ---------------------------------------------------------------------------
+# prompt field bounds
+# ---------------------------------------------------------------------------
+
+def test_task_prompt_fields_keep_the_body_tail(caplog):
+    """Acceptance criteria live at the end of a long triage body. A head-only
+    clamp drops them before specify and decompose ever see the prompt."""
+    marker = "ACCEPTANCE-TAIL-MARKER"
+    body = ("head " * 200) + ("x" * 4500) + marker
+    task = type("T", (), {"id": "t_tail", "title": "Ship it", "body": body})()
+    with caplog.at_level("WARNING", logger="hermes_cli.kanban_specify"):
+        fields = spec._task_prompt_fields(task)
+    assert fields["body"].startswith("head ")
+    assert marker in fields["body"]
+    assert "BODY TRUNCATED" in fields["body"]
+    assert any("t_tail" in rec.message and "dropped" in rec.message for rec in caplog.records)
+
+    short = spec._task_prompt_fields(type("T", (), {"id": "t_short", "title": "t", "body": "short"})())
+    assert short["body"] == "short"
+    missing = spec._task_prompt_fields(type("T", (), {"id": "t_empty", "title": "t", "body": None})())
+    assert missing["body"] == "(no body)"
+    long_title = "T" * 500
+    titled = spec._task_prompt_fields(type("T", (), {"id": "t_title", "title": long_title, "body": "x"})())
+    assert titled["title"].endswith("…")
+    assert len(titled["title"]) == 400
+
+
+# ---------------------------------------------------------------------------
 # specify_task (module-level entry point)
 # ---------------------------------------------------------------------------
 

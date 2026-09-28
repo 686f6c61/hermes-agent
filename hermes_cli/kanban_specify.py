@@ -135,11 +135,24 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
 
 
 def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
-    """Bounded ``task_id``/``title``/``body`` for the user prompt templates."""
+    """Bounded ``task_id``/``title``/``body`` for the user prompt templates.
+
+    The body keeps both ends. Acceptance criteria sit at the tail, and a
+    head-only clamp drops them before specify or decompose sees the card.
+    """
+    from tools.tool_output_truncate import truncate_head_tail
+
+    body = task.body or "(no body)"
+    if len(body) > 4000:
+        logger.warning(
+            "Task %s prompt body: %d chars dropped from middle",
+            task.id,
+            len(body) - 4000,
+        )
     return {
         "task_id": task.id,
         "title": _truncate(task.title or "", 400),
-        "body": _truncate(task.body or "(no body)", 4000),
+        "body": truncate_head_tail(body, 4000, label="BODY"),
     }
 
 

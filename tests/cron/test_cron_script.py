@@ -830,3 +830,90 @@ class TestScriptTimeoutTreeKill:
                     psutil.Process(gpid).kill()
                 except psutil.NoSuchProcess:
                     pass
+
+
+def test_script_spawn_retries_transient_eagain_then_succeeds(cron_env, monkeypatch):
+    """A transient fork failure must not fail the occurrence (#126120)."""
+    import errno
+    from cron import scheduler_script
+
+    script = cron_env / "scripts" / "ok.py"
+    script.write_text('print("ran")\n', encoding="utf-8")
+    calls = {"n": 0}
+    real_popen = subprocess.Popen
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler_script.subprocess, "Popen", flaky)
+    monkeypatch.setattr(scheduler_script.time, "sleep", lambda _seconds: None)
+    success, output = scheduler_script._run_job_script(str(script))
+    assert success is True
+    assert output == "ran"
+    assert calls["n"] == 3
+
+
+def test_script_spawn_eagain_budget_is_a_failure(cron_env, monkeypatch):
+    import errno
+    from cron import scheduler_script
+
+    script = cron_env / "scripts" / "ok.py"
+    script.write_text('print("ran")\n', encoding="utf-8")
+    calls = {"n": 0}
+
+    def always(*args, **kwargs):
+        calls["n"] += 1
+        raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(scheduler_script.subprocess, "Popen", always)
+    monkeypatch.setattr(scheduler_script.time, "sleep", lambda _seconds: None)
+    success, output = scheduler_script._run_job_script(str(script))
+    assert success is False
+    assert "Resource temporarily unavailable" in output
+    assert calls["n"] == 5
+
+
+def test_script_spawn_enoent_is_not_retried(cron_env, monkeypatch):
+    import errno
+    from cron import scheduler_script
+
+    script = cron_env / "scripts" / "ok.py"
+    script.write_text('print("ran")\n', encoding="utf-8")
+    calls = {"n": 0}
+
+    def missing(*args, **kwargs):
+        calls["n"] += 1
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    monkeypatch.setattr(scheduler_script.subprocess, "Popen", missing)
+    monkeypatch.setattr(scheduler_script.time, "sleep", lambda _seconds: None)
+    success, output = scheduler_script._run_job_script(str(script))
+    assert success is False
+    assert "No such file" in output
+    assert calls["n"] == 1
+
+
+def test_script_spawn_stops_retrying_when_cancel_is_set(cron_env, monkeypatch):
+    import errno
+    import threading
+    from cron import scheduler_script
+
+    script = cron_env / "scripts" / "ok.py"
+    script.write_text('print("ran")\n', encoding="utf-8")
+    cancel = threading.Event()
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        cancel.set()
+        raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(scheduler_script.subprocess, "Popen", flaky)
+    monkeypatch.setattr(scheduler_script.time, "sleep", lambda _seconds: None)
+    success, output = scheduler_script._run_job_script(str(script), cancel_event=cancel)
+    assert success is False
+    assert "cancelled" in output.lower()
+    assert calls["n"] == 1

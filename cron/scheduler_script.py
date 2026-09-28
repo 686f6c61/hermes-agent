@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import errno
 import logging
 import os
 import shutil
@@ -429,6 +430,47 @@ def _script_argv(
     return [python_exe, str(path)], env_overlay, None
 
 
+_SCRIPT_SPAWN_ATTEMPTS = 5
+# Between attempts. Five tries stay under a second; the cap is the attempt count,
+# not a long sleep, so a busy host retries fork pressure without holding the fire.
+_SCRIPT_SPAWN_BACKOFF_S = (0.05, 0.1, 0.2, 0.4)
+
+
+def _transient_spawn_error(exc: BaseException) -> bool:
+    """Fork pressure only. ENOENT and EACCES still fail the occurrence immediately."""
+    if isinstance(exc, BlockingIOError):
+        return True
+    return isinstance(exc, OSError) and exc.errno in {errno.EAGAIN, errno.ENOMEM}
+
+
+def _popen_script_with_spawn_retry(
+    argv, *, deadline: float, cancel_event, script_timeout: int, path: Path, **popen_kwargs,
+) -> tuple[Optional[subprocess.Popen], Optional[tuple[bool, str]]]:
+    """Spawn ``argv``, retrying transient ``EAGAIN`` / ``ENOMEM``.
+
+    Returns ``(proc, None)`` or ``(None, (False, message))`` when the spawn
+    cannot proceed (cancel, deadline, or a non-transient / exhausted error).
+    The failure is a value, not ``isinstance(..., Popen)``: tests replace
+    ``subprocess.Popen`` with a plain function.
+    """
+    for attempt in range(_SCRIPT_SPAWN_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            return None, (False, "Script cancelled because cron fire ownership was lost")
+        if time.monotonic() >= deadline:
+            return None, (False, f"Script timed out after {script_timeout}s: {path}")
+        try:
+            return subprocess.Popen(argv, **popen_kwargs), None
+        except OSError as exc:
+            if not _transient_spawn_error(exc) or attempt + 1 == _SCRIPT_SPAWN_ATTEMPTS:
+                return None, (False, f"Script execution failed: {exc}")
+            delay = _SCRIPT_SPAWN_BACKOFF_S[min(attempt, len(_SCRIPT_SPAWN_BACKOFF_S) - 1)]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, (False, f"Script timed out after {script_timeout}s: {path}")
+            time.sleep(min(delay, remaining))
+    return None, (False, "Script execution failed: spawn retry exhausted")
+
+
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
@@ -483,10 +525,15 @@ def _run_job_script(
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent
         # gateway sessions (#69396).
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=workdir or str(path.parent), env=env, **popen_kwargs)
         deadline = time.monotonic() + script_timeout
+        proc, spawn_failure = _popen_script_with_spawn_retry(
+            argv,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=workdir or str(path.parent), env=env,
+            deadline=deadline, cancel_event=cancel_event, script_timeout=script_timeout,
+            path=path, **popen_kwargs)
+        if proc is None:
+            return spawn_failure or (False, "Script execution failed: spawn retry exhausted")
         while True:
             # Tree-kill on cancel AND timeout: killpg misses setsid grandchildren (watchdogs,
             # backgrounded shell jobs); kill_process_tree snapshots descendants BEFORE signalling.

@@ -192,3 +192,52 @@ def test_install_id_persists_across_calls(tmp_path, monkeypatch):
     assert first in (tmp_path / "config.yaml").read_text()
 
 
+def test_unchanged_health_poll_does_not_reemit_snapshot_or_fatal(monkeypatch):
+    """A steady fatal platform must not mint a new health_snapshot and platform.fatal every tick.
+
+    Each build stamps a fresh ts_ns, so equality has to ignore the timestamp.
+    A real change (active agent count, platform leaving fatal) still emits.
+    """
+    import agent.monitoring.gateway_health_export as gw
+    from agent.monitoring.gateway_health import build_gateway_health_snapshot
+
+    runtime = {
+        "gateway_state": "running",
+        "active_agents": 1,
+        "platforms": {"slack": {"state": "fatal", "error_code": "auth"}},
+    }
+
+    def read(_config):
+        return build_gateway_health_snapshot(
+            runtime,
+            gateway_running=True,
+            profile="default",
+            install_id="install-1",
+            version="test",
+            supervision_mode="manual",
+        )
+
+    emitted = []
+    monkeypatch.setattr(gw, "_read_runtime_snapshot", read)
+    monkeypatch.setattr(gw.emitter, "emit", lambda event: emitted.append(event.to_dict()))
+    if hasattr(gw, "_last_snapshot_signature"):
+        monkeypatch.setattr(gw, "_last_snapshot_signature", None)
+
+    gw._emit_snapshot_events({})
+    first = list(emitted)
+    names = [event["name"] for event in first]
+    assert "gateway.health_snapshot" in names
+    assert "platform.fatal" in names
+
+    gw._emit_snapshot_events({})
+    assert emitted == first
+
+    runtime["active_agents"] = 2
+    runtime["platforms"] = {"slack": {"state": "running"}}
+    gw._emit_snapshot_events({})
+    fresh = emitted[len(first):]
+    assert fresh
+    assert any(event["name"] == "gateway.health_snapshot" and event["active_agents"] == 2 for event in fresh)
+    assert all(event["name"] != "platform.fatal" for event in fresh)
+
+

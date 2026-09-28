@@ -194,12 +194,31 @@ def _read_runtime_snapshot(config: Dict[str, Any]):
     return gateway_snapshot
 
 
+# Last diagnostic set published by the poll. Metrics keep their own interval;
+# this gate only stops health_snapshot / platform.fatal from repeating while
+# the condition is unchanged. ts_ns is minted on every build, so it is not
+# part of the signature. None means this process has not published yet.
+_last_snapshot_signature: Optional[tuple] = None
+
+
+def _snapshot_event_signature(event: Any) -> tuple:
+    payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    payload.pop("ts_ns", None)
+    return tuple(sorted(payload.items()))
+
+
 def _emit_snapshot_events(config: Dict[str, Any]) -> None:
+    global _last_snapshot_signature
     if not _gateway_health_config(config).get("diagnostic_events_enabled", True):
         return
     try:
-        for event in _read_runtime_snapshot(config).events:
+        events = list(_read_runtime_snapshot(config).events)
+        signature = tuple(_snapshot_event_signature(event) for event in events)
+        if signature == _last_snapshot_signature:
+            return
+        for event in events:
             emitter.emit(event)
+        _last_snapshot_signature = signature
     except Exception:
         logger.debug("gateway health snapshot emit failed", exc_info=True)
 

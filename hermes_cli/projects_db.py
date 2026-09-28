@@ -128,6 +128,15 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
         for col in _OPTIONAL_PROJECT_COLUMNS:
             if col not in cols:
                 _add_column_if_missing(conn, "projects", col, f"{col} TEXT")
+        # SCHEMA_SQL never alters an existing table. list_projects reads both.
+        if "archived" not in cols:
+            _add_column_if_missing(
+                conn, "projects", "archived", "archived INTEGER NOT NULL DEFAULT 0"
+            )
+        if "created_at" not in cols:
+            _add_column_if_missing(
+                conn, "projects", "created_at", "created_at INTEGER NOT NULL DEFAULT 0"
+            )
         _INITIALIZED_PATHS.add(resolved)
 
     return open_db(path, db_label="projects.db", foreign_keys=True, initialize=_initialize)

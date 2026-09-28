@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 import pytest
 
@@ -142,5 +143,50 @@ def test_per_profile_isolation(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+def test_legacy_db_missing_created_at_and_archived_lists(tmp_path):
+    # A projects.db from before those columns: CREATE TABLE IF NOT EXISTS does
+    # not add them, and list_projects selects both.
+    path = tmp_path / "projects.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT,
+            icon TEXT,
+            color TEXT,
+            board_slug TEXT,
+            primary_path TEXT
+        )
+        """
+    )
+    raw.execute(
+        "INSERT INTO projects (id, slug, name, primary_path) VALUES (?, ?, ?, ?)",
+        ("p_old", "legacy", "Legacy", "/tmp/legacy"),
+    )
+    raw.commit()
+    raw.close()
+
+    pdb._INITIALIZED_PATHS.discard(str(path.resolve()))
+    conn = pdb.connect(db_path=path)
+    try:
+        listed = pdb.list_projects(conn)
+        assert [p.slug for p in listed] == ["legacy"]
+        assert listed[0].archived is False
+        assert listed[0].created_at == 0
+        assert listed[0].primary_path == "/tmp/legacy"
+    finally:
+        conn.close()
+
+    pdb._INITIALIZED_PATHS.discard(str(path.resolve()))
+    again = pdb.connect(db_path=path)
+    try:
+        assert [p.slug for p in pdb.list_projects(again)] == ["legacy"]
+    finally:
+        again.close()
 
 

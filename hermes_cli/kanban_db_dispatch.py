@@ -2470,7 +2470,10 @@ def _rotate_worker_log(
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
     console-script target — there is no top-level ``hermes`` package)."""
-    return [sys.executable, "-m", "hermes_cli.main"]
+    # -P keeps the task workspace off sys.path. ``python -m`` otherwise
+    # imports a workspace ``hermes_cli/`` (or a stdlib-named file) ahead of
+    # this install (#126127).
+    return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
 def _absolute_hermes_path(path: str) -> str:

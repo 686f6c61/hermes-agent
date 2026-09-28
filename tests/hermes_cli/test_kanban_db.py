@@ -1586,7 +1586,7 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     monkeypatch.delenv("HERMES_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/tmp/planted/hermes")
     monkeypatch.setattr(kbd, "_safe_which_no_cwd", lambda name: "/tmp/planted/hermes")
-    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-P", "-m", "hermes_cli.main"]
 
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes/bin/hermes")
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
@@ -1617,6 +1617,33 @@ def test_resolve_hermes_argv_module_actually_runs():
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
     )
+
+
+def test_module_hermes_argv_does_not_import_a_workspace_shadow(tmp_path):
+    """A task workspace must not supply ``hermes_cli`` to the worker.
+
+    ``python -m`` puts the cwd on ``sys.path`` unless ``-P`` is set, so a
+    workspace ``hermes_cli/`` (or a stdlib-named file) replaces the install.
+    """
+    import subprocess
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    shadow = tmp_path / "hermes_cli"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("raise SystemExit('shadowed-hermes-cli')\n", encoding="utf-8")
+    (shadow / "main.py").write_text("raise SystemExit('shadowed-hermes-cli')\n", encoding="utf-8")
+
+    argv = kbd._module_hermes_argv()
+    proc = subprocess.run(
+        argv + ["--version"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, combined[:400]
+    assert "shadowed-hermes-cli" not in combined
 
 
 # ---------------------------------------------------------------------------

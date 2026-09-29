@@ -232,36 +232,3 @@ def test_cleanup_workspace_keeps_scratch_when_another_board_reuses_the_task_id(b
     with kbc.connect_closing() as conn:
         kbw._cleanup_workspace(conn, archived)
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
-
-
-def test_cleanup_workspace_keeps_scratch_when_another_board_reuses_the_task_id(board):
-    """A sibling board may reuse this board's task id for a different live task."""
-    from hermes_cli import kanban_db_workspace as kbw
-
-    kb.create_board("other")
-    with kbc.connect_closing() as conn:
-        archived = kb.create_task(conn, title="archived on default")
-        shared = kb.workspaces_root() / "same-id"
-        shared.mkdir(parents=True)
-        (shared / "note.txt").write_text("still needed", encoding="utf-8")
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET status='archived', workspace_kind='scratch', "
-                "workspace_path=? WHERE id=?",
-                (str(shared), archived),
-            )
-    with kbc.connect_closing(board="other") as other:
-        live = kb.create_task(other, title="live on other")
-        with kb.write_txn(other):
-            other.execute(
-                "UPDATE task_events SET task_id=? WHERE task_id=?",
-                (archived, live),
-            )
-            other.execute(
-                "UPDATE tasks SET id=?, status='ready', workspace_kind='scratch', "
-                "workspace_path=? WHERE id=?",
-                (archived, str(shared), live),
-            )
-    with kbc.connect_closing() as conn:
-        kbw._cleanup_workspace(conn, archived)
-    assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"

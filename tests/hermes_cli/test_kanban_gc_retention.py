@@ -170,3 +170,32 @@ def test_cleanup_workspace_keeps_a_scratch_dir_a_live_task_still_uses(board):
         archived, _live, shared = _shared_scratch(conn)
         kbw._cleanup_workspace(conn, archived)
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+
+
+def test_cleanup_workspace_keeps_a_scratch_dir_a_live_task_on_another_board_uses(board):
+    """An archived task on the default board must not rmtree a dir a named board still has ready."""
+    from hermes_cli import kanban_db_workspace as kbw
+
+    kb.create_board("other")
+    with kbc.connect_closing() as conn:
+        archived = kb.create_task(conn, title="archived on default")
+        shared = kb.workspaces_root() / "cross-board"
+        shared.mkdir(parents=True)
+        (shared / "note.txt").write_text("still needed", encoding="utf-8")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='archived', workspace_kind='scratch', "
+                "workspace_path=? WHERE id=?",
+                (str(shared), archived),
+            )
+    with kbc.connect_closing(board="other") as other:
+        live = kb.create_task(other, title="live on other")
+        with kb.write_txn(other):
+            other.execute(
+                "UPDATE tasks SET status='ready', workspace_kind='scratch', "
+                "workspace_path=? WHERE id=?",
+                (str(shared), live),
+            )
+    with kbc.connect_closing() as conn:
+        kbw._cleanup_workspace(conn, archived)
+    assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"

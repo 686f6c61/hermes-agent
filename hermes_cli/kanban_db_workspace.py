@@ -64,6 +64,85 @@ def _has_active_children(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_ACTIVE_CHILDREN_SQL, (task_id,)).fetchone() is not None
 
 
+_OTHER_LIVE_PATHS_SQL = (
+    "SELECT workspace_path FROM tasks "
+    "WHERE id != ? AND workspace_path IS NOT NULL "
+    "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')"
+)
+
+
+def _row_path(row) -> str:
+    try:
+        return row["workspace_path"] or ""
+    except (KeyError, IndexError, TypeError):
+        return row[0] or ""
+
+
+def _conn_uses_path(conn: sqlite3.Connection, task_id: str, key: str) -> bool:
+    for row in conn.execute(_OTHER_LIVE_PATHS_SQL, (task_id,)).fetchall():
+        other = _row_path(row)
+        if not other:
+            continue
+        try:
+            other_key = _path_key(Path(other).expanduser().resolve(strict=False))
+        except OSError:
+            continue
+        if other_key == key:
+            return True
+    return False
+
+
+def _connection_db_file(conn: sqlite3.Connection) -> Optional[Path]:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None:
+        return None
+    file = row[2]
+    if not file:
+        return None
+    return Path(file).resolve()
+
+
+def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
+    """Every other board's ``kanban.db``. Raises ``OSError`` when the set is unknown.
+
+    ``kanban_db_path`` follows ``HERMES_KANBAN_DB`` and would collapse every
+    slug onto the pinned file, so the scan uses the on-disk layout: the
+    default board at ``<home>/kanban.db`` and named boards at
+    ``<home>/kanban/boards/<slug>/kanban.db``.
+    """
+    current = _connection_db_file(conn)
+    home = _kb.kanban_home()
+    candidates = [home / "kanban.db"]
+    root = home / "kanban" / "boards"
+    if root.is_dir():
+        for child in root.iterdir():
+            if child.is_dir():
+                candidates.append(child / "kanban.db")
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if current is not None and resolved == current:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append(resolved)
+    return found
+
+
+def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:
+    uri = db_file.resolve().as_uri() + "?mode=ro"
+    other = sqlite3.connect(uri, uri=True, timeout=1.0)
+    try:
+        other.row_factory = sqlite3.Row
+        return _conn_uses_path(other, task_id, key)
+    finally:
+        other.close()
+
+
 def _workspace_in_use_by_other(
     conn: sqlite3.Connection, task_id: str, path: Path | str
 ) -> bool:
@@ -72,6 +151,10 @@ def _workspace_in_use_by_other(
     ``gc``, completion and deferred parent cleanup used to ``rmtree`` a shared
     ``workspace_path`` as soon as one of its tasks went terminal. Compare the
     resolved path: a row may store ``~`` or a symlinked spelling.
+
+    The connection covers one board. A ready task on a named board can point
+    at the same directory. If that set of databases cannot be read, refuse
+    the delete.
     """
     try:
         key = _path_key(Path(path).expanduser().resolve(strict=False))
@@ -79,21 +162,20 @@ def _workspace_in_use_by_other(
         return True
     if not key:
         return False
-    rows = conn.execute(
-        "SELECT workspace_path FROM tasks "
-        "WHERE id != ? AND workspace_path IS NOT NULL "
-        "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')",
-        (task_id,),
-    ).fetchall()
-    for row in rows:
-        other = row["workspace_path"]
-        if not other:
-            continue
+    try:
+        if _conn_uses_path(conn, task_id, key):
+            return True
+    except sqlite3.Error:
+        return True
+    try:
+        siblings = _sibling_board_db_files(conn)
+    except OSError:
+        return True
+    for db_file in siblings:
         try:
-            other_key = _path_key(Path(other).expanduser().resolve(strict=False))
-        except OSError:
-            continue
-        if other_key == key:
+            if _other_board_uses_path(db_file, task_id, key):
+                return True
+        except (OSError, sqlite3.Error):
             return True
     return False
 

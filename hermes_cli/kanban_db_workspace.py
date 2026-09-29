@@ -69,6 +69,13 @@ _OTHER_LIVE_PATHS_SQL = (
     "WHERE id != ? AND workspace_path IS NOT NULL "
     "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')"
 )
+# Sibling boards mint their own ids, so the id being cleaned up here can
+# name a different live task there. Do not exclude it.
+_ANY_LIVE_PATHS_SQL = (
+    "SELECT workspace_path FROM tasks "
+    "WHERE workspace_path IS NOT NULL "
+    "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')"
+)
 
 
 def _row_path(row) -> str:
@@ -78,8 +85,14 @@ def _row_path(row) -> str:
         return row[0] or ""
 
 
-def _conn_uses_path(conn: sqlite3.Connection, task_id: str, key: str) -> bool:
-    for row in conn.execute(_OTHER_LIVE_PATHS_SQL, (task_id,)).fetchall():
+def _conn_uses_path(
+    conn: sqlite3.Connection, task_id: str, key: str, *, exclude_task_id: bool = True
+) -> bool:
+    if exclude_task_id:
+        rows = conn.execute(_OTHER_LIVE_PATHS_SQL, (task_id,)).fetchall()
+    else:
+        rows = conn.execute(_ANY_LIVE_PATHS_SQL).fetchall()
+    for row in rows:
         other = _row_path(row)
         if not other:
             continue
@@ -138,7 +151,7 @@ def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:
     other = sqlite3.connect(uri, uri=True, timeout=1.0)
     try:
         other.row_factory = sqlite3.Row
-        return _conn_uses_path(other, task_id, key)
+        return _conn_uses_path(other, task_id, key, exclude_task_id=False)
     finally:
         other.close()
 

@@ -217,7 +217,7 @@ def test_notify_fallback_fires_on_done_without_a_shim(tmp_path):
     record = tmp_path / "osascript.log"
     stub = tmp_path / "osascript"
     stub.write_text(
-        "#!/bin/bash\n"
+        "#!/usr/bin/env bash\n"
         f"printf '%s\\n' \"$*\" >> '{record}'\n"
         "exit 0\n",
         encoding="utf-8",
@@ -226,7 +226,7 @@ def test_notify_fallback_fires_on_done_without_a_shim(tmp_path):
     src = src.replace("/usr/bin/osascript", str(stub))
     harness = tmp_path / "harness.sh"
     harness.write_text(
-        "#!/bin/bash\n"
+        "#!/usr/bin/env bash\n"
         "set -u\n"
         "log() { :; }\n"
         "uname() { echo Darwin; }\n"

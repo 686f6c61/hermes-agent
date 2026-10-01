@@ -191,6 +191,68 @@ describe('ThemeProvider ← local bridge fallback', () => {
     }
   })
 
+  // The stock config ships `display.skin: "default"`, which for the desktop is
+  // "no opinion". Registering the Classic palette under that name (as the
+  // reverted carrier #130015 did) must not repaint a stock user at boot or on
+  // the connect-time seed: the boot fallback stays on nous until the user
+  // explicitly picks Classic, which persists and then legitimately resolves.
+  it('keeps the stock `default` bridge skin on nous at boot even with Classic registered', async () => {
+    const previous = Object.getOwnPropertyDescriptor(window, 'hermesDesktop')
+
+    try {
+      Object.defineProperty(window, 'hermesDesktop', {
+        configurable: true,
+        value: { localSkin: { profile: 'default', skin: classicDefault } }
+      })
+      vi.resetModules()
+
+      const [
+        { ThemeProvider: FreshThemeProvider, useTheme: freshUseTheme },
+        freshSync
+      ] = await Promise.all([import('./context'), import('./backend-sync')])
+
+      // The Classic palette IS registered (same path the connect-time seed
+      // uses) — the invariant is that this alone does not repaint stock users.
+      expect(freshSync.$backendThemes.get().default?.label).toBe('Classic Hermes')
+
+      let latest: ReturnType<typeof freshUseTheme> | null = null
+      const Probe = () => {
+        latest = freshUseTheme()
+
+        return null
+      }
+
+      render(
+        <FreshThemeProvider>
+          <Probe />
+        </FreshThemeProvider>
+      )
+
+      // Boot paint stays on the desktop default, not Classic gold.
+      expect(window.document.documentElement.dataset.hermesTheme).toBe('nous')
+      expect(cssVar('--theme-background-seed')).not.toBe('#1a1a2e')
+
+      // An explicit pick of Classic still resolves and persists.
+      act(() => {
+        latest!.setTheme('default')
+      })
+      expect(latest!.themeName).toBe('default')
+      expect(latest!.theme.label.toLowerCase()).toContain('classic hermes')
+      expect(cssVar('--theme-primary').toLowerCase()).toBe('#ffbf00')
+    } finally {
+      cleanup()
+      window.localStorage.clear()
+
+      if (previous) {
+        Object.defineProperty(window, 'hermesDesktop', previous)
+      } else {
+        Reflect.deleteProperty(window, 'hermesDesktop')
+      }
+
+      vi.resetModules()
+    }
+  })
+
   it('keeps a saved desktop appearance ahead of the local bridge fallback', async () => {
     const previous = Object.getOwnPropertyDescriptor(window, 'hermesDesktop')
 

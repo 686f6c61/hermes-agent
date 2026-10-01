@@ -109,9 +109,16 @@ const BOOT_PROFILE_KEY = typeof window === 'undefined' ? 'default' : (localDispl
 // Provider state keeps the raw pick so a name nothing resolves YET (a backend
 // skin the gateway hasn't seeded on this launch) isn't flattened to the default
 // for the rest of the session — it paints as soon as the registry can resolve it.
+// The stock config ships `display.skin: "default"`, which for the desktop is
+// "no opinion": the bridge fallback must stay on nous instead of resolving the
+// registered Classic palette (registering under `default` repainted stock users
+// at boot and on the connect-time seed — see the reverted #130015). An explicit
+// pick persists through skinPref, so `setTheme('default')` still resolves Classic.
+const bootLocalSkinName = localDisplaySkinName === 'default' ? null : localDisplaySkinName
+
 const storedSkin = (profile: string): string =>
   skinPref.stored(profile) ??
-  (profile === BOOT_PROFILE_KEY ? (localDisplaySkinName ?? DEFAULT_SKIN_NAME) : DEFAULT_SKIN_NAME)
+  (profile === BOOT_PROFILE_KEY ? (bootLocalSkinName ?? DEFAULT_SKIN_NAME) : DEFAULT_SKIN_NAME)
 
 /** Everything a peer window could change that this one has to repaint for. */
 const APPEARANCE_KEYS = new Set([SKIN_KEY, PROFILE_SKINS_KEY, MODE_KEY, PROFILE_MODES_KEY])

@@ -135,9 +135,18 @@ def run_with_load_deadline(plugin_key: str, ctx: "PluginContext", fn: Callable[[
 
 
 def _evict_modules(module_name: str) -> None:
-    """Drop ``module_name`` and every ``module_name.*`` submodule from ``sys.modules``."""
+    """Drop ``module_name`` and every ``module_name.*`` submodule from ``sys.modules``.
+
+    Iterate a ``.copy()`` snapshot: plugin loads run on concurrent worker threads, and a
+    sibling thread's ``import`` can insert into ``sys.modules`` mid-iteration, killing
+    every plugin in the batch with "dictionary changed size during iteration" (#131817).
+    A plain iteration — even inside a list comprehension or ``list(sys.modules)`` — walks
+    the live dict through the iterator protocol and still races the insert; ``dict.copy()``
+    snapshots atomically at the C level.
+    """
     prefix = f"{module_name}."
-    for name in [n for n in sys.modules if n == module_name or n.startswith(prefix)]:
+    snapshot = sys.modules.copy()
+    for name in [n for n in snapshot if n == module_name or n.startswith(prefix)]:
         del sys.modules[name]
 
 

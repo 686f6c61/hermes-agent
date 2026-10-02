@@ -641,14 +641,16 @@ exclude-newer = "14 days"
 # aiohttp, cryptography: same shape — the advisory fixes are newer than the
 # 14-day window, so the resolver cannot see them without an exception.
 #
-# defusedxml, python-olm, unpaddedbase64: the OPPOSITE shape (#80387, #79434,
-# #78227 family). These are ancient, effectively frozen releases (2021-2023)
-# whose upload dates are frequently absent from mirror indexes and stale uv
-# HTTP caches. uv treats a missing upload date as "newer than the cutoff" and
-# excludes the package, bricking [youtube]/[wecom]/[matrix] resolution
-# ("there are no versions of defusedxml"). Exempting them carries zero aging
-# risk — their newest releases are years old — and unbricks resolvers that
-# cannot see upload dates.
+# defusedxml, python-olm, unpaddedbase64, pilk: the OPPOSITE shape (#80387,
+# #79434, #78227 family, #131681). These are ancient, effectively frozen
+# releases (2021-2023 for the first three; pilk==0.2.4 is the silk extra's
+# exact pin of the same shape) whose upload dates are frequently absent from
+# mirror indexes and stale uv HTTP caches. uv treats a missing upload date
+# as "newer than the cutoff" and excludes the package, bricking
+# [youtube]/[wecom]/[matrix] resolution ("there are no versions of
+# defusedxml") and, for pilk, every plugin enable that resolves the silk
+# extra. Exempting them carries zero aging risk — their newest releases are
+# years old — and unbricks resolvers that cannot see upload dates.
 #
 # setuptools, wheel, pillow, mcp: build/core pin bricks (#78227, #75992, #76020, #96488). uv
 # applies exclude-newer to build-system.requires and core deps too; when a
@@ -750,6 +752,7 @@ packaging = false
 parallel-web = false
 pathspec = false
 pillow = false
+pilk = false
 piper-tts = "2026-09-04T16:47:32Z"
 prompt-toolkit = false
 psutil = false

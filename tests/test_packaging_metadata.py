@@ -29,6 +29,18 @@ def test_core_and_optional_speech_dependencies():
     }
 
 
+def test_silk_pilk_pin_is_exempt_from_exclude_newer():
+    """pilk==0.2.4 is an ancient exact pin in the silk extra.
+
+    Indexes that omit upload-time make uv treat the pin as newer than the
+    cutoff, so resolving any plugin workspace that pulls the extra fails.
+    """
+    metadata = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    silk = metadata["project"]["optional-dependencies"]["silk"]
+    assert any(spec.split(";", 1)[0].strip() == "pilk==0.2.4" for spec in silk)
+    assert metadata["tool"]["uv"]["exclude-newer-package"].get("pilk") is False
+
+
 def test_starlette_server_pins_and_lock_exclude_cve_2026_48710():
     # BadHost's reviewed fixed boundary is independent of today's exact pin.
     floor = Version("1.0.1")

@@ -1574,6 +1574,39 @@ class TestIncomingDocumentHandling:
 
 
     @pytest.mark.asyncio
+    async def test_svg_attachment_cached_as_document(self, adapter):
+        """image/svg+xml is XML, not a raster image: it must reach the agent as a
+        document instead of dying in the image cache as a fake scope/auth failure."""
+        svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+
+        with patch.object(
+            adapter, "_download_slack_file", new_callable=AsyncMock,
+            side_effect=RuntimeError("raster path must not be used for SVG")
+        ), patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            dl.return_value = svg_bytes
+            event = self._make_event(
+                files=[
+                    {
+                        "mimetype": "image/svg+xml",
+                        "name": "CAIXINHA.svg",
+                        "url_private_download": "https://files.slack.com/CAIXINHA.svg",
+                        "size": len(svg_bytes),
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.message_type == MessageType.DOCUMENT
+        assert len(msg_event.media_urls) == 1
+        assert os.path.exists(msg_event.media_urls[0])
+        assert msg_event.media_types == ["application/xml"]
+        assert "[Slack attachment notice]" not in msg_event.text
+
+
+    @pytest.mark.asyncio
     async def test_txt_document_injects_content(self, adapter):
         """A .txt file under 100KB should have its content injected into event text."""
         content = b"Hello from a text file"

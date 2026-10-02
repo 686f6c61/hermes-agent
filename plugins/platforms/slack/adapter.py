@@ -4795,6 +4795,21 @@ class SlackAdapter(BasePlatformAdapter):
         if kind == "image":
             ext = "." + mimetype.split("/")[-1].split(";")[0]
             if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+                if mimetype.split(";")[0].strip() == "image/svg+xml":
+                    # image/svg+xml is XML text, not pixels: the raster path would
+                    # force it to .jpg, cache_image_from_bytes would reject the file,
+                    # and the agent would get a misleading scope/auth failure notice.
+                    # Cache it through the document path with a media type the
+                    # image/* router won't send back through vision.
+                    file_size = f.get("size", 0)
+                    if not file_size or file_size > 20 * 1024 * 1024:
+                        logger.warning("[Slack] SVG too large or unknown size: %s", file_size)
+                        return None
+                    raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
+                    cached_path = await cache_document_from_bytes_async(
+                        raw_bytes, f.get("name", "") or "attachment.svg")
+                    logger.debug("[Slack] Cached user SVG as document: %s", cached_path)
+                    return cached_path, "application/xml", ""
                 ext = ".jpg"
             return await self._download_slack_file(url, ext, team_id=team_id), mimetype, ""
         if kind in ("audio", "voice clip"):

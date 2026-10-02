@@ -76,6 +76,80 @@ class TestReapOrphanedBrowserSessions:
         assert d.exists()
 
 
+    def test_pidless_dir_with_live_bound_daemon_is_reaped_via_scan(self, fake_tmpdir):
+        """#131822: a pidless socket dir can still hide a live agent-browser daemon
+        (lanes where agent-browser never writes ``<session>.pid``). The old pidless
+        branch rm -rf'd the dir untouched, destroying the last pointer to a daemon
+        that then leaked headless Chromium for days. The reaper must find the daemon
+        through the process table (identity + socket binding, the same fail-closed
+        verification as the pid-file path) and tree-kill it before removing the dir.
+        """
+        from tools.browser_tool_lifecycle import _reap_orphaned_browser_sessions
+
+        d = _make_socket_dir(fake_tmpdir, "h_pidless01", owner_pid=99999)  # owner dead, no .pid
+
+        class _FakeProc:
+            def __init__(self, pid, name):
+                self.info = {"pid": pid, "name": name, "cmdline": []}
+
+        terminate_calls = []
+
+        with patch("tools.browser_tool_lifecycle._socket_dir_idle_seconds",
+                   return_value=10_000), \
+             patch("gateway.status._pid_exists", return_value=False), \
+             patch("psutil.process_iter",
+                   return_value=[_FakeProc(4711, "agent-browser-darwin-arm64")]), \
+             patch("tools.browser_tool_lifecycle._verify_reapable_browser_daemon",
+                   return_value=True), \
+             patch("tools.browser_tool_lifecycle._terminate_verified_daemon",
+                   side_effect=lambda pid, session, log: terminate_calls.append(pid) or True):
+            _reap_orphaned_browser_sessions()
+
+        assert terminate_calls == [4711]
+        assert not d.exists()
+
+    def test_pidless_scan_refusal_keeps_the_dir_as_lead(self, fake_tmpdir):
+        """A live agent-browser candidate that fails identity/binding verification
+        (a recycled PID bound elsewhere) must not be killed, and the dir must survive
+        as the last pointer for a later sweep."""
+        from tools.browser_tool_lifecycle import _reap_socket_dir
+
+        d = _make_socket_dir(fake_tmpdir, "h_refused01", owner_pid=99999)
+
+        class _FakeProc:
+            def __init__(self, pid):
+                self.info = {"pid": pid, "name": "agent-browser-darwin-arm64", "cmdline": []}
+
+        terminate_calls = []
+
+        with patch("tools.browser_tool_lifecycle._socket_dir_idle_seconds",
+                   return_value=10_000), \
+             patch("gateway.status._pid_exists", return_value=False), \
+             patch("psutil.process_iter", return_value=[_FakeProc(4711)]), \
+             patch("tools.browser_tool_lifecycle._verify_reapable_browser_daemon",
+                   return_value=False), \
+             patch("tools.browser_tool_lifecycle._terminate_verified_daemon",
+                   side_effect=lambda pid, session, log: terminate_calls.append(pid) or True):
+            reaped = _reap_socket_dir(str(d), "h_refused01", set())
+
+        assert terminate_calls == []
+        assert reaped is False
+        assert d.exists()
+
+    def test_pidless_dir_without_any_daemon_is_still_removed(self, fake_tmpdir):
+        """No agent-browser candidate in the process table: plain cleanup, as before."""
+        from tools.browser_tool_lifecycle import _reap_orphaned_browser_sessions
+
+        d = _make_socket_dir(fake_tmpdir, "h_empty01")
+
+        with patch("tools.browser_tool_lifecycle._socket_dir_idle_seconds",
+                   return_value=10_000), \
+             patch("gateway.status._pid_exists", return_value=False), \
+             patch("psutil.process_iter", return_value=[]):
+            _reap_orphaned_browser_sessions()
+
+        assert not d.exists()
+
     def test_alive_legacy_daemon_is_reaped(self, fake_tmpdir):
         """Alive, untracked, legacy (no owner_pid) daemon is reaped.
 

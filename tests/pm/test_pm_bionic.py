@@ -28,6 +28,19 @@ def test_all_targets_includes_bionic():
     assert ALL_TARGETS.count("linux-arm64-bionic") == 1
 
 
+def test_gh_bionic_target_uses_the_static_linux_archive():
+    """gh ships one CGO-disabled linux-arm64 tarball. Splitting
+    linux-arm64-bionic on '-' raises ValueError and aborts pm update."""
+    from pm.packages import Gh
+
+    url = Gh().fetch_url("2.74.1", "linux-arm64-bionic")
+    assert url == (
+        "https://github.com/cli/cli/releases/download/v2.74.1/"
+        "gh_2.74.1_linux_arm64.tar.gz"
+    )
+    assert Gh().fetch_url("2.74.1", "linux-arm64") == url
+
+
 def _assert_pinned_bionic_row(lock, pkg, url_suffix_re):
     """The bionic rows are DELIBERATE explicit pins: the version axis follows
     main (the desktop artifacts), while the termux/TUR suppliers rotate or

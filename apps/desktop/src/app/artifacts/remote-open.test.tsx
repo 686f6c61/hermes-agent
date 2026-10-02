@@ -22,8 +22,11 @@ const getSessionMessages = vi.hoisted(() => vi.fn())
 
 vi.mock('@/hermes', async () => ({
   ...(await vi.importActual('@/hermes')),
-  listAllProfileSessions: async () => ({
-    sessions: [{ id: 'artifact-session', title: 'Fixture', profile: 'origin-profile' }]
+    listAllProfileSessions: async () => ({
+    sessions: [
+      { id: 'artifact-session', title: 'Fixture', profile: 'origin-profile' },
+      { id: 'remote-session', title: 'Remote Fixture', profile: 'origin-profile', connection_id: 'conn-123' }
+    ]
   }),
   getSessionMessages
 }))
@@ -35,16 +38,20 @@ afterEach(() => {
 })
 
 it('keeps discovered file paths and originating session scope intact through remote opening', async () => {
-  getSessionMessages.mockResolvedValue({
-    messages: [
-      {
-        role: 'assistant',
-        timestamp: 1000,
-        content: paths.map(path => `MEDIA:${path}`).join(' ') + ' https://example.com/report.txt'
-      }
-    ],
-    session_id: 'artifact-session'
-  })
+  getSessionMessages.mockImplementation(async (id: string) =>
+    id === 'artifact-session'
+      ? {
+          messages: [
+            {
+              role: 'assistant',
+              timestamp: 1000,
+              content: paths.map(path => `MEDIA:${path}`).join(' ') + ' https://example.com/report.txt'
+            }
+          ],
+          session_id: id
+        }
+      : { messages: [], session_id: id }
+  )
   const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
   const openExternal = vi.fn()
   vi.stubGlobal('hermesDesktop', { saveGatewayFile, openExternal })
@@ -98,4 +105,24 @@ it('keeps discovered file paths and originating session scope intact through rem
     offset: 0,
     order: 'oldest'
   })
+})
+
+it('reads a session merged from a registered connection through its owning backend', async () => {
+  // A session tagged with connection_id lives on the remote backend; reading it
+  // with the bare profile string makes the local backend answer 404 and the
+  // artifacts view reports "N could not be read".
+  getSessionMessages.mockResolvedValue({ messages: [], session_id: 'remote-session' })
+  render(
+    <MemoryRouter>
+      <ArtifactsView />
+    </MemoryRouter>
+  )
+
+  await waitFor(() =>
+    expect(getSessionMessages).toHaveBeenCalledWith(
+      'remote-session',
+      { connectionId: 'conn-123', profile: 'origin-profile' },
+      expect.objectContaining({ order: 'oldest' })
+    )
+  )
 })

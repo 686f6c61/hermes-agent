@@ -293,8 +293,12 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
   )
 }
 
+// Tool output is full of filename-shaped tokens (`agent.log`, `README.md`): the
+// bare-domain matcher mistakes them for URLs and PrettyLink then replaces the
+// visible path with whatever title a third party serves for that domain.
+// thread/system-message.tsx passes explicitOnly for the same reason.
 function LinkifiedText({ className, text }: { className?: string; text: string }) {
-  return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
+  return <SharedLinkifiedText className={className} explicitOnly pretty text={cleanVisibleText(text)} />
 }
 
 function ToolTitle({

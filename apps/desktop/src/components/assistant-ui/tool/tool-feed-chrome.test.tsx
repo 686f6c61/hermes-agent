@@ -9,6 +9,7 @@ import { Thread } from '@/components/assistant-ui/thread'
 import { toRuntimeMessage } from '@/lib/chat-runtime'
 import { clearAllPrompts, setApprovalRequest } from '@/store/prompts'
 import { setShowReasoningFromConfig } from '@/store/reasoning-disclosure'
+import { setToolDisclosureOpen } from '@/store/tool-view'
 import { $activeSessionId } from '@/store/session'
 import { setShowToolActivityFromConfig } from '@/store/tool-activity'
 
@@ -232,5 +233,59 @@ describe('tool feed visibility policy', () => {
 
     expect(await screen.findByText('done')).toBeTruthy()
     expect(container.querySelectorAll('[data-tool-row]')).toHaveLength(0)
+  })
+})
+
+describe('tool error linkification', () => {
+  // A tool error is full of filename-shaped tokens. The bare-domain matcher used
+  // to linkify them, and PrettyLink then replaced the visible path with the
+  // <title> of whatever third party owned that domain (e.g. readme.md).
+  it('keeps bare filename tokens in tool error output as plain text', () => {
+    // The error text only paints inside the expanded card body.
+    setToolDisclosureOpen('tool-entry:assistant-filename-error:tool:write-1', true)
+    const { container } = render(
+      <ThreadRuntime
+        messages={[
+          {
+            id: 'assistant-filename-error',
+            role: 'assistant',
+            content: [
+              {
+                type: 'tool-call',
+                toolCallId: 'write-1',
+                toolName: 'write_file',
+                args: { path: 'C:\\Users\\me\\projects\\myrepo\\README.md' },
+                argsText: JSON.stringify({ path: 'C:\\Users\\me\\projects\\myrepo\\README.md' }),
+                isError: true,
+                result: {
+                  error:
+                    'Failed to write file: C:\\Users\\me\\projects\\myrepo\\README.md (docs: https://example.com/upgrade-guide) — also see issue-draft.md'
+                }
+              }
+            ],
+            status: { type: 'complete', reason: 'stop' },
+            createdAt,
+            metadata: {
+              unstable_state: null,
+              unstable_annotations: [],
+              unstable_data: [],
+              steps: [],
+              custom: {}
+            }
+          } as unknown as ThreadMessage
+        ]}
+      >
+        <Thread />
+      </ThreadRuntime>
+    )
+
+    const hrefs = Array.from(container.querySelectorAll('a')).map(a => a.getAttribute('href') ?? '')
+    // The explicit URL is still a link.
+    expect(hrefs.some(href => href.includes('example.com/upgrade-guide'))).toBe(true)
+    // The bare filename never becomes a link to the readme.md domain.
+    expect(hrefs.some(href => /readme\.md/i.test(href))).toBe(false)
+    // The visible path survives untouched.
+    expect(container.textContent).toContain('C:\\Users\\me\\projects\\myrepo\\README.md')
+    expect(container.textContent).toContain('issue-draft.md')
   })
 })

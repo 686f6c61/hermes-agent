@@ -170,7 +170,12 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     HTTP middleware does not run for WebSocket routes, so the DNS-rebinding
     Host check is repeated here; an Origin header, when present, must target the
     bound host.  Non-web origins (packaged Electron: file://, null, app://) are
-    trusted — the credential check is the real auth boundary there.
+    trusted — the credential check is the real auth boundary there.  Loopback
+    http(s) origins are trusted for the same reason: the packaged Desktop
+    renderer loads from a random loopback port, so its Origin never matches a
+    non-loopback bound host, and a local non-browser client can omit the
+    Origin header entirely anyway.  DNS rebinding is unaffected — a rebound
+    page's Origin is the attacker's domain, not loopback.
     """
     from hermes_cli.web_server import _is_accepted_host, app
     bound_host = getattr(app.state, "bound_host", None)
@@ -185,6 +190,8 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
         return None
     parsed = urllib.parse.urlparse(origin)
     if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.hostname and parsed.hostname.lower() in _LOOPBACK_HOSTS:
         return None
     if not parsed.netloc or not _is_accepted_host(parsed.netloc, bound_host, trusted_public_hosts):
         return f"origin_mismatch origin={origin} bound={bound_host}"

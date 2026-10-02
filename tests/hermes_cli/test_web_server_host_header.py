@@ -240,3 +240,55 @@ class TestWebSocketHostOriginGuard:
                 pass
 
         assert exc.value.code == 4403
+
+    def test_loopback_origin_passes_on_non_loopback_bind(self, monkeypatch):
+        """The packaged Desktop renderer loads from a random loopback port,
+        so its WebSocket Origin (``http://127.0.0.1:<random>``) never matches
+        a non-loopback bound host. A loopback origin is trusted: a local
+        non-browser client can omit the Origin header entirely, and the
+        credential check (which runs first) remains the real boundary."""
+        from fastapi.testclient import TestClient
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "100.64.0.5", raising=False)
+        monkeypatch.setattr(ws.app.state, "auth_required", False, raising=False)
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(ws.app)
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        for origin in ("http://127.0.0.1:52133", "http://localhost:52133"):
+            with client.websocket_connect(
+                url,
+                headers={
+                    "Host": "100.64.0.5:9119",
+                    "Origin": origin,
+                },
+            ):
+                pass
+
+    def test_cross_site_origin_still_rejected_on_non_loopback_bind(self, monkeypatch):
+        """The loopback exemption must not widen the guard: a cross-site
+        origin on a non-loopback bind keeps failing the Origin check."""
+        from fastapi.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "100.64.0.5", raising=False)
+        monkeypatch.setattr(ws.app.state, "auth_required", False, raising=False)
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(ws.app)
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                url,
+                headers={
+                    "Host": "100.64.0.5:9119",
+                    "Origin": "http://evil.example",
+                },
+            ):
+                pass
+
+        assert exc.value.code == 4403

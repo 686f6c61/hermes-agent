@@ -160,6 +160,48 @@ def test_remove_is_idempotent(home):
     assert _result(srv._methods["vault.list"](4, {}))["items"] == []
 
 
+def test_list_contract_accepts_manager_multi_origin_items(home, monkeypatch):
+    """A manager item bound to several origins must survive the vault.list wire contract.
+
+    ``VaultItemMeta.to_dict()`` emits ``allowed_origins`` once a manager bound the login
+    to more than one web origin; the contract forbade that key, so the Desktop listing
+    logged a contract violation and the panel lost the item (#131814)."""
+    from pydantic import ValidationError
+
+    from agent.vault_store import VaultItemMeta
+    from tui_gateway.contracts.registry import METHODS
+
+    class _FakeManager:
+        name = "bitwarden"
+        needs_unlock = True
+
+        def is_unlocked(self):
+            return True
+
+        def list_items(self):
+            return [
+                VaultItemMeta(
+                    id="bw:multi",
+                    kind="login",
+                    label="Manager login",
+                    origin="https://one.example.com",
+                    created_at="2026-01-01T00:00:00Z",
+                    allowed_origins=("https://one.example.com", "https://two.example.com"),
+                )
+            ]
+
+    monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [_FakeManager()])
+    result = _result(srv._methods["vault.list"](7, {}))
+    assert result["items"][0]["allowed_origins"] == [
+        "https://one.example.com",
+        "https://two.example.com",
+    ]
+    try:
+        METHODS["vault.list"].result.model_validate(result)
+    except ValidationError as exc:
+        raise AssertionError(f"vault.list result violates its contract: {exc}") from exc
+
+
 def test_remove_requires_id(home):
     err = _error(srv._methods["vault.remove"](1, {}))
     assert err["code"] == 5095

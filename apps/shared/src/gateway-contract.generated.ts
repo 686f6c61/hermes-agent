@@ -2112,7 +2112,7 @@ export interface OnboardingResetSetupProfileResult {
 export interface VaultListResult {
   items?: VaultItem[]
 }
-/** Metadata-only view (``VaultItemMeta.to_dict`` + ``backend``); never a secret. */
+/** Metadata-only view (``VaultItemMeta.to_dict()`` + ``backend``); never a secret. */
 export interface VaultItem {
   id: string
   kind: string
@@ -2122,6 +2122,7 @@ export interface VaultItem {
   identifier?: string | null
   identifier_type?: string | null
   has_otp?: boolean | null
+  allowed_origins?: string[] | null
   backend: string
 }
 export interface VaultSourcesResult {

@@ -417,7 +417,7 @@ class VaultKind(WireEnum):
 
 
 class VaultItem(Result):
-    """Metadata-only view (``VaultItemMeta.to_dict`` + ``backend``); never a secret."""
+    """Metadata-only view (``VaultItemMeta.to_dict()`` + ``backend``); never a secret."""
 
     id: str
     kind: str
@@ -427,6 +427,10 @@ class VaultItem(Result):
     identifier: str | None = None
     identifier_type: str | None = None
     has_otp: bool | None = None
+    # Manager backends (Bitwarden, 1Password) bind a login to every origin the manager
+    # stores; ``to_dict`` emits it only when there is more than one. Declared — not left
+    # to ``extra="allow"`` — so the wire stays closed and the generated TS carries it.
+    allowed_origins: list[str] | None = None
     backend: str
 
 

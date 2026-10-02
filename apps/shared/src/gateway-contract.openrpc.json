@@ -37314,7 +37314,7 @@
       },
       "VaultItem": {
         "additionalProperties": false,
-        "description": "Metadata-only view (``VaultItemMeta.to_dict`` + ``backend``); never a secret.",
+        "description": "Metadata-only view (``VaultItemMeta.to_dict()`` + ``backend``); never a secret.",
         "properties": {
           "id": {
             "title": "Id",
@@ -37380,6 +37380,21 @@
             ],
             "default": null,
             "title": "Has Otp"
+          },
+          "allowed_origins": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Allowed Origins"
           },
           "backend": {
             "title": "Backend",

@@ -40,9 +40,9 @@ def _make_socket_dir(tmpdir, session_name, pid=None, owner_pid=None):
     d = tmpdir / f"agent-browser-{session_name}"
     d.mkdir()
     if pid is not None:
-        (d / f"{session_name}.pid").write_text(str(pid))
+        (d / f"{session_name}.pid").write_text(str(pid), encoding="utf-8")
     if owner_pid is not None:
-        (d / f"{session_name}.owner_pid").write_text(str(owner_pid))
+        (d / f"{session_name}.owner_pid").write_text(str(owner_pid), encoding="utf-8")
     return d
 
 
@@ -230,7 +230,7 @@ class TestReapOrphanedBrowserSessions:
         from tools.browser_tool_lifecycle import _reap_orphaned_browser_sessions
 
         d = _make_socket_dir(fake_tmpdir, "h_corrupt1234")
-        (d / "h_corrupt1234.pid").write_text("not-a-number")
+        (d / "h_corrupt1234.pid").write_text("not-a-number", encoding="utf-8")
 
         _reap_orphaned_browser_sessions()
         assert not d.exists()
@@ -432,11 +432,11 @@ class TestSocketDirIdleSeconds:
         d = tmp_path / "agent-browser-h_reuse"
         d.mkdir()
         f = d / "_stdout_click"
-        f.write_text("x")
+        f.write_text("x", encoding="utf-8")
         _age_socket_dir(d, 7200)
         assert _socket_dir_idle_seconds(str(d)) > 7000
 
-        f.write_text("y")  # rewrite in place — dir mtime stays stale
+        f.write_text("y", encoding="utf-8")  # rewrite in place — dir mtime stays stale
         assert time.time() - os.path.getmtime(d) > 7000, "precondition"
         assert _socket_dir_idle_seconds(str(d)) < 5
 

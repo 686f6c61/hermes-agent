@@ -3911,6 +3911,22 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
         discover_plugins()
         hydrate_profile_secret_sources(profile_home)
         secret_token = set_secret_scope(build_profile_secret_scope(profile_home), profile_home=str(profile_home))
+        # In-process cron inherited the gateway's config-hook registration (run_startup._register_config_hooks);
+        # this worker is its own process, so without the same registration the owning profile's ``hooks:``
+        # block and outbound webhooks went silently dead for every dispatched cron session (#131764).
+        # Runs after the secret scope exists so ``secret_env`` targets resolve, and never fails the
+        # job: the worker has no TTY, so ``accept_hooks=False`` resolves consent from
+        # HERMES_ACCEPT_HOOKS / hooks_auto_accept only, like every other headless entry point.
+        try:
+            from hermes_cli.config import load_config
+            from agent.shell_hooks import register_from_config
+            from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
+
+            _hooks_cfg = load_config()
+            register_from_config(_hooks_cfg, accept_hooks=False)
+            register_outbound_webhooks(_hooks_cfg)
+        except Exception:
+            logger.warning("shell-hook/webhook registration failed in cron external worker", exc_info=True)
         with use_cron_store(profile_home):
             if adopt_claimed_execution(execution_id) is None:
                 logger.error(

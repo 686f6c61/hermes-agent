@@ -30,23 +30,32 @@ export function useStatusSnapshot(
     let timer: number | undefined
     let sharedProfileWarning: boolean = false
     let sharedProfileNoticeId: string | undefined
+    // Mirrors the inferenceStatus state for the tick closure, which cannot read
+    // state. While this is still unknown, a failed/fallback readiness round has
+    // nothing that retries it — readiness otherwise runs only on seams (open,
+    // focus/visibility, `setup.ready`), so the chip would stay on "checking"
+    // until the next seam. The next tick carries the readiness legs; once an
+    // authoritative result exists the tick is status-only again.
+    let inference: RuntimeReadinessResult | null = null
 
     // Status and inference readiness belong to one backend. A source switch
     // can keep gatewayState="open" throughout, so clear the previous source's
     // snapshot and start a fresh scoped request explicitly.
     setStatusSnapshot(null)
     setInferenceStatus(null)
+    inference = null
 
     // A closed/connecting gateway cannot have an authoritative live-runtime
     // result. Clear readiness before starting the REST status leg so a hung
     // getStatus() cannot leave a stale "ready" state visible after disconnect.
     if (gatewayState !== 'open') {
       setInferenceStatus(null)
+      inference = null
     }
 
     const scheduleRefresh = () => {
       if (!cancelled) {
-        timer = window.setTimeout(() => void refresh({ readiness: false }), REFRESH_MS)
+        timer = window.setTimeout(() => void refresh({ readiness: inference === null }), REFRESH_MS)
       }
     }
 
@@ -56,10 +65,12 @@ export function useStatusSnapshot(
       // user is working in another app.
       document.visibilityState === 'visible' && document.hasFocus()
 
-    // Inference readiness + the free-tier verdict. Not on the periodic tick:
-    // both change only at seams the backend announces (`setup.ready` at boot)
-    // or that this window crosses (open, return from another app), so they
-    // run once per seam instead of every 60s.
+    // Inference readiness + the free-tier verdict. Off the periodic tick by
+    // default: both change only at seams the backend announces (`setup.ready`
+    // at boot) or that this window crosses (open, return from another app), so
+    // they run once per seam instead of every 60s. The tick still carries them
+    // while the result is unknown (see `inference`), or a round that ends in a
+    // transport fallback would never be retried on its own.
     const refreshReadiness = async () => {
       if (gatewayState !== 'open') {
         return
@@ -77,16 +88,17 @@ export function useStatusSnapshot(
         return
       }
 
-      const inference = inferenceResult.value
+      const next = inferenceResult.value
 
-      if (inference.source !== 'fallback') {
+      if (next.source !== 'fallback') {
         // runtime_check/setup_status returned an authoritative boolean.
         // A fallback means both RPCs failed or returned no boolean, so it
         // is a transient/unknown transport state, not proof that inference
         // became unconfigured. Keep the last authoritative result instead
         // of flashing "Inference not ready" during a gateway flap.
-        setInferenceStatus(inference)
-        setFreeTierRoute(inference.freeTier)
+        setInferenceStatus(next)
+        inference = next
+        setFreeTierRoute(next.freeTier)
       }
     }
 

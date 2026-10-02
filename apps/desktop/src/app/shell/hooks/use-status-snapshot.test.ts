@@ -176,6 +176,56 @@ describe('useStatusSnapshot', () => {
     expect(result.current.inferenceStatus).toBeNull()
   })
 
+  it('retries the readiness legs on the status tick while the result is unknown', async () => {
+    // A fallback round (both RPCs down) must not pin the chip on "checking"
+    // until the next focus/visibility/setup.ready seam: the tick carries the
+    // readiness legs while the value is unknown, and an authoritative answer
+    // on a later tick recovers the chip on its own (#131793).
+    let gatewayDown = true
+
+    const requestGatewayMock = vi.fn(async (method: string) => {
+      if (gatewayDown) {
+        throw new Error(`${method} connection closed`)
+      }
+
+      return (method === 'setup.runtime_check' ? { ok: true } : { provider_configured: true }) as never
+    })
+
+    const requestGateway = requestGatewayMock as unknown as GatewayRequester
+
+    const { result } = renderHook(() => useStatusSnapshot('open', requestGateway))
+
+    await flushAsync()
+    expect(result.current.inferenceStatus).toBeNull()
+
+    const callsAfterOpen = requestGatewayMock.mock.calls.length
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    // The tick retried the readiness legs while the previous round was unknown.
+    expect(requestGatewayMock.mock.calls.length).toBeGreaterThan(callsAfterOpen)
+    expect(result.current.inferenceStatus).toBeNull()
+
+    gatewayDown = false
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    expect(result.current.inferenceStatus).toMatchObject({ ready: true, source: 'runtime_check' })
+
+    // Once authoritative, the tick is status-only again: no extra RPCs.
+    const callsAfterRecovery = requestGatewayMock.mock.calls.length
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    expect(requestGatewayMock.mock.calls.length).toBe(callsAfterRecovery)
+  })
+
   it('still publishes an authoritative runtime failure', async () => {
     const requestGatewayMock = vi.fn(
       async (method: string) =>
@@ -302,8 +352,11 @@ describe('useStatusSnapshot', () => {
       await vi.advanceTimersByTimeAsync(1)
     })
 
-    // The periodic tick is status-only: readiness and the free-tier verdict
-    // arrive by `setup.ready` push plus the one-shots on open and on return.
+    // The periodic tick is status-only once readiness is authoritative:
+    // readiness and the free-tier verdict arrive by `setup.ready` push plus
+    // the one-shots on open and on return. While the result is unknown, the
+    // tick retries the readiness legs instead of pinning the chip on
+    // "checking" until the next seam.
     expect(getStatus).toHaveBeenCalledTimes(2)
     expect(requestGatewayMock).toHaveBeenCalledTimes(3)
   })

@@ -226,6 +226,28 @@ def _tabbed_doc():
     }
 
 
+def test_gmail_search_empty_result_emits_json_array(api_module, monkeypatch, capsys):
+    """An empty Gmail search must emit the same JSON contract as the gws path
+    (a JSON array), not a human sentence consumers cannot parse."""
+    class EmptyGmail:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def list(self, **kwargs):
+            return self
+
+        def execute(self):
+            return {"resultSizeEstimate": 0}
+
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+    monkeypatch.setattr(api_module, "build_service", lambda *args: EmptyGmail())
+    api_module.gmail_search(types.SimpleNamespace(query="is:unread", max=10))
+    assert json.loads(capsys.readouterr().out) == []
+
+
 def test_docs_get_returns_every_tab_of_a_tabbed_doc(api_module, monkeypatch, capsys):
     """A multi-tab Doc must not lose tab content: reads traverse the tabs tree
     (preorder, nested tabs included) instead of only the legacy top-level body."""

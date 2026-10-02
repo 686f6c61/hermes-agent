@@ -729,12 +729,33 @@ export const host = {
   /** Tail an app log file (`agent` / `errors` / `gateway` / `gui` / …). */
   logs: async (...args: Parameters<typeof getLogs>) => getLogs(...args),
 
+  /** Complete client-local MCP sign-in for a pinned bot profile, optionally
+   *  installing its catalog entry first. Uses the same OAuth flow as Settings. */
+  completeMcpOAuth: async (options: Parameters<typeof completeMcpDesktopOAuth>[0] & { catalogPreset?: string }) => {
+    const profile = capabilityScoped(options.profile)
+
+    if (options.catalogPreset) {
+      const added = await requestGatewayForAgent<{ ok?: boolean; error?: string }>(
+        profile.connectionId ?? null,
+        profile.profile || 'default',
+        'mcp.servers.add',
+        { name: options.serverName, preset: options.catalogPreset }
+      )
+
+      if (!added.ok) {
+        throw new Error(added.error || 'Could not add server')
+      }
+    }
+
+    return completeMcpDesktopOAuth({ ...options, profile })
+  },
+
   /** Navigate the app router (hash routes, e.g. '/command-center?section=system').
    *  Contributed plugin pages open as route tiles so they don't replace the
    *  live Bot Chat (#101593). */
   navigate: (path: string) => {
     const raw = path.startsWith('#') ? path.slice(1) : path
-    const pathname = raw.split(/[?#]/, 1)[0] || raw
+    const pathname = raw.split(/[?#]/)[0] || raw
 
     if (contributedRoutes().some(route => route.path === pathname)) {
       openRouteTile(pathname)

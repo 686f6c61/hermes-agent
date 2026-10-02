@@ -24,7 +24,7 @@ import type { ReactNode } from 'react'
 import { capabilityScoped } from '@/api/client'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
-import { syncWorkspaceRoute } from '@/app/routes'
+import { contributedRoutes, syncWorkspaceRoute } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import {
   $narrowViewport,
@@ -61,6 +61,7 @@ import {
   type SpawnPriority
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -728,39 +729,27 @@ export const host = {
   /** Tail an app log file (`agent` / `errors` / `gateway` / `gui` / …). */
   logs: async (...args: Parameters<typeof getLogs>) => getLogs(...args),
 
-  /** Complete client-local MCP sign-in for a pinned bot profile, optionally
-   *  installing its catalog entry first. Uses the same OAuth flow as Settings. */
-  completeMcpOAuth: async (options: Parameters<typeof completeMcpDesktopOAuth>[0] & { catalogPreset?: string }) => {
-    const profile = capabilityScoped(options.profile)
+  /** Navigate the app router (hash routes, e.g. '/command-center?section=system').
+   *  Contributed plugin pages open as route tiles so they don't replace the
+   *  live Bot Chat (#101593). */
+  navigate: (path: string) => {
+    const raw = path.startsWith('#') ? path.slice(1) : path
+    const pathname = raw.split(/[?#]/, 1)[0] || raw
 
-    if (options.catalogPreset) {
-      const added = await requestGatewayForAgent<{ ok?: boolean; error?: string }>(
-        profile.connectionId ?? null,
-        profile.profile || 'default',
-        'mcp.servers.add',
-        { name: options.serverName, preset: options.catalogPreset }
-      )
+    if (contributedRoutes().some(route => route.path === pathname)) {
+      openRouteTile(pathname)
 
-      if (!added.ok) {
-        throw new Error(added.error || 'Could not add server')
-      }
+      return
     }
 
-    return completeMcpDesktopOAuth({ ...options, profile })
-  },
-
-  /** Navigate the app router (hash routes, e.g. '/command-center?section=system'). */
-  navigate: (path: string) => {
-    const to = path.startsWith('#') ? path.slice(1) : path
-
-    window.location.hash = `#${to}`
+    window.location.hash = `#${raw}`
     // The router follows the hash and fronts the workspace pane on a route
     // CHANGE (wiring's `syncWorkspaceRoute` effect). Re-issuing the current
     // route — palette/statusbar/hotkey while already on the page with a tile
     // focused — changes nothing, so no event fires and the page stays behind
     // the tile. Reveal imperatively, the same way `navigateToWorkspacePage`
     // does for the sidebar and keybinds.
-    syncWorkspaceRoute(to)
+    syncWorkspaceRoute(raw)
   },
 
   /** Pre-dial a profile's gateway socket in the background — pool-only, no

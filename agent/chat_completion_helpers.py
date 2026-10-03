@@ -1943,21 +1943,31 @@ def _fallback_chain_exhausted(agent, reason: "FailoverReason | None") -> bool:
     return False
 
 
-def _candidate_pool_exhausted(agent, fb_provider: str, fb_model: str) -> bool:
-    """True when every credential the candidate would use sits in an exhaustion cooldown longer
-    than the retry loop's longest wait (the 600s Retry-After cap): switching to it only fails the
-    turn the same way the primary just did (#89401). A short throttle still gets its chance."""
+def _candidate_pool_unusable_reason(agent, fb_provider: str, fb_model: str) -> str | None:
+    """Why the candidate's credentials cannot serve for longer than the retry loop's longest wait
+    (the 600s Retry-After cap): switching to it only fails the turn the same way the primary just
+    did (#89401). A short throttle still gets its chance. ``None`` = the candidate gets its chance.
+
+    The returned reason distinguishes a real cooldown from a pool that holds credentials but has
+    no usable entry at all (e.g. an unfilled borrowed row): "every entry in cooldown" was a lie in
+    the latter case (#131993)."""
     pool = getattr(agent, "_credential_pool", None)
     if pool is None or (getattr(pool, "provider", "") or "").strip().lower() != fb_provider:
         try:
             from agent.credential_pool import load_pool
             pool = load_pool(fb_provider)
         except Exception:
-            return False
+            return None
     if pool is None or not pool.has_credentials() or pool.has_available(model=fb_model):
-        return False
+        return None
     until = pool.next_available_at(model=fb_model)
-    return until is None or until - time.time() > 600
+    if until is None:
+        # Credentials exist but none is available and none is waiting in a cooldown: the rows are
+        # unauthenticated (borrowed reference row without a token, dropped key, …).
+        return "no usable entry (none available and none waiting in cooldown)"
+    if until - time.time() > 600:
+        return f"every entry in cooldown for the next {int(until - time.time())}s"
+    return None
 
 
 def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider: str, fb_model: str, unavailable: set) -> bool:
@@ -1972,8 +1982,9 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
     if _is_entitlement_rejected(agent, fb_provider, fb_model):
         logger.info("Fallback skip: %s/%s was rejected as unentitled for this account", fb_provider, fb_model)
         return True
-    if _candidate_pool_exhausted(agent, fb_provider, fb_model):
-        logger.warning("Fallback skip: %s/%s credential pool is exhausted (every entry in cooldown)", fb_provider, fb_model)
+    pool_skip_reason = _candidate_pool_unusable_reason(agent, fb_provider, fb_model)
+    if pool_skip_reason:
+        logger.warning("Fallback skip: %s/%s credential pool unusable (%s)", fb_provider, fb_model, pool_skip_reason)
         return True
     local_skip_reason = _fallback_entry_unavailable_without_network(agent, fb)
     if local_skip_reason:

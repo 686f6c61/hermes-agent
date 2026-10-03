@@ -1229,6 +1229,21 @@ def _slot_selects(slot: Any, normalized: str) -> bool:
     return isinstance(slot, dict) and (slot.get("provider") or "").strip().lower() == normalized
 
 
+def _fallback_chain_selects_provider(cfg: dict, normalized: str) -> bool:
+    """True when a fallback-chain entry names the provider.
+
+    ``fallback_providers`` (and its legacy ``fallback_model`` key) accept a single dict or a list
+    of dicts, mirroring ``hermes_cli.fallback_config``; entries without a ``provider`` key cannot
+    name anything and never count."""
+    for key in ("fallback_providers", "fallback_model"):
+        raw = cfg.get(key)
+        candidates = [raw] if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+        for entry in candidates:
+            if _slot_selects(entry, normalized):
+                return True
+    return False
+
+
 def _config_selects_provider(normalized: str) -> bool:
     """config.yaml ``model.provider``, or a MoA advisor/aggregator slot naming the provider.
 
@@ -1244,6 +1259,12 @@ def _config_selects_provider(normalized: str) -> bool:
     # slot does — without this the seeder treats the credential as merely discovered (#114740).
     aux_cfg = cfg.get("auxiliary")
     if isinstance(aux_cfg, dict) and any(_slot_selects(s, normalized) for s in aux_cfg.values()):
+        return True
+    # A ``fallback_providers`` entry naming the provider is the same consent as a MoA slot: the
+    # chain will call it during a primary outage, so its credentials must seed too. Without this,
+    # a profile whose Anthropic lives only in the chain borrows a token-less claude_code row and
+    # the fallback is skipped as "credential pool exhausted" (#131993).
+    if _fallback_chain_selects_provider(cfg, normalized):
         return True
 
     def _moa_block_matches(block: Any) -> bool:

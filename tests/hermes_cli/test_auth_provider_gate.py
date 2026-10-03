@@ -327,3 +327,40 @@ def test_aws_env_does_not_leak_into_other_providers(tmp_path, monkeypatch, _clea
 
     from hermes_cli.auth import is_provider_explicitly_configured
     assert is_provider_explicitly_configured("anthropic") is False
+
+
+def test_fallback_providers_entry_counts_as_explicit(tmp_path, monkeypatch):
+    """A provider named in ``fallback_providers`` is explicit configuration (#131993): the chain
+    will call it during a primary outage, so its borrowed credentials must seed. Naming it there
+    is the same consent as ``model.provider``."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}, "active_provider": None})
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+
+    _write_config(tmp_path, {
+        "model": {"provider": "openai-codex", "default": "gpt-6.1-sol"},
+        "fallback_providers": [{"provider": "anthropic", "model": "claude-opus-5-5"}],
+    })
+    assert is_provider_explicitly_configured("anthropic") is True
+
+    # A chain that never names the provider stays implicit.
+    _write_config(tmp_path, {
+        "model": {"provider": "openai-codex", "default": "gpt-6.1-sol"},
+        "fallback_providers": [{"provider": "xai-oauth", "model": "grok-4.7"}],
+    })
+    assert is_provider_explicitly_configured("anthropic") is False
+
+
+def test_legacy_fallback_model_entry_counts_as_explicit(tmp_path, monkeypatch):
+    """The legacy ``fallback_model`` key feeds the same chain and carries the same consent."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}, "active_provider": None})
+
+    from hermes_cli.auth import is_provider_explicitly_configured
+
+    _write_config(tmp_path, {
+        "model": {"provider": "openai-codex", "default": "gpt-6.1-sol"},
+        "fallback_model": [{"provider": "anthropic", "model": "claude-opus-5-5"}],
+    })
+    assert is_provider_explicitly_configured("anthropic") is True

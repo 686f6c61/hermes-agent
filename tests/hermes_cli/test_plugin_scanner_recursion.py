@@ -182,6 +182,70 @@ class TestForeignHarnessManifestDirs:
         )
 
 
+# ── Manually disabled entries (.disabled suffix, #125702) ─────────────────
+
+
+class TestManuallyDisabledEntries:
+    def test_renamed_foreign_harness_dir_skipped_silently(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Renaming the foreign harness dir to ``.muse-plugin.disabled`` is the
+        manual off switch users reach for. The exact-name skip list no longer
+        matches it, and its ``plugin.json`` still cannot satisfy the Agent
+        Plugins v1 schema — discovery used to warn on every pass. Renamed
+        entries must be skipped silently (#125702)."""
+        import os
+        hermes_home = Path(os.environ["HERMES_HOME"])  # set by hermetic conftest fixture
+        sp = hermes_home / "plugins" / "superpowers"
+        (sp / ".hermes-plugin").mkdir(parents=True)
+        (sp / ".hermes-plugin" / "plugin.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": "superpowers",
+                    "version": "6.3.0",
+                    "description": "multi-harness plugin",
+                }
+            )
+        )
+        disabled_harness = sp / ".muse-plugin.disabled"
+        disabled_harness.mkdir(parents=True)
+        (disabled_harness / "plugin.json").write_text(
+            json.dumps({"name": "superpowers", "version": "6.3.0"})
+        )
+
+        with caplog.at_level("WARNING", logger="hermes_cli.plugins"):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        assert "superpowers/.hermes-plugin" in mgr._plugins
+        parse_warnings = [
+            r for r in caplog.records if "Failed to parse" in r.getMessage()
+        ]
+        assert parse_warnings == []
+
+    def test_disabled_suffix_entry_is_not_discovered(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A real plugin dir renamed to ``<name>.disabled`` stays on disk but
+        drops out of discovery entirely — the rename is the disable."""
+        import os
+        hermes_home = Path(os.environ["HERMES_HOME"])  # set by hermetic conftest fixture
+        user_plugins = hermes_home / "plugins"
+
+        _write_plugin(user_plugins, ["active-plugin"])
+        _enable(hermes_home, "active-plugin")
+        _write_plugin(user_plugins, ["retired-plugin"])
+        (user_plugins / "retired-plugin").rename(user_plugins / "retired-plugin.disabled")
+
+        with caplog.at_level("WARNING", logger="hermes_cli.plugins"):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        discovered = [k for k in mgr._plugins if "retired" in k]
+        assert discovered == []
+        assert "active-plugin" in mgr._plugins
+
+
 # ── Kind parsing ───────────────────────────────────────────────────────────
 
 

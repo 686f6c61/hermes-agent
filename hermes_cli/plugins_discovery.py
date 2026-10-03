@@ -132,6 +132,12 @@ def scan_directory(
         if child.name in _FOREIGN_HARNESS_MANIFEST_DIRS:
             logger.debug("Skipping %s (foreign-harness manifest convention)", child)
             continue
+        # A ".disabled" suffix is the manual off switch: renaming a plugin
+        # (or foreign-harness) entry to <name>.disabled keeps it on disk but
+        # out of discovery, so its manifest must not warn either (#125702).
+        if child.name.endswith(".disabled"):
+            logger.debug("Skipping %s (manually disabled)", child)
+            continue
         # pathlib.Path.is_dir() swallows OSError, but injected Path-likes
         # and test doubles can still raise. Fail closed per child.
         try:

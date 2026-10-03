@@ -5,6 +5,7 @@ are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import logging
+import os
 import subprocess
 import sys
 
@@ -35,17 +36,18 @@ def _record_bytecode_fingerprint() -> None:
 
 
 def _sweep_stale_bytecode_if_checkout_changed() -> None:
-    """Clear ``__pycache__`` at launch when the checkout fingerprint changed since the last sweep.
+    """Clear stale artifacts at launch when the checkout fingerprint changed since the last sweep.
 
-    Update-time clears can't close the stale-bytecode class: ``hermes update`` runs
+    Update-time clears can't close the stale-artifact class: ``hermes update`` runs
     the PRE-pull updater code and manual pulls never run it. Cheap file reads, no
     git subprocess. Never raises.
 
-    The stale-bytecode bug class (issues #6207, #60242; Dhruv's WhatsApp ``cannot import name
-    'parse_model_flags_detailed'`` report) has one shared shape: the checkout's ``.py`` files change (git
+    The stale-artifact bug class (issues #6207, #60242, #132431; Dhruv's WhatsApp ``cannot import name
+    'parse_model_flags_detailed'`` report) has one shared shape: the checkout's source files change (git
     pull inside ``hermes update``, a manual ``git pull``, a ZIP update, a file-sync restore) while
-    ``__pycache__`` retains bytecode from the previous revision, and a later process trusts the stale
-    ``.pyc`` instead of the fresh source.
+    build outputs from the previous revision survive, and a later build or import trusts the stale
+    output instead of the fresh source: stale ``.pyc`` in ``__pycache__``, and generated ``.js``
+    files that shadow the current ``.ts``/``.tsx`` sources during extensionless import resolution.
     """
     from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint
     try:
@@ -65,9 +67,47 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
                 "Checkout changed since last launch (%s -> %s): cleared %d stale __pycache__ director%s",
                 recorded or "unknown", fingerprint, removed, "y" if removed == 1 else "ies",
             )
+        js_removed = _clear_stale_generated_js(PROJECT_ROOT)
+        if js_removed:
+            logger.info(
+                "Checkout changed since last launch (%s -> %s): removed %d stale generated .js file%s shadowing TypeScript sources",
+                recorded or "unknown", fingerprint, js_removed, "" if js_removed == 1 else "s",
+            )
         _record_bytecode_fingerprint()
     except Exception as exc:
-        logger.debug("Stale-bytecode launch sweep failed: %s", exc)
+        logger.debug("Stale-artifact launch sweep failed: %s", exc)
+
+
+def _clear_stale_generated_js(root: Path) -> int:
+    """Remove generated ``.js`` files that shadow a same-directory ``.ts``/``.tsx`` sibling.
+
+    An interrupted update can leave compiled ``.js`` artifacts from the previous
+    revision next to the current TypeScript sources; extensionless imports then
+    resolve to the stale ``.js`` and the Vite build dies with MISSING_EXPORT for
+    symbols the current source does export (#132431). Returns the number of files
+    removed. Never raises per-file.
+    """
+    removed = 0
+    if not root.is_dir():
+        return 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in {"venv", ".venv", "node_modules", ".git", ".worktrees", "web_dist", "coverage"}
+            and not d.startswith(".")
+        ]
+        for name in filenames:
+            if not name.endswith(".js"):
+                continue
+            js_path = Path(dirpath) / name
+            if js_path.with_suffix(".ts").exists() or js_path.with_suffix(".tsx").exists():
+                try:
+                    js_path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
 
 
 def _web_project_root(web_dir: Path) -> Path:

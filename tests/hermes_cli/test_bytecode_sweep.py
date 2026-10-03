@@ -57,6 +57,61 @@ def test_sweep_clears_pycache_when_checkout_changed(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Stale generated .js shadowing current TypeScript sources (#132431)
+# ---------------------------------------------------------------------------
+
+def _make_generated_js(repo: Path) -> Path:
+    """app source tree with two shadowing artifacts and a legitimate standalone .js."""
+    src = repo / "apps" / "desktop" / "src"
+    src.mkdir(parents=True)
+    (src / "index.ts").write_text("export const compactNumber = 1;\n", encoding="utf-8")
+    (src / "index.js").write_text("stale compiled artifact\n", encoding="utf-8")
+    (src / "widget.tsx").write_text("export default 1;\n", encoding="utf-8")
+    (src / "widget.js").write_text("stale compiled artifact\n", encoding="utf-8")
+    (src / "plugin.js").write_text("legitimate standalone .js\n", encoding="utf-8")
+    deps = src / "node_modules" / "dep"
+    deps.mkdir(parents=True)
+    (deps / "index.js").write_text("dep\n", encoding="utf-8")
+    return src
+
+
+def test_sweep_clears_stale_generated_js_when_checkout_changed(monkeypatch, tmp_path):
+    repo = _make_repo(tmp_path, sha="c" * 40)
+    src = _make_generated_js(repo)
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", repo)
+    (repo / main_web_build._BYTECODE_FINGERPRINT_FILE).write_text(
+        "git:refs/heads/main:" + "a" * 40, encoding="utf-8"
+    )
+
+    hermes_main._sweep_stale_bytecode_if_checkout_changed()
+
+    assert not (src / "index.js").exists()
+    assert not (src / "widget.js").exists()
+    # A .js with no .ts/.tsx sibling is legitimate; node_modules is never entered.
+    assert (src / "plugin.js").exists()
+    assert (src / "node_modules" / "dep" / "index.js").exists()
+    # Sources survive.
+    assert (src / "index.ts").exists()
+    assert (src / "widget.tsx").exists()
+
+
+def test_js_sweep_skipped_when_fingerprint_matches(monkeypatch, tmp_path):
+    repo = _make_repo(tmp_path, sha="d" * 40)
+    src = _make_generated_js(repo)
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", repo)
+    from hermes_cli.main import _read_git_revision_fingerprint
+
+    (repo / main_web_build._BYTECODE_FINGERPRINT_FILE).write_text(
+        _read_git_revision_fingerprint(repo) or "", encoding="utf-8"
+    )
+
+    hermes_main._sweep_stale_bytecode_if_checkout_changed()
+
+    assert (src / "index.js").exists()
+    assert (src / "widget.js").exists()
+
+
+# ---------------------------------------------------------------------------
 # Plugin-update sibling site: __pycache__ under ~/.hermes/plugins/<name>
 # ---------------------------------------------------------------------------
 

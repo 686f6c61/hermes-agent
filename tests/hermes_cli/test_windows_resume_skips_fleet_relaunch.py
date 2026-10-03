@@ -57,3 +57,31 @@ def test_merge_records_fleet_profiles_before_windows_resume(monkeypatch):
 
     assert seen["fleet"] == ["default"]
     assert token["profiles"] == {"default": 111, "other": 222}
+
+
+def test_merge_records_externally_supervised_profiles(monkeypatch):
+    import hermes_cli.main as hm
+    from hermes_cli import update_cmd
+
+    seen = {}
+
+    def _resume(token):
+        seen["fleet"] = list(token.get("fleet_relaunched") or [])
+
+    monkeypatch.setattr(hm, "_resume_windows_gateways_after_update", _resume)
+    outcome = update_cmd._GatewayRestartOutcome(
+        incomplete=False,
+        phase_errors=[],
+        pre_restart_gateway_pids=[],
+        restarted_services=[],
+        failed_or_stale_units=[],
+        relaunched_profiles=[],
+        externally_supervised_profiles=["default"],
+        killed_pids=set(),
+    )
+    token = {"resume_needed": False, "profiles": {"default": 111, "other": 222}}
+    with patch("hermes_cli.update_receipt.record_gateway_restart", lambda **_kw: None):
+        update_cmd._resume_windows_gateways_and_merge_outcome(outcome, token, False)
+
+    assert seen["fleet"] == ["default"]
+    assert token["profiles"] == {"default": 111, "other": 222}

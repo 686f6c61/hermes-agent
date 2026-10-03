@@ -1339,7 +1339,12 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
     bookkeeping so reconciliation never reports a healthy gateway as unaccounted. Must never abort the update."""
     from hermes_cli.update_cmd import _m, _write_gateway_update_exit_code
     if isinstance(_windows_gateway_resume, dict):
-        already = [str(name) for name in (getattr(outcome, "relaunched_profiles", None) or [])]
+        # The fleet fills exactly one of the two lists per PID: an
+        # external-supervisor restart never touches ``relaunched_profiles``,
+        # and missing it arms a second ``--replace`` that kills the first (#126821).
+        already = [str(name) for name in
+                   ((getattr(outcome, "relaunched_profiles", None) or [])
+                    + (getattr(outcome, "externally_supervised_profiles", None) or []))]
         if already:
             _windows_gateway_resume["fleet_relaunched"] = already
     try:

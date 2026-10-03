@@ -215,14 +215,24 @@ const FENCE_TOGGLE_RE = /^[ \t]*(?:```|~~~)/
 
 // Markdown links whose target is a filesystem path on the agent's machine:
 // `[report](/home/user/report.md)`, `[notes](file:///srv/notes.txt)`,
-// `[todo](~/todo.md)`, `[log](C:\logs\run.txt)`. Negative lookbehind keeps
-// image syntax (`![alt](path)`) on its existing inline pipeline. Plain
-// targets exclude `)`/whitespace, matching how LLMs actually emit these;
-// CommonMark angle-bracket destinations (`[notes](<~/My Notes/todo.md>`) are
-// matched separately so paths with spaces route to the preview pipeline too
-// (#102782) — `routeFileLinksToPreview` strips the surrounding `<>`.
+// `[todo](~/todo.md)`, `[log](C:\logs\run.txt)`, and — since #131842 —
+// workspace-relative targets (`[docs](docs/guide.md)`, `[dot](./a/b.md)`,
+// `[up](../README.md)`). A relative target used to fall through as a bare
+// `<a href="docs/…">`, which Electron's window-open policy denies
+// (`new URL("docs/…")` throws), so the link was dead in chat and the file
+// never reached the Artifacts drawer. The preview door resolves the target
+// at VIEW time against the session's backend, so relative paths work there
+// like absolute ones. The bare relative form requires a slash so
+// domain-ish targets (`[x](example.com)`) and URL slugs keep Streamdown's
+// handling, and the last segment must carry an extension. Negative
+// lookbehind keeps image syntax (`![alt](path)`) on its existing inline
+// pipeline. Plain targets exclude `)`/whitespace, matching how LLMs
+// actually emit these; CommonMark angle-bracket destinations
+// (`[notes](<~/My Notes/todo.md>`) are matched separately so paths with
+// spaces route to the preview pipeline too (#102782) —
+// `routeFileLinksToPreview` strips the surrounding `<>`.
 const FILE_LINK_RE =
-  /(?<!!)\[(?<label>[^\]\n]+)\]\((?<target>(?:<(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^>]*>)|(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^)\s]*)\)/gi
+  /(?<!!)\[(?<label>[^\]\n]+)\]\((?<target>(?:<(?:file:\/\/|\/|~\/|[a-z]:[\\/]|(?:[\w@%+~.-]+\/)+[\w@%+.-]+\.[A-Za-z0-9]{1,8})[^>]*>)|(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^)\s]*|(?:[\w@%+~.-]+\/)+[\w@%+.-]+\.[A-Za-z0-9]{1,8})\)/gi
 
 // A transcript directive on its own line: `::name{...}`. Attribute values are
 // prose the model wrote (a task brief, a question) and read as markdown to the

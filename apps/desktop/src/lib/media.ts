@@ -102,7 +102,11 @@ export function isInlineMediaSrc(path: string): boolean {
 }
 
 export function isArtifactFilePath(path: string): boolean {
-  return /^(?:file:|\/|[~.][\\/]|\.\.[\\/]|[a-z]:[\\/]|\\\\)/i.test(path)
+  // Bare relative paths (`docs/report.md`) count as artifact paths too
+  // (#131842): they must carry a slash and end in an extension, so domains
+  // (`example.com`) and URL slugs never masquerade as artifacts, and the
+  // end anchor keeps directories (`docs/`) out.
+  return /^(?:file:|\/|[~.][\\/]|\.\.[\\/]|[a-z]:[\\/]|\\\\|(?:[\w@%+~.-]+\/)+[\w@%+.-]+\.[A-Za-z0-9]{1,8}$)/i.test(path)
 }
 
 export function isFileMediaPath(path: string): boolean {

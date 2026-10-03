@@ -63,18 +63,32 @@ describe('MarkdownLink filesystem hrefs', () => {
     expect(container.querySelector('a[href="/tmp/demo.mp4"]')).toBeNull()
   })
 
-  it('leaves anchors and relative links out of the preview pipeline', () => {
+  it('routes relative file links through the preview pipeline; anchors and URLs stay out', async () => {
+    // #131842: a relative filesystem link used to fall through as a bare
+    // `<a href="docs/…">` — Streamdown's pre-existing handling — which
+    // Electron's window-open policy denies (`new URL("docs/…")` throws), so
+    // the link was dead in chat. File-shaped relative targets now route
+    // like the absolute form; fragment anchors and absolute URLs keep the
+    // old behavior.
     render(
       <MarkdownTextContent
         isRunning={false}
-        text={'[frag](#section-2) and [rel](docs/guide.md) and [site](https://example.com)'}
+        text={'[frag](#section-2) and [rel](docs/guide.md) and [dot](./docs/summary.md) and [site](https://example.com)'}
       />
     )
 
-    // Fragment anchors survive untouched; relative links are NOT rewritten
-    // (they keep Streamdown's pre-existing handling) — neither gains a
-    // preview affordance.
-    expect(screen.queryByRole('button', { name: 'Open preview' })).toBeNull()
+    await screen.findByText('guide.md')
+    await screen.findByText('summary.md')
+    expect(screen.getAllByRole('button', { name: 'Open preview' })).toHaveLength(2)
     expect(document.querySelector('a[href="#section-2"]')).not.toBeNull()
+    expect(document.querySelector('a[href="docs/guide.md"]')).toBeNull()
+  })
+
+  it('leaves a bare domain target out of the preview pipeline', () => {
+    // No slash, no extension-terminated path segment: `[x](example.com)`
+    // keeps Streamdown's pre-existing handling (#131842).
+    render(<MarkdownTextContent isRunning={false} text={'[site](example.com)'} />)
+
+    expect(screen.queryByRole('button', { name: 'Open preview' })).toBeNull()
   })
 })

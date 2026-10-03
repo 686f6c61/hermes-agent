@@ -406,7 +406,9 @@ def match_runtime_outcomes(
     probe result it remains ``unaccounted``, rather than claiming the app owns an unknown
     incarnation. ``failed_respawn_pids`` (serves the dashboard cleanup stopped and could not bring
     back) read ``failed`` before the probe, whose "gone" is exactly what a failed respawn looks like
-    (#109290). The probe itself fails closed (unreadable ledger -> every planned serve is listed as
+    (#109290) — except on win32, where the cleanup has no respawn path to break and the stop reads
+    ``deferred`` instead, handed back to the process owner (#131864). The probe itself fails closed
+    (unreadable ledger -> every planned serve is listed as
     surviving), so ``deferred`` means "not shown to be gone", not "observed alive". See #111494.
 
     ``live_gateway_pids`` (profile -> gateway PIDs alive for that profile AFTER the restart phase:
@@ -480,6 +482,12 @@ def match_runtime_outcomes(
                 if killed_here:
                     return "stopped"
                 if r.pid in failed_respawns or any(_serve_unit_matches_profile(r.profile, u) for u in failed_set):
+                    if sys.platform == "win32" and r.pid in failed_respawns:
+                        # On win32 the dashboard cleanup has no respawn path (the per-PID argv
+                        # snapshot is POSIX-only), so this stop never broke a respawn promise:
+                        # it hands the relaunch back to the process owner instead of failing the
+                        # whole update. See #131864.
+                        return "deferred"
                     return "failed"
                 if stale_serves is not None and r.pid not in stale_serves:
                     # Incarnation-verified: the pre-update process is gone (replaced by its unit / the

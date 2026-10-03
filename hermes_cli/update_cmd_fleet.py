@@ -1936,8 +1936,11 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
     # a systemd-owned PID reads as clean stop and leaves the Cloudflare origin dead).
     # Already-restarted units aren't redone.
     # A dashboard it stopped and could not bring back is a promised restart that did not happen.
+    # On win32 there is no respawn path at all (the argv snapshot is POSIX-only), so the stop is
+    # a deferred handoff to the process owner, not a broken promise — it must not fail the update.
+    # See #131864.
     _dashboards_down = _refresh_dashboard_after_update(already_restarted_units=set(restart.restarted_services))
-    if _dashboards_down:
+    if _dashboards_down and sys.platform != "win32":
         restart.incomplete = True
 
     # Success-path twin of the abort-recovery probe: the restart phase only touches

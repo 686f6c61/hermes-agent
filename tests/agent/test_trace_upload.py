@@ -130,9 +130,14 @@ def test_load_session_messages_closes_database_on_failure(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_no_token_message_names_a_real_entry_point():
+    """The setup hint must point at a command that exists (#132076): there is no
+    ``/upload-trace`` slash command and no ``hermes trace`` CLI command."""
+    msg = trace_upload._NO_TOKEN_MESSAGE
 
-
-
+    assert "hermes sessions export --format trace --upload" in msg
+    assert "/upload-trace" not in msg
+    assert "hermes trace" not in msg
 
 
 def test_upload_happy_path_mocked(monkeypatch):

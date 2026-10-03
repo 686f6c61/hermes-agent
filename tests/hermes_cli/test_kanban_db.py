@@ -1612,7 +1612,11 @@ def test_resolve_hermes_argv_module_actually_runs():
         os.environ.pop("HERMES_BIN", None)
         with mock.patch.object(shutil, "which", return_value=None):
             argv = kbd._resolve_hermes_argv()
-    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30)
+    # The dispatcher spawns the module form through _module_hermes_env; run
+    # the child the same way, so the run also holds where the project is
+    # deliberately not installed (no cwd on sys.path under -P).
+    env = kbd._module_hermes_env(argv, dict(os.environ))
+    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30, env=env)
     assert r.returncode == 0, (
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
@@ -1640,6 +1644,9 @@ def test_module_hermes_argv_does_not_import_a_workspace_shadow(tmp_path):
         capture_output=True,
         text=True,
         timeout=60,
+        # The real spawn routes the module form through _module_hermes_env;
+        # the workspace must not win even there.
+        env=kbd._module_hermes_env(argv, dict(os.environ)),
     )
     combined = (proc.stdout or "") + (proc.stderr or "")
     assert proc.returncode == 0, combined[:400]

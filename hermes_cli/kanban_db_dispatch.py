@@ -2476,6 +2476,27 @@ def _module_hermes_argv() -> list[str]:
     return [sys.executable, "-P", "-m", "hermes_cli.main"]
 
 
+def _module_hermes_env(cmd: list[str], env: dict[str, str]) -> dict[str, str]:
+    """Child env for a module-form invocation resolved by this module.
+
+    ``-P`` (#126127) keeps the task workspace off ``sys.path``, but it also
+    drops the cwd — the only source of ``hermes_cli`` where the project is
+    deliberately not installed (``pm`` builds the test suite's side
+    environment with ``--no-install-project``). Pin the install tree that
+    owns this file so the real ``hermes_cli`` still resolves while the
+    workspace stays off ``sys.path`` entirely. Path-form invocations are
+    returned untouched: their launcher script rebuilds ``PYTHONPATH`` for
+    its own interpreter, and a foreign ``hermes`` must not see this
+    install's root.
+    """
+    if cmd[:2] != [sys.executable, "-P"]:
+        return env
+    root = str(Path(__file__).resolve().parents[1])
+    inherited = env.get("PYTHONPATH", "")
+    parts = [root, *(part for part in inherited.split(os.pathsep) if part and part != root)]
+    return {**env, "PYTHONPATH": os.pathsep.join(parts)}
+
+
 def _absolute_hermes_path(path: str) -> str:
     """Return an absolute filesystem path for a resolved Hermes shim."""
     expanded = os.path.expanduser(path)
@@ -2903,6 +2924,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
     cmd = _restart_safe_worker_argv(task, cmd)
+    # The module form runs with -P, so the child gets this install's root on
+    # PYTHONPATH — the workspace itself stays off sys.path (#126127).
+    env = _module_hermes_env(cmd, env)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)

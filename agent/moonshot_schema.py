@@ -13,6 +13,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List
 
+from tools.schema_sanitizer import MAX_SCHEMA_DEPTH, _bounded_deepcopy
+
 # Values are maps of name → schema: recurse into the values, but the map itself
 # is not a schema and gets no repairs.
 _SCHEMA_MAP_KEYS = frozenset({"properties", "patternProperties", "$defs", "definitions"})
@@ -32,21 +34,25 @@ def _empty_object_schema() -> Dict[str, Any]:
     return {"type": "object", "properties": {}, "required": []}
 
 
-def _repair_schema(node: Any) -> Any:
-    """Recursively apply the Moonshot repairs to a schema node."""
+def _repair_schema(node: Any, _depth: int = 0) -> Any:
+    """Recursively apply the Moonshot repairs to a schema node. Past
+    :data:`MAX_SCHEMA_DEPTH` the node is passed through unrepaired (logged at the
+    sanitizer's budget) instead of overflowing the stack."""
+    if _depth >= MAX_SCHEMA_DEPTH:
+        return node
     if isinstance(node, list):
-        return [_repair_schema(item) for item in node]
+        return [_repair_schema(item, _depth + 1) for item in node]
     if not isinstance(node, dict):
         return node
 
     repaired: Dict[str, Any] = {}
     for key, value in node.items():
         if key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
-            repaired[key] = {sub_key: _repair_schema(sub_val) for sub_key, sub_val in value.items()}
+            repaired[key] = {sub_key: _repair_schema(sub_val, _depth + 1) for sub_key, sub_val in value.items()}
         elif (key in _SCHEMA_LIST_KEYS and isinstance(value, list)) or (
             key in _SCHEMA_NODE_KEYS and isinstance(value, dict)
         ):
-            repaired[key] = _repair_schema(value)
+            repaired[key] = _repair_schema(value, _depth + 1)
         else:
             repaired[key] = value
 
@@ -134,7 +140,7 @@ def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
     """Deep-copied, Moonshot-compatible object schema; input is not mutated."""
     if not isinstance(parameters, dict):
         return _empty_object_schema()
-    repaired = _repair_schema(copy.deepcopy(parameters))
+    repaired = _repair_schema(_bounded_deepcopy(parameters))
     if not isinstance(repaired, dict):
         return _empty_object_schema()
     # Top-level must be an object schema.

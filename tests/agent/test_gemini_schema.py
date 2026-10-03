@@ -238,3 +238,12 @@ class TestAdapterWireShape:
         v1 = decl("https://generativelanguage.googleapis.com/v1")
         assert "parametersJsonSchema" not in v1
         assert v1["parameters"]["properties"]["g"]["anyOf"]  # legacy translator still applied
+
+
+class TestDeepNestingBudget:
+    def test_sanitize_gemini_schema_survives_1000_level_schema(self):
+        node = {"type": "string"}
+        for _ in range(999):
+            node = {"type": "object", "properties": {"x": node}}
+        out = sanitize_gemini_schema(node)
+        assert isinstance(out, dict)

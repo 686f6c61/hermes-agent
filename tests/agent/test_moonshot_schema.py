@@ -397,3 +397,11 @@ class TestUnionTypeList:
         assert sort["type"] == "string"
         assert sort["enum"] == ["asc", "desc"]
         assert params["properties"]["sort"]["type"] == ["string", "null"]
+
+
+def test_sanitize_moonshot_tool_parameters_survives_1000_level_schema():
+    node = {"type": "string"}
+    for _ in range(999):
+        node = {"type": "object", "properties": {"x": node}}
+    out = sanitize_moonshot_tool_parameters(node)
+    assert isinstance(out, dict)

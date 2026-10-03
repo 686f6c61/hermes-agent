@@ -591,3 +591,29 @@ def test_builtin_tool_without_required_gets_empty_required_list():
         "properties": {"opts": {"type": "object", "properties": {"k": {"type": "string"}}}},
     })])[0]["function"]["parameters"]
     assert nested["properties"]["opts"]["required"] == []
+
+
+# ── depth budget (issue #132005) ──────────────────────────────────────────
+
+
+def _deep_schema(depth: int) -> dict:
+    node = {"type": "string"}
+    for _ in range(depth):
+        node = {"type": "object", "properties": {"x": node}}
+    return node
+
+
+def test_sanitize_tool_schemas_survives_1000_level_schema():
+    out = sanitize_tool_schemas([_tool("evil", _deep_schema(999))])
+    assert isinstance(out, list) and out
+
+
+def test_sanitize_still_normalizes_at_moderate_depth():
+    node = "object"
+    for _ in range(30):
+        node = {"type": "object", "properties": {"x": node}}
+    out = sanitize_tool_schemas([_tool("ok", node)])
+    leaf = out[0]["function"]["parameters"]
+    for _ in range(30):
+        leaf = leaf["properties"]["x"]
+    assert leaf == {"type": "object", "properties": {}, "required": []}

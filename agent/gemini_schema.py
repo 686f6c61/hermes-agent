@@ -13,7 +13,7 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
-from tools.schema_sanitizer import _normalize_type_array
+from tools.schema_sanitizer import MAX_SCHEMA_DEPTH, _normalize_type_array
 
 logger = logging.getLogger(__name__)
 
@@ -65,24 +65,27 @@ def _normalize_gemini_type_array(type_array: list, cleaned: Dict[str, Any]) -> N
         cleaned["nullable"] = True
 
 
-def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
+def sanitize_gemini_schema(schema: Any, _depth: int = 0) -> Dict[str, Any]:
     """Gemini-compatible copy of a tool parameter schema: keeps only the documented subset
     (drops e.g. ``$schema`` / ``additionalProperties``) and recursively sanitizes nested
-    ``properties`` / ``items`` / ``anyOf``."""
+    ``properties`` / ``items`` / ``anyOf``. Past :data:`MAX_SCHEMA_DEPTH` the node is
+    passed through unsanitized instead of overflowing the stack."""
     if not isinstance(schema, dict):
         return {}
+    if _depth >= MAX_SCHEMA_DEPTH:
+        return schema
     cleaned: Dict[str, Any] = {}
     for key, value in schema.items():
         if key not in _GEMINI_SCHEMA_ALLOWED_KEYS:
             continue
         if key == "properties":
             if isinstance(value, dict):
-                cleaned[key] = {name: sanitize_gemini_schema(sub) for name, sub in value.items() if isinstance(name, str)}
+                cleaned[key] = {name: sanitize_gemini_schema(sub, _depth + 1) for name, sub in value.items() if isinstance(name, str)}
         elif key == "items":
-            cleaned[key] = sanitize_gemini_schema(value)
+            cleaned[key] = sanitize_gemini_schema(value, _depth + 1)
         elif key == "anyOf":
             if isinstance(value, list):
-                cleaned[key] = [sanitize_gemini_schema(item) for item in value if isinstance(item, dict)]
+                cleaned[key] = [sanitize_gemini_schema(item, _depth + 1) for item in value if isinstance(item, dict)]
         else:
             cleaned[key] = value
 

@@ -26,13 +26,17 @@ def _empty_object() -> dict:
     return {"type": "object", "properties": {}, "required": []}
 
 
-def _rewrite(schema: Any, fn: Callable[[dict], Any]) -> Any:
-    """Bottom-up map over a schema tree: lists/dicts recurse, then *fn* sees each dict."""
+def _rewrite(schema: Any, fn: Callable[[dict], Any], _depth: int = 0) -> Any:
+    """Bottom-up map over a schema tree: lists/dicts recurse, then *fn* sees each dict.
+    Past :data:`MAX_SCHEMA_DEPTH` the subtree is returned untouched instead of
+    overflowing the stack."""
     if isinstance(schema, list):
-        return [_rewrite(item, fn) for item in schema]
+        return [_rewrite(item, fn, _depth + 1) for item in schema]
     if not isinstance(schema, dict):
         return schema
-    return fn({k: _rewrite(v, fn) for k, v in schema.items()})
+    if _depth >= MAX_SCHEMA_DEPTH:
+        return schema
+    return fn({k: _rewrite(v, fn, _depth + 1) for k, v in schema.items()})
 
 
 def sanitize_property_key(key: str) -> str:
@@ -78,13 +82,26 @@ def unrename_tool_args(params_schema: Any, args: Any) -> Any:
     return out
 
 
+def _bounded_deepcopy(value: Any, _depth: int = 0) -> Any:
+    """Deep-copy up to :data:`MAX_SCHEMA_DEPTH` levels; deeper subtrees are shared by
+    reference instead of overflowing the stack in ``copy.deepcopy``. Schemas are treated
+    as immutable downstream, so sharing an over-budget subtree is safe."""
+    if _depth >= MAX_SCHEMA_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return {k: _bounded_deepcopy(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_bounded_deepcopy(v, _depth + 1) for v in value]
+    return value
+
+
 def sanitize_tool_schemas(tools: list[dict]) -> list[dict]:
     """Deep-copied ``tools`` (OpenAI format) with sanitized parameter schemas; safe to mutate."""
     return [_sanitize_single_tool(tool) for tool in tools] if tools else tools
 
 
 def _sanitize_single_tool(tool: dict) -> dict:
-    out = copy.deepcopy(tool)
+    out = _bounded_deepcopy(tool)
     fn = out.get("function") if isinstance(out, dict) else None
     if not isinstance(fn, dict):
         return out
@@ -242,7 +259,14 @@ def _normalize_type_array(value: list, out: dict) -> None:
         out.setdefault("nullable", True)
 
 
-def _sanitize_node(node: Any, path: str) -> Any:
+# Schema-normalization walkers stop descending at this depth: an external tool's
+# ``inputSchema`` is attacker-controlled and arbitrarily deep nesting must degrade
+# instead of exhausting the stack. Real-world schemas are shallow; 64 leaves a wide
+# margin under any recursion limit.
+MAX_SCHEMA_DEPTH = 64
+
+
+def _sanitize_node(node: Any, path: str, _depth: int = 0) -> Any:
     """Recursively sanitize a JSON-Schema fragment: bare-string schemas → ``{"type": <value>}``
     (unknown strings → permissive object); object nodes gain ``properties: {}``; ``type`` arrays
     are normalized; property keys are renamed to the provider-safe pattern and ``required``
@@ -252,7 +276,15 @@ def _sanitize_node(node: Any, path: str) -> Any:
     and multi-type arrays like ``["number", "string"]`` to an ``anyOf`` of single-type schemas so no branch
     is dropped (ported from anomalyco/opencode#31877). - Recurses into ``properties``, ``items``,
     ``additionalProperties``, ``anyOf``, ``oneOf``, ``allOf``, and ``$defs`` / ``definitions``.
+    Past :data:`MAX_SCHEMA_DEPTH` the subtree is passed through unsanitized (logged) instead
+    of overflowing the stack.
     """
+    if _depth >= MAX_SCHEMA_DEPTH:
+        logger.warning(
+            "tool schema exceeds the maximum nesting depth (%d); deeper levels left unsanitized",
+            MAX_SCHEMA_DEPTH,
+        )
+        return node
     if isinstance(node, str):
         if node in _BARE_TYPE_NAMES:
             logger.debug("schema_sanitizer[%s]: replacing bare-string schema %r with {'type': %r}",
@@ -262,7 +294,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
                      "with empty object schema", path, node)
         return _empty_object()
     if isinstance(node, list):
-        return [_sanitize_node(item, f"{path}[{i}]") for i, item in enumerate(node)]
+        return [_sanitize_node(item, f"{path}[{i}]", _depth + 1) for i, item in enumerate(node)]
     if not isinstance(node, dict):
         return node
     # Renames computed up front so ``required`` remaps even when it precedes ``properties``.
@@ -286,14 +318,14 @@ def _sanitize_node(node: Any, path: str) -> Any:
         elif key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
             renames = prop_renames if key == "properties" else {}
             out[key] = {
-                renames.get(k, k): _sanitize_node(v, f"{path}.{key}.{renames.get(k, k)}")
+                renames.get(k, k): _sanitize_node(v, f"{path}.{key}.{renames.get(k, k)}", _depth + 1)
                 for k, v in value.items()}
         elif key == "dependencies" and isinstance(value, dict):
-            out[key] = {k: _sanitize_node(v, f"{path}.{key}.{k}") if isinstance(v, dict)
+            out[key] = {k: _sanitize_node(v, f"{path}.{key}.{k}", _depth + 1) if isinstance(v, dict)
                         else copy.deepcopy(v) for k, v in value.items()}
         elif key in {"items", "additionalProperties"}:
             # Bool ``additionalProperties`` is valid; bool ``items`` is non-standard but preserved.
-            out[key] = value if isinstance(value, bool) else _sanitize_node(value, f"{path}.{key}")
+            out[key] = value if isinstance(value, bool) else _sanitize_node(value, f"{path}.{key}", _depth + 1)
         elif key in _NON_SCHEMA_LIST_KEYS:
             if key == "required" and isinstance(value, bool):
                 continue  # Legacy property flags are lifted by the parent below.
@@ -302,7 +334,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
             else:
                 out[key] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
         elif key in _SCHEMA_CHILD_KEYS:
-            out[key] = _sanitize_node(value, f"{path}.{key}")
+            out[key] = _sanitize_node(value, f"{path}.{key}", _depth + 1)
         else:
             # Defaults, consts and extension metadata are literal data, not schemas.
             out[key] = copy.deepcopy(value)
@@ -329,13 +361,16 @@ _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 _SCHEMA_MARKERS = frozenset({"type", "anyOf", "oneOf", "allOf"})  # a node with one IS a schema
 
 
-def _dict_nodes(node: Any):
-    """Pre-order walk over every dict node (yielded before its values, so it may be mutated)."""
+def _dict_nodes(node: Any, _depth: int = 0):
+    """Pre-order walk over every dict node (yielded before its values, so it may be mutated).
+    Past :data:`MAX_SCHEMA_DEPTH` deeper nodes are skipped instead of overflowing the stack."""
     if isinstance(node, dict):
         yield node
+    if _depth >= MAX_SCHEMA_DEPTH:
+        return
     children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
     for child in children:
-        yield from _dict_nodes(child)
+        yield from _dict_nodes(child, _depth + 1)
 
 
 def _reactive_strip(

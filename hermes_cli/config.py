@@ -13,6 +13,7 @@ import copy
 import difflib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -1894,6 +1895,10 @@ def resolve_turn_limit(raw: Any, default: int = TURN_LIMIT_UNLIMITED) -> int:
     if raw is None or isinstance(raw, bool):
         return default
     if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and not math.isfinite(raw):
+            # YAML spells infinity as ``.inf`` and loads it here as a float; treat it like the
+            # string "inf" (NaN is garbage config → default, like the unknown-type branch).
+            return TURN_LIMIT_UNLIMITED if math.isinf(raw) else default
         n = int(raw)
     elif isinstance(raw, str):
         s = raw.strip().lower()

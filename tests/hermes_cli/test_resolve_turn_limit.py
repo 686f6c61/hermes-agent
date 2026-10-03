@@ -30,6 +30,13 @@ class TestNumericValues:
     def test_negative_int_is_unlimited(self):
         assert resolve_turn_limit(-5) == TURN_LIMIT_UNLIMITED
 
+    def test_non_finite_floats_do_not_crash(self):
+        # YAML spells infinity as ``.inf``, which loads as a float here (#132075).
+        assert resolve_turn_limit(float("inf")) == TURN_LIMIT_UNLIMITED
+        assert resolve_turn_limit(float("-inf")) == TURN_LIMIT_UNLIMITED
+        # NaN is garbage config: fall back to the default like the unknown-type branch.
+        assert resolve_turn_limit(float("nan"), 90) == 90
+
 
 
 class TestUnlimitedSpellings:

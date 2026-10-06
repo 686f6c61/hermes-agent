@@ -3,12 +3,16 @@
  * pane, so navigating to one has to front that pane — otherwise a main zone
  * parked on a session tile keeps the tile on screen and the click looks dead
  * until the app restarts (#72602). A contributed (plugin) page instead opens
- * as a closable route tile BESIDE the chat (#101593): host.navigate must open
- * the tile, front its own pane, and leave the hash (and the chat) alone.
+ * as a closable route tile BESIDE the chat (#101593): the workspace never
+ * points at one — host.navigate, the sidebar, a palette row, or a plain deep
+ * link (`#/kanban` on boot/back-forward) all land on the same tile door, and
+ * the chat keeps its pane.
  *
- * Three layers, all covered here: `syncWorkspaceRoute` (the router location,
- * every entry point), `navigateToWorkspacePage` (the re-click, where the
- * location doesn't change), and the tile door behind `host.navigate`.
+ * Four layers covered here: `syncWorkspaceRoute` (the router location, every
+ * entry point — deep links included), `navigateToWorkspacePage` (palette,
+ * keybinds, shell menu, plugin `onNavigateRoute`), `navigateContributedRoute`
+ * (the re-click, where the location doesn't change), and the tile door behind
+ * `host.navigate`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -65,6 +69,7 @@ beforeEach(() => {
 
 afterEach(() => {
   $workspaceIsPage.set(false)
+  $routeTiles.set([])
 })
 
 describe('routePathname', () => {
@@ -123,14 +128,48 @@ describe('syncWorkspaceRoute', () => {
     expect(fronted()).toBe(true)
   })
 
-  it('fronts on a contributed page route', () => {
+  it('opens the tile of a contributed page and never takes the workspace', () => {
     const dispose = contributeRoute()
 
     try {
       syncWorkspaceRoute(CONTRIBUTED_ROUTE)
 
       expect(appViewForPath(CONTRIBUTED_ROUTE)).toBe('extension')
-      expect(fronted()).toBe(true)
+      // The tile door, not the workspace front: the chat keeps its pane.
+      expect($routeTiles.get().some(tile => tile.path === CONTRIBUTED_ROUTE)).toBe(true)
+      expect(vi.mocked(revealTreePane).mock.calls.some(([pane]) => pane === `route-tile:${CONTRIBUTED_ROUTE}`)).toBe(
+        true
+      )
+      expect($workspaceIsPage.get()).toBe(false)
+      expect(vi.mocked(revealTreePane).mock.calls.some(([pane]) => pane === 'workspace')).toBe(false)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('opens the tile of a contributed page reached with a query', () => {
+    const dispose = contributeRoute()
+
+    try {
+      syncWorkspaceRoute(`${CONTRIBUTED_ROUTE}?card=42`)
+
+      expect($routeTiles.get().some(tile => tile.path === CONTRIBUTED_ROUTE)).toBe(true)
+      expect($workspaceIsPage.get()).toBe(false)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('stands the workspace back up when a page route deep-links into a contributed one', () => {
+    const dispose = contributeRoute()
+
+    try {
+      syncWorkspaceRoute(CAPABILITIES_ROUTE)
+      expect($workspaceIsPage.get()).toBe(true)
+
+      syncWorkspaceRoute(CONTRIBUTED_ROUTE)
+
+      expect($workspaceIsPage.get()).toBe(false)
     } finally {
       dispose()
     }
@@ -157,6 +196,24 @@ describe('navigateToWorkspacePage', () => {
 
     expect(navigate).toHaveBeenCalledWith(CAPABILITIES_ROUTE, undefined)
     expect(fronted()).toBe(true)
+  })
+
+  it('routes a contributed target through the tile door instead of the workspace', () => {
+    const dispose = contributeRoute()
+
+    try {
+      const navigate = vi.fn()
+
+      navigateToWorkspacePage(navigate, CONTRIBUTED_ROUTE)
+
+      expect(navigate).not.toHaveBeenCalled()
+      expect($routeTiles.get().some(tile => tile.path === CONTRIBUTED_ROUTE)).toBe(true)
+      expect(vi.mocked(revealTreePane).mock.calls.some(([pane]) => pane === `route-tile:${CONTRIBUTED_ROUTE}`)).toBe(
+        true
+      )
+    } finally {
+      dispose()
+    }
   })
 
   it('navigates without fronting for chat and overlay targets', () => {

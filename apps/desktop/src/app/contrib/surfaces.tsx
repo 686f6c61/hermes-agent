@@ -11,8 +11,6 @@ import { useStore } from '@nanostores/react'
 import { type ComponentProps, lazy, memo, type ReactNode, Suspense, useMemo } from 'react'
 import { Navigate, Route, Routes, useParams } from 'react-router'
 
-import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
-import { useContributions } from '@/contrib/react/use-contributions'
 import { $activeConnectionId } from '@/store/connections'
 import { $gateway } from '@/store/gateway'
 import { $guideOpening } from '@/store/onboarding-gate'
@@ -22,7 +20,7 @@ import { $freshDraftReady, $gatewayState } from '@/store/session'
 import { ChatView } from '../chat'
 import { ChatSidebar } from '../chat/sidebar'
 import { TerminalPaneChrome } from '../right-sidebar/terminal/chrome'
-import { contributedRoutes, NEW_CHAT_ROUTE, ROUTES_AREA, sessionRoute } from '../routes'
+import { NEW_CHAT_ROUTE, sessionRoute } from '../routes'
 import { useStatusSnapshot } from '../shell/hooks/use-status-snapshot'
 import { useStatusbarItems } from '../shell/hooks/use-statusbar-items'
 import { ModelMenuPanel } from '../shell/model-menu-panel'
@@ -109,10 +107,12 @@ export const StatusbarSurface = memo(function StatusbarSurface({
   return guideOpening ? null : <StatusbarControls items={statusbarItems} leftItems={leftStatusbarItems} />
 })
 
-/** The workspace pane: the real route table (chat + full-page views + plugin
- *  routes). Subscribes to the gateway instance/state and ROUTES_AREA itself;
- *  the voice cap arrives as a prop. ChatView subscribes to its own session
- *  atoms, so streaming never round-trips through the controller. */
+/** The workspace pane: the real route table (chat + full-page views). Plugin
+ *  routes are NOT in this table — they show as route tiles beside the chat
+ *  (#101593), so an unknown path falls through to the chat redirect. Subscribes
+ *  to the gateway instance/state; the voice cap arrives as a prop. ChatView
+ *  subscribes to its own session atoms, so streaming never round-trips through
+ *  the controller. */
 export const ChatRoutesSurface = memo(function ChatRoutesSurface({
   actions,
   maxVoiceRecordingSeconds
@@ -124,8 +124,6 @@ export const ChatRoutesSurface = memo(function ChatRoutesSurface({
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const gateway = useStore($gateway)
   const gatewayState = useStore($gatewayState)
-  const routeSnapshot = useContributions(ROUTES_AREA)
-  const routeContributions = contributedRoutes(routeSnapshot)
 
   const modelMenuContent = useMemo(
     () =>
@@ -196,20 +194,10 @@ export const ChatRoutesSurface = memo(function ChatRoutesSurface({
       <Route element={null} path="settings" />
       <Route element={null} path="starmap" />
       <Route element={null} path="webhooks" />
-      {/* Registry-contributed pages (core features + plugins) render in the
-          workspace pane like any built-in view — behind the same blast wall
-          as every other contribution mount. */}
-      {routeContributions.map(route => (
-        <Route
-          element={page(
-            <ContribBoundary id={route.key}>
-              <ContribRender render={route.render} />
-            </ContribBoundary>
-          )}
-          key={route.key}
-          path={route.path.slice(1)}
-        />
-      ))}
+      {/* Plugin routes never render here: the tile path is the only surface a
+          contributed page shows on (#101593), and a location that still points
+          at one (deep link, back/forward) falls through to the chat redirect
+          below after `syncWorkspaceRoute` opened its tile. */}
       <Route element={<Navigate replace to={NEW_CHAT_ROUTE} />} path="new" />
       <Route element={<LegacySessionRedirect />} path="sessions/:sessionId" />
       <Route element={<Navigate replace to={NEW_CHAT_ROUTE} />} path="*" />

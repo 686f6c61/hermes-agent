@@ -305,16 +305,37 @@ function revealWorkspacePane(): void {
  * Point the workspace at `pathname`: mirror "showing a full page" into
  * `$workspaceIsPage`, and FRONT the pane when it is one.
  *
- * A page renders inside `workspace`, so a main zone parked on a session tile
- * keeps the tile on screen while the route and the page content change behind
- * it — the navigation looks dead (#72602). Session switches already front the
- * pane in `store/session-states.ts`; pages had no equivalent.
+ * A contributed (plugin) route never lands ON the workspace: the tile path is
+ * the ONLY way a plugin page shows (below), so a deep link, a back/forward
+ * step, or a cold-start restore pointing at `/kanban` opens (or fronts) the
+ * page's tile and lets the router fall through to the chat route — the page
+ * must not replace the live Bot Chat with no way back (#101593).
+ *
+ * A built-in page renders inside `workspace`, so a main zone parked on a
+ * session tile keeps the tile on screen while the route and the page content
+ * change behind it — the navigation looks dead (#72602). Session switches
+ * already front the pane in `store/session-states.ts`; pages had no equivalent.
  *
  * The router location drives this, so every entry point gets it without opting
  * in: sidebar, keybinds, command palette, Command Center, contributed
  * statusbar/titlebar `to` targets, back/forward, and cold-start restore.
  */
 export function syncWorkspaceRoute(pathname: string): void {
+  const route = routePathname(pathname)
+
+  if (isContributedPath(route)) {
+    // A tile is not a workspace page: coming from a built-in page route, the
+    // workspace goes back to the chat (tab strip stands up again).
+    if ($workspaceIsPage.get()) {
+      $workspaceIsPage.set(false)
+    }
+
+    openRouteTile(route)
+    revealRouteTilePane(route)
+
+    return
+  }
+
   const isPage = isWorkspacePageRoute(pathname)
 
   if (isPage !== $workspaceIsPage.get()) {
@@ -329,6 +350,10 @@ export function syncWorkspaceRoute(pathname: string): void {
 /**
  * Navigate to `to`, fronting the workspace pane when it is a page route.
  *
+ * Contributed pages go through the one shared tile door first: a palette row,
+ * keybind, shell menu item, or plugin `onNavigateRoute` pointing at a plugin
+ * page opens the tile and never takes the workspace (#101593).
+ *
  * `syncWorkspaceRoute` covers route CHANGES; this covers the RE-CLICK, the one
  * case it can't see — hitting Capabilities while already on `/capabilities` with a
  * tile focused leaves the location untouched, so no effect fires and only an
@@ -336,6 +361,10 @@ export function syncWorkspaceRoute(pathname: string): void {
  * be triggered from the page it targets.
  */
 export function navigateToWorkspacePage(navigate: NavigateLike, to: string, options?: { replace?: boolean }): void {
+  if (navigateContributedRoute(to)) {
+    return
+  }
+
   navigate(to, options)
 
   if (isWorkspacePageRoute(to)) {

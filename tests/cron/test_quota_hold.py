@@ -171,3 +171,35 @@ def test_quota_hold_parks_past_window_survives_stale_rearm_and_clears_on_model_r
     j = update_job(job_id, {"schedule": "every 15m"})
     assert qh.STATE_KEY not in j
     assert datetime.fromisoformat(j["next_run_at"]) - now < timedelta(hours=1)
+
+
+def test_provider_repoint_releases_quota_hold_and_reanchors_next_run(tmp_cron_home):
+    """The hold was measured against the provider the job was pointed at when it failed; a
+    provider/model repoint (including unpin) says nothing about the new target, so the park
+    cannot survive it: the marker drops and next_run_at returns to the natural cadence. Edits
+    that do not change the target keep the hold parked exactly where it is."""
+    job = create_job("portfolio triage", "every 30m", deliver="local")
+    job_id = job["id"]
+    now = datetime.now(timezone.utc)
+    deliveries: list = []
+
+    _tick(get_job(job_id), tmp_cron_home, deliveries, _raise_quota)
+    j = get_job(job_id)
+    assert j[qh.STATE_KEY] == j["next_run_at"]
+
+    # An edit that leaves the target alone keeps the hold (that is the point of the marker).
+    update_job(job_id, {"name": "portfolio triage 2"})
+    j = get_job(job_id)
+    assert j[qh.STATE_KEY] == j["next_run_at"]
+
+    # Repointing to a healthy provider releases the job: marker gone, next run back on cadence.
+    j = update_job(job_id, {"model": "claude-sonnet-5-5", "provider": "anthropic"})
+    assert qh.STATE_KEY not in j
+    assert datetime.fromisoformat(j["next_run_at"]) - now < timedelta(hours=1)
+
+    # Unpin releases the same way: _apply_pin_update rewrites the pin into provider+model.
+    assert mark_job_run(job_id, False, QUOTA_MSG, quota_hold_seconds=123518)
+    assert qh.STATE_KEY in get_job(job_id)
+    j = update_job(job_id, {"pinned": False})
+    assert qh.STATE_KEY not in j
+    assert datetime.fromisoformat(j["next_run_at"]) - now < timedelta(hours=1)

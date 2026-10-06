@@ -2136,6 +2136,19 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             # parked. The next fire re-parks (with a fresh notice) if the window is still closed.
             from cron.quota_hold import clear_state as _clear_quota_hold
             _clear_quota_hold(updated)
+        if {"model", "provider"}.intersection(updates):
+            # A provider/model repoint (``_apply_pin_update`` rewrites ``pinned`` into these) has
+            # already happened by now. The hold was measured against the provider the job was
+            # pointed at when it failed, so it says nothing about the new target: while the
+            # marker lasts, drop it and re-anchor next_run_at on the natural cadence (the park
+            # IS next_run_at). The next fire re-parks (with a fresh notice) if the new target's
+            # window is closed too. Records without a marker keep their lattice — re-anchoring
+            # on every edit would delay an interval job by up to a full cadence.
+            from cron.quota_hold import STATE_KEY as _quota_hold_state
+            from cron.quota_hold import clear_state as _clear_quota_hold
+            if updated.get(_quota_hold_state) and "schedule" not in updates:
+                _clear_quota_hold(updated)
+                updated["next_run_at"] = compute_next_run(updated["schedule"]) or updated.get("next_run_at")
         if {"schedule", "next_run_at", "enabled", "state"}.intersection(updates):
             # An explicit schedule/lifecycle rewrite supersedes any occurrence the dispatcher
             # left unclaimed — pause/resume/edit must not resurrect a slot from before the edit.

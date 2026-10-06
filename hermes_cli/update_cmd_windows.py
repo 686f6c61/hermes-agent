@@ -1202,7 +1202,10 @@ def _relaunch_paused_gateways(token: dict, profiles: dict, unmapped: list) -> tu
     fleet_relaunched = {str(name) for name in (token.get("fleet_relaunched") or [])}
     for profile, old_pid in sorted(profiles.items()):
         if str(profile) in fleet_relaunched:
-            relaunched.append(str(profile))
+            # The fleet outcome already owns this profile's classification:
+            # launching again would kill its armed ``--replace`` (#126821), and
+            # appending it here would double-report an externally supervised
+            # profile as relaunched in the restart receipt.
             continue
         if _try_call(lambda p=profile, o=old_pid: launch_detached_profile_gateway_restart(str(p), int(o)),
                      "Could not restart Windows gateway profile %s after update: %s", profile):

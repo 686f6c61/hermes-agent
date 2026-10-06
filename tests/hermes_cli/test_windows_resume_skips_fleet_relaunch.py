@@ -3,8 +3,10 @@
 The fleet path stops a gateway that appeared during the update and arms
 ``gateway run --replace``. The Windows resume path then relaunches every
 profile the pre-update pause recorded. The second ``--replace`` kills the
-first. Profiles already on the fleet outcome are counted as relaunched and
-are not launched again.
+first. Profiles already on the fleet outcome are not launched again and
+stay off the resume path's relaunch result: the fleet outcome already
+classifies them, so an externally supervised profile must not surface as
+relaunched too.
 """
 
 from unittest.mock import patch
@@ -26,9 +28,9 @@ def test_resume_does_not_replace_a_profile_the_fleet_already_relaunched(monkeypa
         token, {"default": 111, "other": 222}, [])
 
     assert calls == [("other", 222)]
-    assert relaunched == ["default", "other"]
+    assert relaunched == ["other"]
     assert unmapped == 0
-    assert token["relaunched_profiles"] == ["default", "other"]
+    assert token["relaunched_profiles"] == ["other"]
 
 
 def test_merge_records_fleet_profiles_before_windows_resume(monkeypatch):

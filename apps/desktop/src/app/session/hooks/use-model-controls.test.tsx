@@ -104,11 +104,12 @@ function installSessionDelegate() {
   setSessionTileDelegate({
     archiveSession: vi.fn(async () => undefined),
     branchSession: vi.fn(async () => undefined),
+    branchSessionAtMessage: vi.fn(async () => false),
     deleteSession: vi.fn(async () => undefined),
     executeSlash: vi.fn(async () => undefined),
     interruptSession: vi.fn(async () => undefined),
     resumeTile: vi.fn(async () => ''),
-    submitToSession: vi.fn(async () => undefined),
+    submitToSession: vi.fn(async () => ({ runtimeSessionId: 'runtime-submit', storedSessionId: null })),
     updateSession: (runtimeId, updater) => {
       const previous =
         sessionStateCache.get(runtimeId) ?? $sessionStates.get()[runtimeId] ?? createClientSessionState()
@@ -156,7 +157,7 @@ describe('useModelControls', () => {
     setCurrentModel('')
     setCurrentModelSource('')
     setCurrentProvider('')
-    SessionStates.$sessionStates.set({})
+    $sessionStates.set({})
     installSessionDelegate()
   })
 
@@ -170,7 +171,7 @@ describe('useModelControls', () => {
     setCurrentModel('')
     setCurrentModelSource('')
     setCurrentProvider('')
-    SessionStates.$sessionStates.set({})
+    $sessionStates.set({})
     tile.delegate = null
     installSessionDelegate()
   })
@@ -1014,7 +1015,7 @@ describe('useModelControls', () => {
     queryClient.setQueryData(ambientAKey, { model: 'model-a', provider: 'provider-a', providers: [] })
     $activeGatewayProfile.set('profile-a')
     $activeSessionId.set('runtime-a')
-    SessionStates.$sessionStates.set({
+    $sessionStates.set({
       'runtime-b': { model: 'old-b', provider: 'provider-b' }
     } as never)
 

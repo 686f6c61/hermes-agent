@@ -89,6 +89,42 @@ def _validated_runtime_venv(env: dict) -> Path | None:
         return None
 
 
+def _generation_site_packages() -> list[Path]:
+    """site-packages of every committed generation this install keeps on disk.
+
+    A gateway that survives a dependency-generation switch still carries the
+    previous generation's site-packages on its PYTHONPATH (#133668): those
+    entries no longer match the selected venv, but the managed PM built them,
+    so they are Hermes-owned by the same path provenance as the selected one.
+    Enumerating the generations dir keeps the strip exact (real venvs with a
+    pyvenv.cfg only) without any cross-version heuristic."""
+    try:
+        from pm.environments import install_state_dir, site_packages as _pm_site_packages
+    except Exception:
+        return []
+    root = Path(__file__).resolve().parents[2]
+    try:
+        generations = install_state_dir(root) / "environments"
+        if not generations.is_dir():
+            return []
+    except OSError:
+        return []
+    result: list[Path] = []
+    try:
+        for candidate in sorted(generations.iterdir()):
+            if not (candidate / "pyvenv.cfg").is_file():
+                continue
+            try:
+                site = _pm_site_packages(candidate)
+            except OSError:
+                continue
+            if not any(_same_path(site, existing) for existing in result):
+                result.append(site)
+    except OSError:
+        pass
+    return result
+
+
 def _get_hermes_site_packages(env: dict) -> list[Path]:
     """Exact site-packages dirs owned by the Hermes runtime (cached):
     ``site.getsitepackages()`` with a ``sys.prefix`` fallback, plus a validated
@@ -115,6 +151,10 @@ def _get_hermes_site_packages(env: dict) -> list[Path]:
         runtime_site_packages = site_packages(runtime_venv)
         if not any(_same_path(runtime_site_packages, existing) for existing in result):
             result.append(runtime_site_packages)
+
+    for site in _generation_site_packages():
+        if not any(_same_path(site, existing) for existing in result):
+            result.append(site)
     return result
 
 

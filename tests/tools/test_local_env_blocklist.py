@@ -656,6 +656,56 @@ def test_runtime_provenance_is_independent_of_aliases_and_virtual_env(child_env,
     assert base["VIRTUAL_ENV"] == str(user_venv)
 
 
+def _make_generation(generations: Path, name: str, version: str) -> tuple[Path, Path]:
+    gen = generations / name
+    site = gen / ("Lib/site-packages" if os.name == "nt" else f"lib/python{version}/site-packages")
+    site.mkdir(parents=True)
+    (gen / "pyvenv.cfg").write_text(f"version = {version}\n", encoding="utf-8")
+    return gen, site
+
+
+def test_stale_generation_pythonpath_is_owned(child_env, monkeypatch):
+    """A gateway that survives a dependency-generation switch still carries the
+    previous generation's site-packages on its PYTHONPATH; children must not
+    inherit it (#133668). Every committed generation on disk is Hermes-owned by
+    the same path provenance as the selected one, so all of them are stripped."""
+    payload = child_env / "payload"
+    generations = payload / "state/environments"
+    old_gen, old_site = _make_generation(generations, "old-hash", "3.14")
+    new_gen, new_site = _make_generation(generations, "new-hash", "3.14")
+    (payload / "tools").mkdir()
+    (payload / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("pm.environments.install_state_dir", lambda repo: payload / "state")
+    from pm.environments import runtime_facts_path
+    facts = runtime_facts_path(Path(__file__).resolve().parents[2])
+    facts.parent.mkdir(parents=True, exist_ok=True)
+    facts.write_text(json.dumps({"packages": {"venv": {"environment": str(new_gen)}}}), encoding="utf-8")
+    monkeypatch.setattr(local, "_in_venv", False)
+    monkeypatch.setattr(local, "_hermes_site_packages", None)
+    alias = child_env / "unrelated-repo-alias"
+    monkeypatch.setattr(local, "_hermes_repo_root_aliases", (alias,))
+    user_site = child_env / "user-venv" / "lib" / "python3.11" / "site-packages"
+    user_site.mkdir(parents=True)
+    env = {"PYTHONPATH": os.pathsep.join(map(str, [old_site, new_site, alias, user_site]))}
+    pp._strip_hermes_owned_pythonpath(env)
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(user_site)]
+
+
+def test_missing_generations_dir_leaves_pythonpath_untouched(child_env, monkeypatch):
+    """Without a managed-runtime layout the generation enumeration finds nothing
+    and the strip behaves exactly as before (user paths stay byte-for-byte)."""
+    payload = child_env / "payload"
+    (payload / "state").mkdir(parents=True)
+    monkeypatch.setattr("pm.environments.install_state_dir", lambda repo: payload / "state")
+    monkeypatch.setattr(local, "_in_venv", False)
+    monkeypatch.setattr(local, "_hermes_site_packages", None)
+    monkeypatch.setattr(local, "_hermes_repo_root_aliases", ())
+    entries = ["/opt/user-lib", "/old/lib/python2.7/site-packages"]
+    env = {"PYTHONPATH": os.pathsep.join(entries)}
+    pp._strip_hermes_owned_pythonpath(env)
+    assert env["PYTHONPATH"].split(os.pathsep) == entries
+
+
 @pytest.mark.parametrize("existing,expected", [
     (["/usr/bin", "/bin"], ["/opt/hermes/bin", "/usr/bin", "/bin"]),
     (["/usr/bin", "/opt/hermes/bin"], ["/usr/bin", "/opt/hermes/bin"]),

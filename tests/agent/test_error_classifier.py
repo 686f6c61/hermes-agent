@@ -697,6 +697,47 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.unknown
         assert result.retryable is True
 
+    def test_404_not_found_error_body_is_not_retried(self):
+        """An Anthropic-style ``not_found_error`` envelope on a 404 is the route
+        saying the model/resource is not there: replaying the identical request
+        cannot succeed, so the verdict must be non-retryable (#133447)."""
+        e = MockAPIError(
+            "HTTP 404: local-agent is not served now: model unavailable in this mode",
+            status_code=404,
+            body={"type": "error", "error": {"type": "not_found_error", "code": "model_not_available",
+                                             "param": "model", "message": "local-agent is not served now: ..."}},
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.should_fallback is True
+
+    def test_404_flattened_not_found_error_body_is_not_retried(self):
+        """The same signal without the ``error`` wrapper (some relays flatten it)."""
+        e = MockAPIError("HTTP 404", status_code=404,
+                         body={"type": "not_found_error", "message": "no such model"})
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+
+    def test_404_x_should_retry_false_header_is_not_retried(self):
+        """``x-should-retry: false`` is the provider's explicit opt-out (the OpenAI and
+        Anthropic SDKs honour it); a generic 404 carrying it must not burn three
+        backoff retries against a deliberately refusing server (#133447)."""
+        e = MockAPIError("Not Found", status_code=404, headers={"x-should-retry": "false"})
+        result = classify_api_error(e)
+        assert result.retryable is False
+        assert result.should_fallback is True
+
+    def test_404_x_should_retry_true_stays_retryable(self):
+        """The header only ever opts OUT: ``x-should-retry: true`` (or its absence)
+        keeps the generic-404 retryable classification untouched."""
+        e = MockAPIError("Not Found", status_code=404, headers={"x-should-retry": "true"})
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.unknown
+        assert result.retryable is True
+        assert result.should_fallback is False
+
     # ── Provider policy-block (OpenRouter privacy/guardrail) ──
 
 

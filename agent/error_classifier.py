@@ -1032,6 +1032,27 @@ def _status_403(c: _Ctx) -> Verdict:
     return _V_AUTH_FALLBACK
 
 
+def _body_says_not_found(body: Any) -> bool:
+    """Anthropic-style ``not_found_error`` error-type, nested in the ``error`` envelope
+    or flattened at the top level (some relays strip the wrapper)."""
+    if not isinstance(body, dict):
+        return False
+    candidates = (body, _error_obj(body))
+    return any(
+        str(payload.get("type") or "").strip().lower() == "not_found_error"
+        for payload in candidates
+    )
+
+
+def _x_should_retry_false(headers: Any) -> bool:
+    """Explicit provider opt-out of retries: ``x-should-retry: false`` (OpenAI/Anthropic
+    SDK convention, honoured by both clients). Only the explicit ``false`` counts."""
+    if not headers or not hasattr(headers, "get"):
+        return False
+    value = headers.get("x-should-retry")
+    return isinstance(value, str) and value.strip().lower() == "false"
+
+
 def _status_404(c: _Ctx) -> Verdict:
     # Structured billing code first, as in _status_429: this handler always returns,
     # so _by_error_code never sees it; a bare "Not Found" message has nothing to match.
@@ -1040,10 +1061,22 @@ def _status_404(c: _Ctx) -> Verdict:
     verdict = _first_match(c.msg, _404_RULES)
     if verdict is not None:
         return verdict
+    # Anthropic-style ``not_found_error`` body: the route is refusing the request —
+    # a model/resource that is not there. Replaying the identical 404 cannot succeed,
+    # so name it instead of burning the backoff retries (#133447).
+    if _body_says_not_found(c.body):
+        return _V_MODEL_NOT_FOUND
     # Bare id the catalogue only knows prefixed → malformed id (NVIDIA NIM "404
     # page not found", #78796). A generic 404 (wrong path, proxy glitch) stays
     # unknown so the real error surfaces instead of a silent misreported fallback.
-    return _V_MODEL_NOT_FOUND if _model_id_missing_known_prefix(c.model_slug, c.provider_slug) else _V_UNKNOWN
+    if _model_id_missing_known_prefix(c.model_slug, c.provider_slug):
+        return _V_MODEL_NOT_FOUND
+    # The provider's own ``x-should-retry: false`` is the same refusal, stated
+    # explicitly. Keep reason ``unknown`` (the body may not name the model) but stop
+    # the retry loop; the fallback chain may still find a route that serves it (#133447).
+    if _x_should_retry_false(c.headers):
+        return _v(_R.unknown, retryable=False, should_fallback=True)
+    return _V_UNKNOWN
 
 
 def _status_429(c: _Ctx) -> Verdict:

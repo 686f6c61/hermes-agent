@@ -823,6 +823,12 @@ describe('useModelControls', () => {
       })
       .mockResolvedValueOnce({ key: 'model', scope: 'global', value: 'muse-spark-1.2-contributor' })
 
+    // Hold the answer open: the slice must stay rolled back until the user
+    // actually answers the confirm dialog.
+    const answer = deferred<boolean>()
+
+    confirmMock.mockReturnValueOnce(answer.promise)
+
     let controls!: Controls
 
     render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
@@ -834,10 +840,8 @@ describe('useModelControls', () => {
     expect(PRIMARY_SESSION_VIEW.$model.get()).toBe('gpt-5.6-sol')
     expect(PRIMARY_SESSION_VIEW.$provider.get()).toBe('openai-codex')
 
-    const action = notify.mock.calls.at(-1)?.[0]?.action
-
     await act(async () => {
-      await action?.onClick()
+      answer.resolve(true)
     })
 
     await waitFor(() => expect(requestGateway).toHaveBeenCalledTimes(2))

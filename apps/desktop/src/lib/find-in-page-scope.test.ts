@@ -453,3 +453,85 @@ describe('scoped find survives React re-render', () => {
     expect(surface.querySelectorAll('mark.find-hit').length).toBe(0)
   })
 })
+
+describe('editor contents stay out of the find scope (#134070)', () => {
+  // Same microtask-drain contract as the re-render suite above: jsdom
+  // delivers observer callbacks + the queueMicrotask re-apply as microtasks.
+  async function flushAll(): Promise<void> {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+
+  it('never wraps or counts matches inside the composer rich editor', () => {
+    const surface = plantSurface(
+      'surface',
+      '<p>needle in transcript</p>'
+        + '<div contenteditable="true" role="textbox">needle in composer</div>'
+    )
+    captureFindScope()
+    const result = performScopedFind(surface, 'needle', { forward: true, findNext: false })
+
+    // Only the transcript match is navigable. The composer's own text is
+    // where the user is typing: wrapping it splits its text nodes and
+    // drops the caret, so the editor must stay out of the walk entirely.
+    expect(result.count).toBe(1)
+    const editor = surface.querySelector('[contenteditable="true"]') as HTMLElement
+    expect(editor.querySelectorAll('mark.find-hit')).toHaveLength(0)
+    expect(editor.textContent).toBe('needle in composer')
+  })
+
+  it('skips textareas and role=textbox editors the same way', () => {
+    const surface = plantSurface(
+      'surface',
+      '<p>needle</p>'
+        + '<textarea>needle in textarea</textarea>'
+        + '<div role="textbox">needle in role</div>'
+    )
+    captureFindScope()
+    const result = performScopedFind(surface, 'needle', { forward: true, findNext: false })
+
+    expect(result.count).toBe(1)
+    expect((surface.querySelector('textarea') as HTMLTextAreaElement).textContent).toBe(
+      'needle in textarea'
+    )
+    expect((surface.querySelector('[role="textbox"]') as HTMLElement).textContent).toBe(
+      'needle in role'
+    )
+  })
+
+  it('does not count measurement mirrors inside the editor subtree', () => {
+    // Editors render invisible measurement copies of their text inside their
+    // subtree; those duplicates counted as phantom matches the user could
+    // never step to (the over-reported counter in #134070).
+    const surface = plantSurface(
+      'surface',
+      '<p>needle in transcript</p>'
+        + '<div contenteditable="true" role="textbox">'
+        + '<span>needle visible</span><div aria-hidden="true">needle visible</div>'
+        + '</div>'
+    )
+    captureFindScope()
+    const result = performScopedFind(surface, 'needle visible', { forward: true, findNext: false })
+
+    expect(result.count).toBe(0)
+    expect(surface.querySelectorAll('mark.find-hit')).toHaveLength(0)
+  })
+
+  it('keeps the editor out of the re-render fast path too', async () => {
+    const surface = plantSurface(
+      'surface',
+      '<p>needle</p><div contenteditable="true" role="textbox">needle</div>'
+    )
+    captureFindScope()
+    performScopedFind(surface, 'needle', { forward: true, findNext: false })
+
+    // Typing in the composer mutates the subtree; hasUnmarkedMatch must
+    // ignore the editor occurrence or every keystroke would re-wrap the
+    // transcript marks (the caret-hijack loop in #134070).
+    const editor = surface.querySelector('[contenteditable="true"]') as HTMLElement
+    editor.textContent = 'needle needle'
+    await flushAll()
+
+    expect(editor.querySelectorAll('mark.find-hit')).toHaveLength(0)
+    expect(surface.querySelectorAll('mark.find-hit')).toHaveLength(1)
+  })
+})

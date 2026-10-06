@@ -346,6 +346,17 @@ function shouldSkipElement(el: Element): boolean {
     return true
   }
 
+  // Editors — the composer's rich input, the in-place message editor, plain
+  // textareas — never join the walk. Wrapping a match inside an editable
+  // splits its text nodes under the user's caret: the caret drops to a
+  // pre-walk position and typing inserts before the wrapped slice, which
+  // reads as right-to-left input (#134070). Their invisible measurement
+  // mirrors also duplicate editor text, so the bar counted phantom matches
+  // it could not highlight or step to. Skip the whole subtree.
+  if (el.closest('[contenteditable="true"], textarea, [role="textbox"]')) {
+    return true
+  }
+
   return false
 }
 

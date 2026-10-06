@@ -32,6 +32,7 @@ import {
 import { rememberServerRequest } from '@/store/server-requests'
 import { $selectedStoredSessionId, $sessions, lineageAliases, sessionMatchesStoredId } from '@/store/session'
 import {
+  $focusedRuntimeId,
   $sessionStates,
   $sessionTiles,
   previewScopeForRuntime,
@@ -744,11 +745,23 @@ export function handleServerRequest(
     }
   }
 
+  // Foreground identity, not just the primary chat: a focused tile pane IS the
+  // conversation the user is looking at (#133421). previewSessionRoute already
+  // routed hosted-tile requests here, so the final gate must not answer the
+  // background refusal for the one tile that holds focus. The focused runtime
+  // falls back to the primary's binding, and the focused comparison walks the
+  // same runtime/stored/lineage identity resolution as the primary's.
+  const focusedRuntimeId = $focusedRuntimeId.get()
+
   handler({
     deps,
     request,
     sessionId,
-    isActiveSession: requestNamesActiveSession({ activeSessionId, sessionId, storedIdForRuntimeId })
+    isActiveSession:
+      requestNamesActiveSession({ activeSessionId, sessionId, storedIdForRuntimeId }) ||
+      (focusedRuntimeId !== null &&
+        focusedRuntimeId !== activeSessionId &&
+        requestNamesActiveSession({ activeSessionId: focusedRuntimeId, sessionId, storedIdForRuntimeId }))
   })
 
   return true

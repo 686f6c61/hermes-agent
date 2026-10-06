@@ -692,3 +692,67 @@ describe('blocking-input guard for interrupted sessions', () => {
     expect(request.fail).not.toHaveBeenCalled()
   })
 })
+
+// #133421: a focused tile pane IS the conversation the user is looking at.
+// The request routes here (this window hosts the tile), but the foreground
+// gate used to compare only against the primary chat, answering the
+// background refusal for the one tile that holds focus.
+describe('preview.act for the focused tile (#133421)', () => {
+  const NOTHING_OPEN = 'No live page is open in the in-app browser — open one with open_preview first.'
+  const SESSION_REFUSAL = 'The in-app browser only takes actions in the session the user is looking at.'
+
+  beforeEach(() => {
+    hasLivePreviewSurface.mockReturnValue(false)
+    requestPopoutPreviewAct.mockClear()
+    requestPopoutPreviewAct.mockResolvedValue(null)
+    closeRightRail()
+    setSessions([])
+    setActiveSessionId('rt-primary')
+    setSelectedStoredSessionId('stored-primary')
+    $sessionTiles.set([{ dir: 'right', runtimeId: 'rt-tile', storedSessionId: 'stored-tile' } as never])
+  })
+
+  afterEach(() => {
+    noteActiveTreeGroup(null)
+    $layoutTree.set(null)
+    $sessionTiles.set([])
+    setSessions([])
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    closeRightRail()
+    hasLivePreviewSurface.mockReturnValue(false)
+  })
+
+  const focusTile = () => {
+    $layoutTree.set(group(['session-tile:stored-tile'], { active: 'session-tile:stored-tile', id: 'grp-tile' }))
+    noteActiveTreeGroup('grp-tile')
+  }
+
+  it('lets the focused primary reach the page engine', async () => {
+    const { handled, respond } = deliver('preview.act', { action: 'elements', session_id: 'rt-primary' }, 'rt-primary')
+
+    expect(handled).toBe(true)
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+    expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ error: NOTHING_OPEN, success: false })
+  })
+
+  it('reaches the page engine when the focused pane is the tile the agent asks for', async () => {
+    focusTile()
+
+    const { handled, respond } = deliver('preview.act', { action: 'elements', session_id: 'rt-tile' }, 'rt-primary')
+
+    expect(handled).toBe(true)
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+    // No guest page in jsdom: a permitted request reaches the engine's
+    // NOTHING_OPEN answer instead of the foreground refusal.
+    expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ error: NOTHING_OPEN, success: false })
+  })
+
+  it('still refuses a hosted tile the user is not looking at', async () => {
+    const { handled, respond } = deliver('preview.act', { action: 'elements', session_id: 'rt-tile' }, 'rt-primary')
+
+    expect(handled).toBe(true)
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+    expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ error: SESSION_REFUSAL, success: false })
+  })
+})

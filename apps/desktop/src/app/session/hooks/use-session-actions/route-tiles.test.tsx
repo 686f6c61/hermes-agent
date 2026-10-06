@@ -3,9 +3,10 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { registry } from '@/contrib/registry'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
+import { registry } from '@/contrib/registry'
 import { $routeTiles } from '@/store/route-tiles'
+
 import type { ClientSessionState } from '../../../types'
 
 import { useSessionActions } from './index'

@@ -11,7 +11,7 @@ import { lazy, type ReactNode, Suspense } from 'react'
 
 import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
-import { $routeTiles, ROUTE_TILE_PANE_PREFIX, closeRouteTile, type RouteTile } from '@/store/route-tiles'
+import { $routeTiles, closeRouteTile, ROUTE_TILE_PANE_PREFIX, type RouteTile } from '@/store/route-tiles'
 
 import {
   $routesVersion,

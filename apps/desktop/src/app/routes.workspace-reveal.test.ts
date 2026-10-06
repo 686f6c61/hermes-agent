@@ -18,8 +18,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
-import { $routeTiles } from '@/store/route-tiles'
 import { host } from '@/sdk'
+import { $routeTiles } from '@/store/route-tiles'
 
 import {
   $workspaceIsPage,

@@ -4,6 +4,7 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 
 import { $gateway } from './gateway'
 import {
+  $nativeNotifyPrefs,
   clearPluginNotifyHandlers,
   dispatchNativeNotification,
   dispatchPluginNativeNotification,
@@ -379,5 +380,34 @@ describe('respondToApprovalAction', () => {
     await respondToApprovalAction('bg', 'approve')
 
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+// The atom is seeded once per window from localStorage; a window that was
+// already open must follow switches made from another one (the `storage`
+// event only fires in the windows that did not write the key).
+describe('$nativeNotifyPrefs cross-window sync', () => {
+  it('re-reads prefs when another window changes them via the storage event', () => {
+    setNativeNotifyEnabled(true)
+    setNativeNotifyKind('approval', false)
+    expect($nativeNotifyPrefs.get().kinds.approval).toBe(false)
+
+    localStorage.setItem(
+      'hermes:native-notifications',
+      JSON.stringify({ enabled: true, kinds: { approval: true } })
+    )
+    window.dispatchEvent(new StorageEvent('storage', { key: 'hermes:native-notifications' }))
+
+    expect($nativeNotifyPrefs.get().kinds.approval).toBe(true)
+  })
+
+  it('falls back to defaults when the stored prefs are removed elsewhere', () => {
+    setNativeNotifyEnabled(false)
+    expect($nativeNotifyPrefs.get().enabled).toBe(false)
+
+    localStorage.removeItem('hermes:native-notifications')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'hermes:native-notifications' }))
+
+    expect($nativeNotifyPrefs.get().enabled).toBe(true)
   })
 })

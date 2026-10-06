@@ -104,6 +104,17 @@ export function setNativeNotifyKind(kind: NativeNotificationKind, on: boolean) {
   writePrefs({ ...prev, kinds: { ...prev.kinds, [kind]: on } })
 }
 
+// The atom is seeded once per window; the `storage` event only fires in the
+// windows that did not write the key, so Settings switches made in one window
+// reach every already-open window through this re-read.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', event => {
+    if (event.key === STORAGE_KEY) {
+      $nativeNotifyPrefs.set(readPrefs())
+    }
+  })
+}
+
 // De-dupe replayed events for the same kind+session. Self-evicting: entries
 // older than the window are pruned on every dispatch, so the map can't grow.
 const THROTTLE_MS = 1000

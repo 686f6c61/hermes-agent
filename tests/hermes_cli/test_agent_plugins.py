@@ -186,6 +186,40 @@ def test_rejects_invalid_optional_skill_fields(
     assert package.skills == ()
 
 
+def test_accepts_nested_hermes_metadata(tmp_path: Path) -> None:
+    """The canonical metadata.hermes shape that skill_utils and learning_graph read."""
+    _write_json(tmp_path / "plugin.json", _manifest())
+    _write_skill(
+        tmp_path,
+        "meta-skill",
+        metadata={
+            "hermes": {
+                "tags": ["Reports", "Summaries"],
+                "related_skills": ["other-skill"],
+                "prerequisites": {"commands": ["curl", "python"]},
+                "category": "reports",
+            }
+        },
+    )
+    package = load_agent_plugin(tmp_path, tmp_path / "data")
+    assert [skill.name for skill in package.skills] == ["meta-skill"]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"hermes": {"tags": ["a", 1]}},
+        {"hermes": {"too": {"much": {"deeper": "x"}}}},
+        {"count": 3},
+    ],
+)
+def test_rejects_invalid_nested_metadata(tmp_path: Path, metadata: dict) -> None:
+    _write_json(tmp_path / "plugin.json", _manifest())
+    _write_skill(tmp_path, "bad-meta", metadata=metadata)
+    package = load_agent_plugin(tmp_path, tmp_path / "data")
+    assert package.skills == ()
+
+
 @pytest.mark.require_symlinks
 def test_symlink_escape_is_isolated_to_component(tmp_path: Path) -> None:
     root = tmp_path / "plugin"

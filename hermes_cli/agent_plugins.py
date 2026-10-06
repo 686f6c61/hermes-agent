@@ -139,6 +139,32 @@ def _str_map(value: object) -> bool:
     return isinstance(value, dict) and _all_str(value) and _all_str(value.values())
 
 
+def _str_or_str_list(value: object) -> bool:
+    return isinstance(value, str) or (isinstance(value, list) and _all_str(value))
+
+
+def _valid_metadata(value: object, depth: int = 0) -> bool:
+    """Skill metadata validator: string keys mapping to strings, string lists,
+    or nested objects up to two levels deep.
+
+    Unlike the flat ``_str_map`` (correct for ``env`` / ``http_headers``), the
+    canonical ``metadata.hermes`` shape consumed by ``agent/skill_utils.py``
+    and ``agent/learning_graph.py`` nests objects (``hermes.tags``,
+    ``hermes.related_skills``, ``hermes.prerequisites.commands``) and carries
+    list-of-string values. Rejecting it silently dropped the skill during
+    discovery; the depth cap keeps the shape bounded.
+    """
+    if not isinstance(value, dict) or not _all_str(value):
+        return False
+    for item in value.values():
+        if _str_or_str_list(item):
+            continue
+        if isinstance(item, dict) and depth < 2 and _valid_metadata(item, depth + 1):
+            continue
+        return False
+    return True
+
+
 def _read_json_object(path: Path, *, label: str) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -197,8 +223,8 @@ def _valid_skill_frontmatter(frontmatter: Mapping[str, Any], directory_name: str
         compatibility = frontmatter["compatibility"]
         if not isinstance(compatibility, str) or not 1 <= len(compatibility) <= 500:
             return "compatibility must be a string of 1 to 500 characters"
-    if "metadata" in frontmatter and not _str_map(frontmatter["metadata"]):
-        return "metadata must map string keys to string values"
+    if "metadata" in frontmatter and not _valid_metadata(frontmatter["metadata"]):
+        return "metadata must map string keys to string, string-list, or one-level nested object values"
     if "allowed-tools" in frontmatter and not isinstance(frontmatter["allowed-tools"], str):
         return "allowed-tools must be a string"
     return None

@@ -33,6 +33,7 @@ from agent.i18n import t
 from agent.message_metadata import message_identity
 from agent.turn_context import extract_api_content_sidecar
 from hermes_cli.cli_agent_setup_mixin import _retire_agent
+from hermes_cli.cli_commands_mixin_text import _ellipsize
 from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL, discover_local_cdp_url, find_free_debug_port, is_browser_debug_ready,
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
@@ -162,11 +163,6 @@ def _summarize_paths(paths, limit: int = 5) -> str:
     """``a, b, c (+N more)`` for a list of paths."""
     more = _t("shared.more_suffix", count=len(paths) - limit) if len(paths) > limit else ""
     return ", ".join(paths[:limit]) + more
-
-
-def _ellipsize(text: str, limit: int) -> str:
-    """``text[:limit]`` plus ``...`` when truncated."""
-    return f"{text[:limit]}{'...' if len(text) > limit else ''}"
 
 
 # Small data tables.
@@ -1193,8 +1189,7 @@ class CLICommandsMixin:
         if not self._session_db:
             return _cp(_db_unavailable_line())
         # Ensure the session row exists (an empty session has flushed nothing yet): the gateway
-        # needs a row to switch_session onto. set_session_title is a provenance CAS over an
-        # existing row and no-ops without one (#133726) — seed the row first, then title it.
+        # needs a row to switch_session onto. set_session_title no-ops without a row (#133726).
         try:
             if not self._session_db.get_session(self.session_id):
                 self._session_db.create_session(

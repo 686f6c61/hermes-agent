@@ -7,6 +7,14 @@ server.py the same way (tests monkeypatching ``server.X`` still intercept)."""
 import contextlib
 
 from .method_ctx import HandlerRegistry, bind_module
+# Split-module helpers (file-line cap). The sibling defines them with an ``_impl`` suffix
+# so ``bind_module`` publishes the re-aliased names below onto server (a plain import of
+# the same name is skipped, and handlers resolve these bare against server globals).
+from .methods_session_params import _flag_impl, _int_param_impl, _str_param_impl
+
+_str_param = _str_param_impl
+_flag = _flag_impl
+_int_param = _int_param_impl
 
 _registry = HandlerRegistry()
 method = _registry.method
@@ -43,23 +51,6 @@ def _with_db(code: int, *, session_scoped: bool):
                 return fn(rid, params, *session, db)
         return _with_session(handler) if session_scoped else handler
     return deco
-
-
-def _str_param(params: dict, key: str, default: str = "") -> str:
-    """``str(params[key]).strip()`` with ``default`` for missing / falsy values."""
-    return str(params.get(key) or "").strip() or default
-
-
-def _flag(params: dict, name: str) -> bool:
-    return is_truthy_value(params.get(name, False))
-
-
-def _int_param(params: dict, key: str, default: int) -> int:
-    """``int(params[key])`` with ``default`` for missing / unparsable values."""
-    try:
-        return int(params.get(key, default))
-    except (TypeError, ValueError):
-        return default
 
 
 def _new_runtime_ids(params: dict) -> tuple[str, str]:

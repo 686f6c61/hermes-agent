@@ -28,6 +28,16 @@ import { $gatewayState } from '@/store/session'
 // there is nothing for a user to meaningfully tune.
 const CHECK_INTERVAL_MS = 30 * 60_000
 
+// The launch sweep races the backend's own MCP startup: a probe issued right
+// after the socket opens can be cut short by the connect loop that is still
+// bringing the servers up, and a healthy server reports a one-off error. That
+// false failure is exactly the observation the transition gate turns into the
+// session's only toast (a shown toast arms the 24h snooze), so a bad FIRST
+// observation of a session — one that would actually notify — is probed once
+// more after a short settle before the state machine sees it. A genuinely
+// dead server pays seconds, not the next 30-minute tick.
+export const FIRST_BAD_SETTLE_MS = 5_000
+
 export type McpHealthStatus = 'error' | 'needs-auth' | 'ok'
 
 /**
@@ -150,6 +160,14 @@ function recordResult(profileKey: string, name: string, status: McpHealthStatus)
 const isUrlServer = (server: Record<string, unknown>): boolean =>
   typeof server.url === 'string' && serverEnabled(server)
 
+async function probeServer(name: string): Promise<McpTestResult> {
+  try {
+    return await testMcpServer(name)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), tools: [] } as McpTestResult
+  }
+}
+
 async function sweep(): Promise<void> {
   const epoch = sweepEpoch
   const profileKey = normalizeProfileKey($activeGatewayProfile.get())
@@ -185,11 +203,7 @@ async function sweep(): Promise<void> {
     let result = freshProbe(key)
 
     if (!result) {
-      try {
-        result = await testMcpServer(name)
-      } catch (err) {
-        result = { ok: false, error: err instanceof Error ? err.message : String(err), tools: [] } as McpTestResult
-      }
+      result = await probeServer(name)
 
       if (epoch !== sweepEpoch) {
         return
@@ -198,7 +212,30 @@ async function sweep(): Promise<void> {
       probeCache.set(key, { at: Date.now(), result })
     }
 
-    recordResult(profileKey, name, classifyProbe(result))
+    // Double-check a bad first observation before it becomes the session's
+    // only toast (see FIRST_BAD_SETTLE_MS). Skipped when a persisted snooze
+    // already mutes this server: no toast can fire either way.
+    let status = classifyProbe(result)
+    const lastKey = `${profileKey}::${name}`
+
+    if (status !== 'ok' && lastStatus.get(lastKey) === undefined && Date.now() >= snoozedUntil(lastKey)) {
+      await new Promise(resolve => setTimeout(resolve, FIRST_BAD_SETTLE_MS))
+
+      if (epoch !== sweepEpoch || $gatewayState.get() !== 'open') {
+        return
+      }
+
+      result = await probeServer(name)
+
+      if (epoch !== sweepEpoch) {
+        return
+      }
+
+      probeCache.set(key, { at: Date.now(), result })
+      status = classifyProbe(result)
+    }
+
+    recordResult(profileKey, name, status)
   }
 }
 

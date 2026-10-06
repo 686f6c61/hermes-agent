@@ -62,7 +62,7 @@ vi.mock('@/store/session', () => ({
   $gatewayState: mocks.gatewayState
 }))
 
-const { shouldNotify, startMcpHealthChecker, stopMcpHealthChecker } = await import('./mcp-health')
+const { shouldNotify, startMcpHealthChecker, stopMcpHealthChecker, FIRST_BAD_SETTLE_MS } = await import('./mcp-health')
 
 type Status = 'error' | 'needs-auth' | 'ok'
 
@@ -125,12 +125,16 @@ it('shows the toast with Sign in + Disable, then stays quiet for a day and re-nu
 
   let clock = 1_700_000_000_000
   const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
   try {
     startMcpHealthChecker()
     mocks.gatewayState.set('open')
-    await flush()
-    await flush()
+    await vi.advanceTimersByTimeAsync(0)
+    // A bad first observation would notify: the settle re-probe runs once more
+    // before the state machine sees it, and both probes agree the server is down.
+    await vi.advanceTimersByTimeAsync(FIRST_BAD_SETTLE_MS)
+    expect(mocks.testMcpServer).toHaveBeenCalledTimes(2)
     expect(mocks.notify).toHaveBeenCalledTimes(1)
     const toast = mocks.notify.mock.calls[0][0]
 
@@ -138,23 +142,22 @@ it('shows the toast with Sign in + Disable, then stays quiet for a day and re-nu
     clock += 60 * 60 * 1000
     mocks.gatewayState.set('closed')
     mocks.gatewayState.set('open')
-    await flush()
-    await flush()
+    await vi.advanceTimersByTimeAsync(0)
     expect(mocks.notify).toHaveBeenCalledTimes(1)
 
     // Next day, still broken: one more nudge.
     clock += 24 * 60 * 60 * 1000
     mocks.gatewayState.set('closed')
     mocks.gatewayState.set('open')
-    await flush()
-    await flush()
+    await vi.advanceTimersByTimeAsync(0)
     expect(mocks.notify).toHaveBeenCalledTimes(2)
 
     // Disable from the toast flips enabled:false on the backend.
     toast.secondaryAction.onClick()
-    await flush()
+    await vi.advanceTimersByTimeAsync(0)
     expect(mocks.setMcpServerEnabled).toHaveBeenCalledWith('linear', false)
   } finally {
+    vi.useRealTimers()
     nowSpy.mockRestore()
   }
 })
@@ -190,6 +193,63 @@ it('honors a persisted snooze in a fresh module session, then re-notifies after 
   } finally {
     freshSession?.stopMcpHealthChecker()
     nowSpy.mockRestore()
+  }
+})
+
+it('drops a launch-race failure: a bad first observation that probes ok on the settle re-check never toasts', async () => {
+  const servers = { mcp_servers: { slack: { url: 'https://mcp.slack.dev/mcp', auth: 'oauth' } } }
+  mocks.getHermesConfigRecord.mockResolvedValue(servers)
+  mocks.testMcpServer
+    .mockResolvedValueOnce({ ok: false, error: 'connect ECONNRESET', tools: [] })
+    .mockResolvedValueOnce({ ok: true, error: '', tools: ['x'] })
+  window.localStorage.clear()
+
+  let clock = 1_700_000_000_000
+  const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+  try {
+    startMcpHealthChecker()
+    mocks.gatewayState.set('open')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(FIRST_BAD_SETTLE_MS)
+    expect(mocks.testMcpServer).toHaveBeenCalledTimes(2)
+    expect(mocks.notify).not.toHaveBeenCalled()
+
+    // The ok observation is transition memory: once the cached probe ages out,
+    // a real failure is a transition and toasts without another re-check.
+    clock += 6 * 60 * 1000
+    mocks.testMcpServer.mockResolvedValue({ ok: false, error: 'connect ECONNRESET', tools: [] })
+    mocks.gatewayState.set('closed')
+    mocks.gatewayState.set('open')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.testMcpServer).toHaveBeenCalledTimes(3)
+    expect(mocks.notify).toHaveBeenCalledTimes(1)
+  } finally {
+    vi.useRealTimers()
+    nowSpy.mockRestore()
+  }
+})
+
+it('does not spend the settle re-check on a server whose persisted snooze is still active', async () => {
+  const servers = { mcp_servers: { github: { url: 'https://mcp.github.dev/mcp', auth: 'oauth' } } }
+  window.localStorage.setItem(
+    'hermes:mcp-health-snooze-until:default::github',
+    String(Date.now() + 24 * 60 * 60 * 1000)
+  )
+  mocks.getHermesConfigRecord.mockResolvedValue(servers)
+  mocks.testMcpServer.mockResolvedValue({ ok: false, error: 'OAuth: authorization required', tools: [] })
+
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+  try {
+    startMcpHealthChecker()
+    mocks.gatewayState.set('open')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.testMcpServer).toHaveBeenCalledTimes(1)
+    expect(mocks.notify).not.toHaveBeenCalled()
+  } finally {
+    vi.useRealTimers()
   }
 })
 

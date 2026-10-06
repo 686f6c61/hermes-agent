@@ -21,10 +21,9 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 import type { ReactNode } from 'react'
 
-import { capabilityScoped } from '@/api/client'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
-import { contributedRoutes, syncWorkspaceRoute } from '@/app/routes'
+import { navigateContributedRoute, syncWorkspaceRoute } from '@/app/routes'
 import type { ClientSessionState } from '@/app/types'
 import {
   $narrowViewport,
@@ -48,7 +47,6 @@ import { registry } from '@/contrib/registry'
 import type { WorkspaceMode } from '@/contrib/types'
 import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
 import { traceIdentityChange } from '@/lib/identity-trace'
-import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -78,7 +76,6 @@ import {
   setActiveProfile,
   setShowAllProfiles
 } from '@/store/profile'
-import { openRouteTile } from '@/store/route-tiles'
 import {
   $activeSessionId,
   $connection,
@@ -111,6 +108,7 @@ import type { PaginatedSessions, UsageStats } from '@/types/hermes'
 import { pluginDecisions, profiles, skills, toolsets } from './bridge'
 import { composerHost } from './composer'
 import { i18nHost } from './i18n'
+import { completeMcpOAuth } from './mcp-oauth'
 import { planPluginOpenSession } from './plugin-open-session-plan'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
@@ -731,37 +729,14 @@ export const host = {
   /** Tail an app log file (`agent` / `errors` / `gateway` / `gui` / …). */
   logs: async (...args: Parameters<typeof getLogs>) => getLogs(...args),
 
-  /** Complete client-local MCP sign-in for a pinned bot profile, optionally
-   *  installing its catalog entry first. Uses the same OAuth flow as Settings. */
-  completeMcpOAuth: async (options: Parameters<typeof completeMcpDesktopOAuth>[0] & { catalogPreset?: string }) => {
-    const profile = capabilityScoped(options.profile)
+  /** Complete client-local MCP sign-in for a pinned bot profile (catalog preset optional). */
+  completeMcpOAuth,
 
-    if (options.catalogPreset) {
-      const added = await requestGatewayForAgent<{ ok?: boolean; error?: string }>(
-        profile.connectionId ?? null,
-        profile.profile || 'default',
-        'mcp.servers.add',
-        { name: options.serverName, preset: options.catalogPreset }
-      )
-
-      if (!added.ok) {
-        throw new Error(added.error || 'Could not add server')
-      }
-    }
-
-    return completeMcpDesktopOAuth({ ...options, profile })
-  },
-
-  /** Navigate the app router (hash routes, e.g. '/command-center?section=system').
-   *  Contributed plugin pages open as route tiles so they don't replace the
-   *  live Bot Chat (#101593). */
+  /** Navigate the app router (hash routes); contributed plugin pages open as route tiles (#101593). */
   navigate: (path: string) => {
     const raw = path.startsWith('#') ? path.slice(1) : path
-    const pathname = raw.split(/[?#]/)[0] || raw
 
-    if (contributedRoutes().some(route => route.path === pathname)) {
-      openRouteTile(pathname)
-
+    if (navigateContributedRoute(raw)) {
       return
     }
 

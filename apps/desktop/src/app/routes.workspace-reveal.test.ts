@@ -1,17 +1,20 @@
 /**
- * A full page (Capabilities/Messaging/Artifacts/a contributed route) renders
- * INSIDE the `workspace` pane, so navigating to one has to front that pane —
- * otherwise a main zone parked on a session tile keeps the tile on screen and
- * the click looks dead until the app restarts (#72602).
+ * A full page (Capabilities/Messaging/Artifacts) renders INSIDE the `workspace`
+ * pane, so navigating to one has to front that pane — otherwise a main zone
+ * parked on a session tile keeps the tile on screen and the click looks dead
+ * until the app restarts (#72602). A contributed (plugin) page instead opens
+ * as a closable route tile BESIDE the chat (#101593): host.navigate must open
+ * the tile, front its own pane, and leave the hash (and the chat) alone.
  *
- * Two layers, both covered here: `syncWorkspaceRoute` (the router location,
- * every entry point) and `navigateToWorkspacePage` (the re-click, where the
- * location doesn't change).
+ * Three layers, all covered here: `syncWorkspaceRoute` (the router location,
+ * every entry point), `navigateToWorkspacePage` (the re-click, where the
+ * location doesn't change), and the tile door behind `host.navigate`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { $routeTiles } from '@/store/route-tiles'
 import { host } from '@/sdk'
 
 import {
@@ -174,18 +177,22 @@ describe('navigateToWorkspacePage', () => {
  * like the sidebar does.
  */
 describe('host.navigate', () => {
-  it('fronts the workspace pane even when already on the contributed page', () => {
+  it('opens a contributed page as a tile and fronts its pane on a re-click', () => {
     const dispose = contributeRoute()
 
     try {
-      window.location.hash = `#${CONTRIBUTED_ROUTE}`
+      window.location.hash = '#/'
+      $routeTiles.set([])
       vi.mocked(revealTreePane).mockClear()
       vi.mocked(noteActiveTreeGroup).mockClear()
 
       host.navigate(CONTRIBUTED_ROUTE)
 
-      expect(window.location.hash).toBe(`#${CONTRIBUTED_ROUTE}`)
-      expect(fronted()).toBe(true)
+      expect(window.location.hash).toBe('#/')
+      expect($routeTiles.get().some(tile => tile.path === CONTRIBUTED_ROUTE)).toBe(true)
+      expect(vi.mocked(revealTreePane).mock.calls.some(([pane]) => pane === `route-tile:${CONTRIBUTED_ROUTE}`)).toBe(
+        true
+      )
     } finally {
       dispose()
     }

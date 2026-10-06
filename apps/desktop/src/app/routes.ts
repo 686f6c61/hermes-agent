@@ -5,6 +5,7 @@ import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tre
 import { registry } from '@/contrib/registry'
 import type { Contribution } from '@/contrib/types'
 import type { InterfaceTier } from '@/store/interface-mode'
+import { openRouteTile, revealRouteTilePane } from '@/store/route-tiles'
 
 type NavigateLike = (to: string, options?: { replace?: boolean }) => void
 
@@ -118,6 +119,31 @@ export function contributedRoutes(
 
 function isContributedPath(pathname: string): boolean {
   return contributedRoutes().some(route => route.path === pathname)
+}
+
+/**
+ * Open a contributed (plugin) page as a route tile instead of pointing the
+ * workspace at it: navigating replaced the live Bot Chat with the page and
+ * left no way back (#101593). The tile opens (or fronts, it is idempotent)
+ * beside main, and its own pane is revealed imperatively so a re-click on
+ * the page you are already on — palette/statusbar/hotkey while the tile is
+ * focused — still brings it forward: the router saw no change, so nothing
+ * else would.
+ *
+ * False when `to` is not a contributed route path (query/hash stripped);
+ * the caller falls through to its regular navigation.
+ */
+export function navigateContributedRoute(to: string): boolean {
+  const path = to.split(/[?#]/)[0] || to
+
+  if (!isContributedPath(path)) {
+    return false
+  }
+
+  openRouteTile(path)
+  revealRouteTilePane(path)
+
+  return true
 }
 
 // ── Contributed sidebar nav — the `sidebar.nav` registry area ────────────────

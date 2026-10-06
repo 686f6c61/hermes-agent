@@ -11,7 +11,7 @@ import { lazy, type ReactNode, Suspense } from 'react'
 
 import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
-import { $routeTiles, closeRouteTile, type RouteTile } from '@/store/route-tiles'
+import { $routeTiles, ROUTE_TILE_PANE_PREFIX, closeRouteTile, type RouteTile } from '@/store/route-tiles'
 
 import {
   $routesVersion,
@@ -99,7 +99,7 @@ export const watchRouteTiles = paneMirror<RouteTile>({
   // contribution's title once it lands, not keep the humanized-path fallback.
   also: [$routesVersion],
   key: t => t.path,
-  prefix: 'route-tile',
+  prefix: ROUTE_TILE_PANE_PREFIX,
   dir: t => t.dir,
   minWidth: '22rem',
   title: routeTitle,

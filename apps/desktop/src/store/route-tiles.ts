@@ -1,5 +1,7 @@
 import { atom } from 'nanostores'
 
+import { findGroupOfPane } from '@/components/pane-shell/tree/model'
+import { $layoutTree, isPaneVisible, noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
 import { readJson, writeJson } from '@/lib/storage'
 
 import type { SplitDir } from './session-states'
@@ -17,6 +19,14 @@ export interface RouteTile {
 }
 
 const TILES_KEY = 'hermes.desktop.routeTiles.v1'
+
+/** Layout-tree pane-id namespace shared with route-tile.tsx's paneMirror —
+ *  the id is `${ROUTE_TILE_PANE_PREFIX}:${path}`. */
+export const ROUTE_TILE_PANE_PREFIX = 'route-tile'
+
+export function routeTilePaneId(path: string): string {
+  return `${ROUTE_TILE_PANE_PREFIX}:${path}`
+}
 
 function loadTiles(): RouteTile[] {
   const parsed = readJson<unknown>(TILES_KEY)
@@ -47,4 +57,21 @@ export function openRouteTile(path: string, dir: SplitDir = 'right') {
 
 export function closeRouteTile(path: string) {
   saveTiles($routeTiles.get().filter(t => t.path !== path))
+}
+
+/** Front a route tile's own pane after a navigate to its path. The router saw
+ *  no change, so nothing reveals the pane on its own — the route-tile analog
+ *  of `focusOpenSession`'s tile branch: reveal (un-dismiss + adopt + front in
+ *  its group), then mark the group active so the sidebar/readouts come home. */
+export function revealRouteTilePane(path: string): void {
+  const paneId = routeTilePaneId(path)
+
+  revealTreePane(paneId)
+
+  const tree = $layoutTree.get()
+  const group = tree ? findGroupOfPane(tree, paneId) : null
+
+  if (group && isPaneVisible(paneId)) {
+    noteActiveTreeGroup(group.id)
+  }
 }

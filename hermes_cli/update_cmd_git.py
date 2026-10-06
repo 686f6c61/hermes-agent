@@ -415,6 +415,16 @@ _FETCH_FAILURE_RULES = (
     (lambda s: "Permission denied (publickey)" in s or "Host key verification failed" in s,
      "✗ SSH authentication failed — check your SSH key is added to GitHub, or switch"
      " `origin` to HTTPS: `git remote set-url origin https://github.com/NousResearch/hermes-agent.git`."),
+    # Reachability, not auth (#133439): a firewall dropping outbound SSH surfaces
+    # as the OS TCP timeout (or a refused connection) on port 22 and used to fall
+    # through to the generic line. GitHub's documented alternate route is
+    # ssh.github.com:443, which authenticates with the same key, so the diagnosis
+    # names it (plus the HTTPS switch) instead of leaving the user stuck.
+    (lambda s: "port 22" in s and ("timed out" in s.lower() or "connection refused" in s.lower()),
+     "✗ SSH to github.com on port 22 is blocked on this network — many firewalls drop"
+     " port 22. Route GitHub SSH over 443 with the same key: add `HostName ssh.github.com`"
+     " and `Port 443` under `Host github.com` in ~/.ssh/config, or switch origin to HTTPS:"
+     " `git remote set-url origin https://github.com/NousResearch/hermes-agent.git`."),
 )
 
 

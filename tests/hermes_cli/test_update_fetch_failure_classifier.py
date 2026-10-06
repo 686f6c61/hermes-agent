@@ -86,6 +86,39 @@ class TestClassifyFetchFailure:
         )
         assert "SSH authentication failed" in msg
 
+    def test_ssh_port22_timeout_reports_blocked_port_not_generic(self):
+        # A firewall dropping outbound SSH leaves the user waiting out the OS
+        # TCP timeout and then shows the generic line — no actionable hint
+        # (#133439). GitHub's documented SSH-over-443 route works with the
+        # same key, so the diagnosis must name it.
+        msg = update_cmd._classify_fetch_failure(
+            "ssh: connect to host github.com port 22: Operation timed out\n"
+            "fatal: Could not read from remote repository."
+        )
+        assert "port 22" in msg
+        assert "ssh.github.com" in msg
+        assert "443" in msg
+        assert msg != "✗ Failed to fetch updates from origin."
+
+    def test_ssh_port22_refused_reports_blocked_port_too(self):
+        # Refused is the same family (port closed / unreachable): it must not
+        # fall through to the generic message either.
+        msg = update_cmd._classify_fetch_failure(
+            "ssh: connect to host github.com port 22: Connection refused\n"
+            "fatal: Could not read from remote repository."
+        )
+        assert "port 22" in msg
+        assert "ssh.github.com" in msg
+
+    def test_ssh_auth_publickey_still_wins_over_port_rule(self):
+        # Disjoint strings by construction, but pin the ordering: a publickey
+        # denial keeps its auth diagnosis even if the URL mentions port 22.
+        msg = update_cmd._classify_fetch_failure(
+            "git@github.com: Permission denied (publickey).\n"
+            "fatal: Could not read from remote repository."
+        )
+        assert "SSH authentication failed" in msg
+
     def test_unknown_falls_back_to_generic(self):
         msg = update_cmd._classify_fetch_failure("fatal: something novel")
         assert msg == "✗ Failed to fetch updates from origin."

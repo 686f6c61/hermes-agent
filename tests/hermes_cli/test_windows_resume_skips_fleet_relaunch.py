@@ -9,9 +9,10 @@ classifies them, so an externally supervised profile must not surface as
 relaunched too.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_cli.update_cmd_windows import _relaunch_paused_gateways
+import hermes_cli.update_cmd_windows as update_cmd_windows
 
 
 def test_resume_does_not_replace_a_profile_the_fleet_already_relaunched(monkeypatch):
@@ -21,16 +22,27 @@ def test_resume_does_not_replace_a_profile_the_fleet_already_relaunched(monkeypa
         calls.append((profile, pid))
         return True
 
+    def _verify_alive(token, launched, launched_unmapped):
+        token["relaunched_profiles"] = dict(launched)
+
     monkeypatch.setattr(
         "hermes_cli.gateway.launch_detached_profile_gateway_restart", _launch)
-    token = {"fleet_relaunched": ["default"]}
-    relaunched, unmapped = _relaunch_paused_gateways(
-        token, {"default": 111, "other": 222}, [])
+    monkeypatch.setattr(update_cmd_windows, "_resume_windows_services", lambda token: None)
+    monkeypatch.setattr(update_cmd_windows, "_verify_relaunched_gateways_alive", _verify_alive)
+    monkeypatch.setattr(update_cmd_windows, "_cold_start_attested_profiles", lambda token: None)
+    monkeypatch.setattr(
+        "hermes_cli.update_cmd._m",
+        lambda: SimpleNamespace(_refresh_windows_gateway_launchers=lambda: None))
+    token = {
+        "fleet_relaunched": ["default"],
+        "profiles": {"default": 111, "other": 222},
+        "unmapped": [],
+    }
+    update_cmd_windows._resume_paused_set(token)
 
     assert calls == [("other", 222)]
-    assert relaunched == ["other"]
-    assert unmapped == 0
-    assert token["relaunched_profiles"] == ["other"]
+    assert token["relaunched_profiles"] == {"other": 222}
+    assert token["resume_needed"] is False
 
 
 def test_merge_records_fleet_profiles_before_windows_resume(monkeypatch):

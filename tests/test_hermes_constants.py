@@ -478,6 +478,97 @@ class TestSecureParentDir:
         assert called_with[0] == (str(real_dir), 0o700)
 
 
+class TestSecureParentDirHomePolicy:
+    """secure_parent_dir() must honor the home-mode policy on the Hermes home itself.
+
+    Regression coverage for #133577: ``auth.json`` lives directly in HERMES_HOME, so
+    the blanket ``os.chmod(parent, 0o700)`` re-locks the home on every credential
+    write and clobbers the documented ``HERMES_HOME_MODE`` escape hatch (#6991/#6993)
+    that ``apply_secure_dir_policy`` already honors elsewhere (#117591).
+    """
+
+    @staticmethod
+    def _isolate_env(monkeypatch):
+        """Pin the policy inputs so the tests are hermetic on any host."""
+        for var in (
+            "HERMES_MANAGED",
+            "HERMES_CONTAINER",
+            "HERMES_SKIP_CHMOD",
+            "HERMES_UID",
+            "HERMES_GID",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(
+            hermes_constants, "_container_or_chmod_skipped", lambda: False
+        )
+
+    def test_home_parent_honors_hermes_home_mode(self, tmp_path, monkeypatch):
+        """With HERMES_HOME_MODE=0701, saving a credential in the home keeps 0701."""
+        self._isolate_env(monkeypatch)
+        home = tmp_path / "srv" / "hermes-home"
+        home.mkdir(parents=True)
+        target = home / "auth.json"
+        target.touch()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_HOME_MODE", "0701")
+
+        called_with = []
+        monkeypatch.setattr(os, "chmod", lambda p, m: called_with.append((str(p), m)))
+
+        secure_parent_dir(target)
+        assert called_with == [(str(home.resolve()), 0o701)]
+
+    def test_home_parent_without_mode_still_locked_to_0700(self, tmp_path, monkeypatch):
+        """Without HERMES_HOME_MODE the home is still hardened to the default 0700."""
+        self._isolate_env(monkeypatch)
+        home = tmp_path / "srv" / "hermes-home"
+        home.mkdir(parents=True)
+        target = home / "auth.json"
+        target.touch()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.delenv("HERMES_HOME_MODE", raising=False)
+
+        called_with = []
+        monkeypatch.setattr(os, "chmod", lambda p, m: called_with.append((str(p), m)))
+
+        secure_parent_dir(target)
+        assert called_with == [(str(home.resolve()), 0o700)]
+
+    def test_secret_subdirectory_keeps_blanket_0700(self, tmp_path, monkeypatch):
+        """Parents other than the home itself keep the blanket 0700 hardening."""
+        self._isolate_env(monkeypatch)
+        home = tmp_path / "srv" / "hermes-home"
+        secrets = home / "secrets"
+        secrets.mkdir(parents=True)
+        target = secrets / "token.json"
+        target.touch()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_HOME_MODE", "0701")
+
+        called_with = []
+        monkeypatch.setattr(os, "chmod", lambda p, m: called_with.append((str(p), m)))
+
+        secure_parent_dir(target)
+        assert called_with == [(str(secrets.resolve()), 0o700)]
+
+    def test_profile_home_parent_honors_hermes_home_mode(self, tmp_path, monkeypatch):
+        """The profile home ({HERMES_HOME}/home) follows the same policy."""
+        self._isolate_env(monkeypatch)
+        home = tmp_path / "srv" / "hermes-home"
+        profile_home = home / "home"
+        profile_home.mkdir(parents=True)
+        target = profile_home / "auth.json"
+        target.touch()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_HOME_MODE", "0701")
+
+        called_with = []
+        monkeypatch.setattr(os, "chmod", lambda p, m: called_with.append((str(p), m)))
+
+        secure_parent_dir(target)
+        assert called_with == [(str(profile_home.resolve()), 0o701)]
+
+
 @pytest.mark.platforms("posix")  # POSIX shell stubs; Windows uses .cmd shims
 class TestAgentBrowserRunnable:
     """agent_browser_runnable() validates the resolved CLI actually runs.

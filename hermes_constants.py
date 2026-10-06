@@ -615,6 +615,24 @@ def secure_parent_dir(path: Path) -> None:
             "normally stored under the hermes home directory instead.", parent, _INSTALL_ROOT,
         )
         return
+    # When the parent IS the Hermes home (or the profile home) — e.g. auth.json
+    # saved directly in HERMES_HOME — a blanket 0700 re-locks the home on every
+    # credential write and clobbers the operator's documented HERMES_HOME_MODE /
+    # managed-home escape hatch (#6991 regression path, #133577). Defer to the
+    # canonical policy there; secret-only subdirectories keep the blanket 0700.
+    # Composed from the side-effect-free primitives: get_hermes_home() would
+    # consume the profile-fallback warning latch as a side effect.
+    override = get_hermes_home_override()
+    home = _expand_hermes_home(override) if override else get_process_hermes_home()
+    policy_homes = [Path(home).resolve()]
+    profile_home = _profile_home_path()
+    if profile_home:
+        policy_homes.append(Path(profile_home).resolve())
+    if parent in policy_homes:
+        # home=parent: the managed marker is read from the very dir being
+        # locked, and the effective home is not re-derived.
+        apply_secure_dir_policy(parent, home=parent)
+        return
     with contextlib.suppress(OSError):
         os.chmod(parent, 0o700)
 

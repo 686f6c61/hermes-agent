@@ -2184,15 +2184,22 @@ def _inject_context_engine_tools(agent):
 
 def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
     # Ollama defaults num_ctx to 2048, so detect the max window and send num_ctx per request.
-    # model.ollama_num_ctx overrides; model.context_length caps the detected value (VRAM).
+    # model.ollama_num_ctx overrides for a LOCAL endpoint only; model.context_length caps the
+    # detected value (VRAM). A hosted model in the same profile must not inherit the override
+    # (or the compressor clamp below) that a sibling local alias needs (#134140).
     agent._ollama_num_ctx: int | None = None
     _override = _model_cfg.get("ollama_num_ctx") if isinstance(_model_cfg, dict) else None
-    if _override is not None:
+    _is_local = bool(agent.base_url and is_local_endpoint(agent.base_url))
+    if _override is not None and not _is_local:
+        _ra().logger.debug(
+            "model.ollama_num_ctx %d ignored for non-local endpoint %s", _override, agent.base_url
+        )
+    if _override is not None and _is_local:
         try:
             agent._ollama_num_ctx = int(_override)
         except (TypeError, ValueError):
             _ra().logger.debug("Invalid ollama_num_ctx config value: %r", _override)
-    if agent._ollama_num_ctx is None and agent.base_url and is_local_endpoint(agent.base_url):
+    if agent._ollama_num_ctx is None and _is_local:
         try:
             # api_key may be a callable (Entra token provider); detection needs a string.
             _key = agent.api_key if isinstance(agent.api_key, str) else ""

@@ -195,6 +195,39 @@ class TestServedNumCtxSatisfiesTheFloor:
                          base_url="https://openrouter.ai/api/v1")
 
 
+class TestOverrideIsLocalOnly:
+    """#134140: model.ollama_num_ctx is local-server semantics. A hosted default model in the
+    same profile must not inherit an override intended for a sibling local alias: no num_ctx
+    state and no compressor clamp against its real probed window."""
+
+    def test_hosted_model_does_not_set_ollama_num_ctx(self):
+        agent = _build_agent(
+            {"agent": {}, "model": {"ollama_num_ctx": 65536}},
+            probed_ctx=262144,
+            base_url="https://api.x.ai/v1",
+        )
+        assert agent._ollama_num_ctx is None
+
+    def test_hosted_model_compressor_keeps_probed_window(self):
+        agent = _build_agent(
+            {"agent": {}, "model": {"ollama_num_ctx": 65536}},
+            probed_ctx=262144,
+            base_url="https://api.x.ai/v1",
+        )
+        # Without the local gate the compressor was clamped 262144 -> 65536 and its
+        # trigger sat at ~11% of the real window (#134140).
+        assert agent.context_compressor.context_length == 262144
+
+    def test_local_model_still_honours_override(self):
+        agent = _build_agent(
+            {"agent": {}, "model": {"ollama_num_ctx": 65536}},
+            probed_ctx=262144,
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        assert agent._ollama_num_ctx == 65536
+        assert agent.context_compressor.context_length == 65536
+
+
 class TestFloorRefusalNamesTheLocalServerHonestly:
     """#87075: a local OpenAI-compatible server without /api/show (llama.cpp, vLLM) that serves a
     sub-64K window must get server-agnostic guidance — raise the server's context or set

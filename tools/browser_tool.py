@@ -739,6 +739,27 @@ def _attach_auto_snapshot(response: Dict[str, Any], nav_session_key: str) -> Non
         logger.debug("Auto-snapshot after navigate failed: %s", e)
 
 
+def _real_profile_endpoint_verified(session_info: Dict[str, Any]) -> bool:
+    """True only when the session's stored CDP endpoint is observably the managed
+    real-profile copy: its port matches the DevToolsActivePort file of the copy
+    dir (the same check the launch path applies before reuse). ``features`` records
+    launch intent, not what served the call — a stale session bound to a throwaway
+    temp-dir browser must never inherit the audit flag."""
+    cdp = session_info.get("cdp_url")
+    if not cdp:
+        return False
+    try:
+        from hermes_cli.browser_connect import detect_default_chromium, real_profile_copy_dir
+        copy_dir = real_profile_copy_dir(detect_default_chromium())
+    except Exception:
+        return False
+    if not copy_dir:
+        return False
+    from tools import browser_tool_real_profile as _real_profile
+    return bool(_real_profile._cdp_http_ready(cdp)
+                and _real_profile._cdp_on_data_dir(cdp, copy_dir))
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """Navigate to ``url``; JSON with title, compact snapshot and, on first nav, stealth features.
     Hybrid routing decides BEFORE the safety checks whether this URL goes to a local sidecar
@@ -783,8 +804,19 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 
     response = {"success": True, "url": final_url, "title": title}
     features = session_info.get("features") or {}
-    if features.get("real_profile"):  # auditability: this ran on the user's real-profile copy-browser
-        response["used_real_profile"] = True
+    if features.get("real_profile"):
+        # Auditability: only assert the flag when the endpoint that served this call
+        # is verifiably the managed copy; a mismatch means a throwaway browser
+        # (no cookies, no logins) answered while the session record claims intent.
+        if _real_profile_endpoint_verified(session_info):
+            response["used_real_profile"] = True
+        else:
+            response["used_real_profile"] = False
+            response["real_profile_warning"] = (
+                "used_real_profile was requested, but the session's endpoint does not match "
+                "the managed profile copy (DevToolsActivePort mismatch): this response was "
+                "likely served by a throwaway temp-dir browser with no cookies or logins."
+            )
     # Only a successful, non-blocked navigation becomes the task owner: failed opens
     # and blocked redirects must not retarget follow-up clicks to an irrelevant session.
     _last_active_session_key[effective_task_id] = nav_session_key

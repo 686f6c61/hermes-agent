@@ -1407,6 +1407,10 @@ def _(rid, params: dict, session: dict) -> dict:
             return _db_unavailable_error(rid, code=5007)
         try:
             if not db.get_session(key):
+                # Seed the row before titling: set_session_title is a provenance CAS
+                # and no-ops without a row (#133726). _ensure_session_db_row above
+                # returns True without writing when no store is bound to this context.
+                db.create_session(key, source=str(session.get("source") or "unknown"))
                 db.set_session_title(key, f"handoff-{key[:8]}")
             if not db.request_handoff(key, platform_name):
                 return _err(rid, 4027, "session is already in flight for handoff — wait for it to settle, then retry")

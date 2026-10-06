@@ -16254,6 +16254,67 @@ def test_handoff_request_uses_session_profile_home(monkeypatch, tmp_path):
     assert get_hermes_home() != profile_home
 
 
+def test_handoff_request_seeds_missing_session_row(monkeypatch, tmp_path):
+    """Issue #133726: handoff.request on a session with no persisted row must
+    seed the row and queue, not be misreported as "already in flight".
+
+    ``_ensure_session_db_row`` returns True without writing when no store is
+    bound to the context, and ``set_session_title`` is an UPDATE-only CAS — so
+    the seeding must live in the handoff path itself.
+    """
+    import contextlib
+
+    from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
+    from hermes_state import SessionDB
+    from tui_gateway import methods_session
+
+    methods_session.register(server)
+    db = SessionDB(db_path=tmp_path / "state.db")
+
+    def load_config():
+        config = GatewayConfig()
+        config.platforms[Platform.DISCORD] = PlatformConfig(
+            enabled=True,
+            home_channel=HomeChannel(
+                platform=Platform.DISCORD,
+                chat_id="discord-home",
+                name="home",
+            ),
+        )
+        return config
+
+    @contextlib.contextmanager
+    def handoff_db(_session):
+        yield db
+
+    monkeypatch.setattr("gateway.config.load_gateway_config", load_config)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_session_db", handoff_db)
+    server._sessions["handoff-fresh"] = {
+        "running": False,
+        "session_key": "fresh-handoff-session-key",
+    }
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "handoff.request",
+                "params": {
+                    "session_id": "handoff-fresh",
+                    "platform": "discord",
+                },
+            }
+        )
+        assert "result" in resp, resp
+        assert resp["result"]["queued"] is True
+        row = db.get_session("fresh-handoff-session-key")
+        assert row is not None
+        assert db.get_handoff_state("fresh-handoff-session-key")["state"] == "pending"
+    finally:
+        server._sessions.pop("handoff-fresh", None)
+        db.close()
+
+
 def test_session_create_reports_requested_profile_name(monkeypatch, tmp_path):
     """Issue #62503: session.create info.profile_name must not always be launch."""
     profile_home = tmp_path / "profiles" / "mlperf"

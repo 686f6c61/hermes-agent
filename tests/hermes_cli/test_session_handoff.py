@@ -118,3 +118,61 @@ class TestHandoffStateDB:
         assert db.get_handoff_state(sid)["state"] == "pending"
         assert [row["id"] for row in db.list_pending_handoffs()] == [sid]
         assert len(entered) == 2
+
+
+class TestHandoffRowSeeding:
+    """Issue #133726: ``/handoff`` on a fresh session reported "already in
+    flight" because ``set_session_title`` is a provenance CAS over an existing
+    row (UPDATE-only) and cannot seed it — the row never existed for
+    ``request_handoff`` to flip."""
+
+    @pytest.fixture
+    def db(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        d = SessionDB(db_path=home / "state.db")
+        yield d
+        d.close()
+
+    def _host(self, db, session_id):
+        from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+        class Host(CLICommandsMixin):
+            def __init__(self):
+                self.session_id = session_id
+                self._session_db = db
+                self._agent_running = False
+
+        host = Host.__new__(Host)
+        Host.__init__(host)
+        return host
+
+    def test_prepare_session_seeds_missing_row(self, db):
+        """A session with no row yet gets one (same shape as first-message flushes)."""
+        sid = "fresh-handoff-session"
+        host = self._host(db, sid)
+        assert db.get_session(sid) is None
+
+        title = host._handoff_prepare_session()
+
+        assert title
+        row = db.get_session(sid)
+        assert row is not None
+        assert row["source"] == "cli"
+        # The row the seeding created is what request_handoff flips to pending.
+        assert db.request_handoff(sid, "telegram") is True
+        assert db.get_handoff_state(sid)["state"] == "pending"
+
+    def test_prepare_session_keeps_existing_row(self, db):
+        """An already-persisted session is not duplicated or re-titled."""
+        sid = "existing-handoff-session"
+        host = self._host(db, sid)
+        db.create_session(sid, source="cli")
+        db.set_session_title(sid, "my session")
+
+        title = host._handoff_prepare_session()
+
+        assert title == "my session"
+        assert db.get_handoff_state(sid)["state"] is None
+

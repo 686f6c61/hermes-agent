@@ -1193,9 +1193,13 @@ class CLICommandsMixin:
         if not self._session_db:
             return _cp(_db_unavailable_line())
         # Ensure the session row exists (an empty session has flushed nothing yet): the gateway
-        # needs a row to switch_session onto; set_session_title's INSERT OR IGNORE creates it.
+        # needs a row to switch_session onto. set_session_title is a provenance CAS over an
+        # existing row and no-ops without one (#133726) — seed the row first, then title it.
         try:
             if not self._session_db.get_session(self.session_id):
+                self._session_db.create_session(
+                    self.session_id,
+                    source=os.environ.get("HERMES_SESSION_SOURCE", "cli"))
                 self._session_db.set_session_title(self.session_id, f"handoff-{self.session_id[:8]}")
         except Exception as exc:
             return _cp(f"  {_t('handoff.session_row_failed', error=exc)}")

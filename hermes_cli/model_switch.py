@@ -1339,27 +1339,33 @@ def _route_configured_provider(st: _Switch) -> Optional[ModelSwitchResult] | boo
 
 
 def _route_from_model_input(st: _Switch) -> Optional[ModelSwitchResult]:
-    """PATH B (no ``--provider``): MoA preset / alias on the current provider (a) -> alias
-    fallback (b) or ``vendor:model`` conversion (c) -> aggregator catalog search (d) ->
-    configured-provider match (d.5) -> detect_provider_for_model() as last resort (e)."""
+    """PATH B (no ``--provider``): user alias on the current provider (a) -> MoA preset
+    (a.5) -> built-in alias fallback (b) or ``vendor:model`` conversion (c) -> aggregator
+    catalog search (d) -> configured-provider match (d.5) -> detect_provider_for_model()
+    as last resort (e)."""
     from hermes_cli.models import detect_provider_for_model
     raw_input, current_provider = st.raw_input, st.current_provider
+    # Explicit user config wins: a defined model_alias is deliberate, while a MoA
+    # preset match is implicit. The stock MoA config ships an enabled preset literally
+    # named "default", so checking presets first silently hijacked `/model default`
+    # into the paid MoA aggregator on stock installs (#134162). MoA stays reachable
+    # via the picker, ``--provider moa``, or a non-colliding preset name.
     try:
-        from hermes_cli.config import load_config
-        from hermes_cli.moa_config import exact_moa_preset_name, normalize_moa_config
-        moa_match = exact_moa_preset_name(normalize_moa_config(load_config().get("moa") or {}), raw_input)
-    except Exception:
-        moa_match = None  # MoA config unreadable: fall through to plain alias resolution
-    if moa_match:
-        st.target_provider, st.new_model, st.resolved_alias = "moa", moa_match, ""
+        alias_result = resolve_alias(raw_input, current_provider, st.user_providers, st.custom_providers)
+    except AmbiguousAliasError as err:
+        return st.fail(_ambiguous_alias_message(err))
+    if alias_result is not None:
+        st.target_provider, st.new_model, st.resolved_alias = alias_result
+        logger.debug("Alias '%s' resolved to %s on %s", st.resolved_alias, st.new_model, st.target_provider)
     else:
         try:
-            alias_result = resolve_alias(raw_input, current_provider, st.user_providers, st.custom_providers)
-        except AmbiguousAliasError as err:
-            return st.fail(_ambiguous_alias_message(err))
-        if alias_result is not None:
-            st.target_provider, st.new_model, st.resolved_alias = alias_result
-            logger.debug("Alias '%s' resolved to %s on %s", st.resolved_alias, st.new_model, st.target_provider)
+            from hermes_cli.config import load_config
+            from hermes_cli.moa_config import exact_moa_preset_name, normalize_moa_config
+            moa_match = exact_moa_preset_name(normalize_moa_config(load_config().get("moa") or {}), raw_input)
+        except Exception:
+            moa_match = None  # MoA config unreadable: fall through to plain alias resolution
+        if moa_match:
+            st.target_provider, st.new_model, st.resolved_alias = "moa", moa_match, ""
         elif raw_input.strip().lower() in MODEL_ALIASES:
             fail = _route_alias_fallback(st, raw_input.strip().lower())
             if fail is not None:

@@ -323,6 +323,76 @@ def test_scoped_enablement_uses_only_own_credentials(client, isolated_profiles, 
     assert "root-token" in (isolated_profiles["default"] / ".env").read_text(encoding="utf-8")
 
 
+def test_scoped_source_resolved_credential_configures_the_platform(
+    client, isolated_profiles, monkeypatch
+):
+    """Credentials resolved by a profile's external secret source (1Password ``op://`` …)
+    never live in the profile's ``.env`` — they land in that profile's hydrated
+    source snapshot. The scoped Messaging page used to read ``load_env()`` only, so
+    an adapter that was live and answering was reported Disabled / Needs setup
+    (#133442). The snapshot must fill exactly the keys the profile's own ``.env``
+    does not define, and the dashboard process's ``os.environ`` stays excluded."""
+    from pathlib import Path
+
+    import hermes_cli.env_loader as env_loader
+
+    worker = isolated_profiles["worker_alpha"]
+    monkeypatch.setattr(
+        env_loader,
+        "get_secret_source_values",
+        lambda home: {"TELEGRAM_BOT_TOKEN": "op-resolved-src-7777"}
+        if Path(home).resolve() == worker.resolve()
+        else {},
+    )
+
+    payload = client.get(
+        "/api/messaging/platforms", params={"profile": "worker_alpha"}
+    ).json()
+
+    telegram = _telegram(payload)
+    assert telegram["configured"] is True
+    assert telegram["enabled"] is True
+    assert telegram["state"] == "gateway_stopped"
+    token = _env_field(telegram, "TELEGRAM_BOT_TOKEN")
+    assert token["is_set"] is True
+    assert "7777" in token["redacted_value"]
+    # The isolation rule survives: the root install's token is still never consulted.
+    assert "root-token" not in str(payload)
+
+
+def test_scoped_profile_dotenv_wins_over_the_source_snapshot(
+    client, isolated_profiles, monkeypatch
+):
+    """The profile's own ``.env`` stays authoritative: a key it defines is never
+    shadowed by the secret-source snapshot (the same layering ``build_profile_secret_scope``
+    applies), so what the page previews is what the adapter actually reads from disk."""
+    from pathlib import Path
+
+    import hermes_cli.env_loader as env_loader
+
+    worker = isolated_profiles["worker_alpha"]
+    (worker / ".env").write_text(
+        "TELEGRAM_BOT_TOKEN=worker-env-token-9999\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        env_loader,
+        "get_secret_source_values",
+        lambda home: {"TELEGRAM_BOT_TOKEN": "op-resolved-src-7777"}
+        if Path(home).resolve() == worker.resolve()
+        else {},
+    )
+
+    telegram = _telegram(
+        client.get(
+            "/api/messaging/platforms", params={"profile": "worker_alpha"}
+        ).json()
+    )
+
+    token = _env_field(telegram, "TELEGRAM_BOT_TOKEN")
+    assert "9999" in token["redacted_value"]
+    assert "7777" not in token["redacted_value"]
+
+
 @pytest.mark.parametrize("topology", ["scoped_query", "pooled_unscoped"])
 def test_credential_write_hot_serves_a_multiplexed_profile(client, isolated_profiles, monkeypatch, topology):
     """A token saved for a profile the live multiplexer serves is handed to the multiplexer right

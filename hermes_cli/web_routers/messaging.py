@@ -174,7 +174,8 @@ def _platform_enablement(
     platform_id: str, entry: dict[str, Any], env_on_disk: dict[str, str], scoped: bool
 ) -> tuple[bool, bool, dict | None]:
     """(enabled, configured, home_channel). Profile-scoped: derive from the profile's
-    config.yaml + .env only — load_gateway_config()'s env-override layer reads
+    config.yaml + .env + the profile's OWN resolved secret-source snapshot (see
+    ``_platform_payloads``) — load_gateway_config()'s env-override layer reads
     os.environ and would leak the root install's tokens into the profile's state."""
     required = entry["required_env"]
     if scoped:
@@ -234,8 +235,9 @@ def _messaging_platform_payload(
         runtime_platform = {}
 
     def env_value(key: str) -> str:
-        # Profile-scoped: judge only the profile's own .env — the dashboard process's
-        # os.environ carries the ROOT install's .env and would report root credentials as the profile's.
+        # Profile-scoped: judge only the profile's own .env plus its resolved
+        # secret-source values — the dashboard process's os.environ carries the ROOT
+        # install's .env and would report root credentials as the profile's.
         return env_on_disk.get(key) or ("" if scoped else os.getenv(key, ""))
 
     env_vars = []
@@ -295,6 +297,21 @@ def _platform_payloads(scoped_dir: Optional[Path], entries) -> list[dict[str, An
     """Payloads for ``entries``; call inside ``_profile_scope`` (load_env honors the
     HERMES_HOME contextvar; the gateway status readers do not, hence the explicit path)."""
     env_on_disk = load_env()
+    if scoped_dir is not None:
+        # Source-resolved credentials (1Password ``op://`` …) never live in the profile's
+        # ``.env`` — they are resolved into that profile's hydrated secret-source snapshot,
+        # so a live, answering adapter read as Disabled / Needs setup (#133442). Fill ONLY
+        # the keys the profile's own ``.env`` does not define (the ``.env`` stays
+        # authoritative, the same layering ``build_profile_secret_scope`` applies) and
+        # never touch the dashboard process's ``os.environ``: the leak guard is unchanged.
+        from hermes_cli.env_loader import get_secret_source_values
+
+        source_values = get_secret_source_values(scoped_dir)
+        if source_values:
+            env_on_disk = {
+                **{key: value for key, value in source_values.items() if key not in env_on_disk},
+                **env_on_disk,
+            }
     runtime = read_runtime_status(path=scoped_dir / "gateway_state.json") if scoped_dir is not None else read_runtime_status()
     # A profile served by the multiplexer writes no live record of its own; its adapters live in the
     # multiplexer's record under ``<profile>:<platform>``. A leftover ``gateway_state.json`` from the

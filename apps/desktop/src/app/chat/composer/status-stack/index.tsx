@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { type ReactNode, useEffect, useMemo } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
@@ -162,6 +162,24 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
     [allGroups, isStructuredSupported, shown]
   )
 
+  // A fresh live Todo section mounts expanded (`defaultCollapsed` false for
+  // todos); manual toggles update the ref through onCollapsedChange. When the
+  // turn ends the section is unmounted and the retained snapshot is a new
+  // StatusSection instance that re-seeds its state — without carrying this
+  // value the checklist collapses on hand-off and reads as if the list were
+  // gone. Sessions restored from a snapshot with no live section (null) keep
+  // the collapsed idle default.
+  const liveTodoExpandedRef = useRef<boolean | null>(null)
+  const hasLiveTodo = groups.some(group => group.type === 'todo')
+
+  useEffect(() => {
+    if (hasLiveTodo) {
+      liveTodoExpandedRef.current = true
+    }
+  }, [hasLiveTodo])
+
+
+
   // Seed from the registry on session open; event-driven refreshes (terminal /
   // process tool completions) live in use-message-stream. This must NOT reset
   // the gone-polling latch: a mount/remount is not proof of a fresh runtime
@@ -293,6 +311,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
           defaultCollapsed={group.type !== 'todo'}
           icon={<Codicon className="text-muted-foreground/70" name={GROUP_ICON[group.type]} size="0.8rem" />}
           label={groupLabel(group, t.statusStack)}
+          onCollapsedChange={group.type === 'todo' ? collapsed => { liveTodoExpandedRef.current = !collapsed } : undefined}
         >
           {group.items.map(item => (
             <StatusItemRow
@@ -316,7 +335,7 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
       key: 'retained-todo',
       node: (
         <StatusSection
-          defaultCollapsed
+          defaultCollapsed={liveTodoExpandedRef.current !== true}
           icon={<Codicon className="text-muted-foreground/70" name="checklist" size="0.8rem" />}
           label={t.statusStack.previousTodos(done, retainedTodos.length)}
         >

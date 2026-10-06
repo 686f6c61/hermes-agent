@@ -130,3 +130,51 @@ it('starts structured goals collapsed and preserves manual queue expansion when 
   view.rerender(stack(true))
   expect(screen.getByText('Queued request')).toBeTruthy()
 })
+
+const settleSnapshot = () =>
+  act(() => {
+    $todosBySession.set({})
+    restoreSessionTodosFromSnapshot(
+      'owner',
+      {
+        revision: 3,
+        todos: [
+          { id: 'one', content: 'Already done', status: 'completed' },
+          { id: 'two', content: 'Still open', status: 'in_progress' }
+        ]
+      },
+      false
+    )
+  })
+
+it('keeps the live checklist expanded when the turn hands off to the snapshot', () => {
+  $todosBySession.set({ owner: [{ id: 'todo', content: 'Live task', status: 'in_progress' }] })
+  render(stack())
+
+  const live = screen.getByRole('button', { name: /Tasks 0\/1/ })
+  expect(live.getAttribute('aria-expanded')).toBe('true')
+
+  settleSnapshot()
+
+  // A fresh StatusSection re-seeds its collapse state; without carrying the
+  // live section's last state the hand-off collapses and reads as a removal.
+  const review = screen.getByRole('button', { name: /Previous tasks 1\/2/ })
+  expect(review.getAttribute('aria-expanded')).toBe('true')
+  expect(screen.getByText('Still open')).toBeTruthy()
+})
+
+it('keeps the retained checklist collapsed when the user collapsed the live one', () => {
+  $todosBySession.set({ owner: [{ id: 'todo', content: 'Live task', status: 'in_progress' }] })
+  render(stack())
+
+  const live = screen.getByRole('button', { name: /Tasks 0\/1/ })
+  expect(live.getAttribute('aria-expanded')).toBe('true')
+  fireEvent.click(live)
+  expect(live.getAttribute('aria-expanded')).toBe('false')
+
+  settleSnapshot()
+
+  const review = screen.getByRole('button', { name: /Previous tasks 1\/2/ })
+  expect(review.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByText('Still open')).toBeNull()
+})

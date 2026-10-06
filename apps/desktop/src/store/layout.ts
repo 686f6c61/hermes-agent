@@ -154,7 +154,13 @@ export const $sidebarWorkspaceParentOrderIds = persistentAtom(
 // Manual drag-order of projects in the overview. Empty = the deterministic
 // default sort (active first, explicit before auto, by recency); once the user
 // drags a project their order wins (orderByIds surfaces new projects on top).
-export const $sidebarProjectOrderIds = persistentAtom(
+//
+// Connection-scoped like the manual session order: project ids belong to one
+// profile's view of a gateway, so a shared global key is how profile A's drag
+// order resets the moment profile B's sidebar rewrites the same list
+// (#133675). The local connection keeps the bare legacy key; remote
+// connections get their own per-profile namespaces.
+export const $sidebarProjectOrderIds = connectionScopedAtom(
   SIDEBAR_PROJECT_ORDER_STORAGE_KEY,
   [] as string[],
   Codecs.stringArray

@@ -727,6 +727,16 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             self._queue_or_replace_pending_event(_quick_key, event)
             return None
         if effective_busy_input_mode == "steer":
+            # A steer mutates the live transcript mid-run; while the compressor holds the
+            # session lock that races the pre-rotation parent exactly like an interrupt
+            # (#56391), so it demotes to queue on the same terms.
+            if await self._session_has_compression_in_flight(_quick_key):
+                logger.info(
+                    "PRIORITY steer demoted to queue for session %s — context compression is in flight (#56391)",
+                    _quick_key,
+                )
+                self._queue_or_replace_pending_event(_quick_key, event)
+                return None
             self._hm_busy_steer(event, running_agent, _quick_key)
             return None
         # Subagent protection: an interrupt cascades through ``_active_children`` and aborts

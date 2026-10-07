@@ -60,7 +60,9 @@ def _cua_no_overlay() -> bool:
         # can leave it stuck above every app on every workspace, wedging desktop input until the app
         # restarts — the same failure class as the HUD window on Mutter/X11 (#83473). There is no
         # compositor-owned surface to tear down with the client connection, so default the overlay off on
-        # X11 too; set computer_use.no_overlay: false to keep the cursor. Wayland keeps it: the compositor
+        # X11 too; set computer_use.no_overlay: false to keep the cursor (daemon-backed permission
+        # modes only — standard spawns no daemon, so there the key cannot render a cursor, #134243).
+        # Wayland keeps it: the compositor
         # owns the overlay surface lifecycle there.
         os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY"))
 
@@ -75,6 +77,24 @@ def _cua_configured_permission_mode() -> str:
     toggle so a stale config line can never silently bypass approvals."""
     raw = str(_computer_use_cfg().get("permission_mode", "standard") or "").strip().lower()
     return "bounded" if raw == "bounded" else "standard"
+
+def _warn_overlay_unreachable_in_standard_mode(permission_mode: str) -> None:
+    """Surface the silent no-op of an explicit ``computer_use.no_overlay: false`` under the ``standard``
+    permission mode (#134243). The cursor overlay is rendered by an embedded daemon's UI runloop, and
+    ``standard`` spawns no daemon — only a bare ``cua-driver mcp`` child that never attaches to one — so
+    the key is accepted, changes the spawned args, and still produces no cursor. The docstring's own
+    advice ("set no_overlay: false to keep the cursor") only works under a daemon-backed mode
+    (``bounded``/``unrestricted``). Explicit ``True`` (hide it) and the unset auto-detection stay silent:
+    neither claims to keep the cursor."""
+    if permission_mode != "standard":
+        return
+    if _computer_use_cfg().get("no_overlay") is False:
+        logger.warning(
+            "computer_use.no_overlay: false has no effect under permission_mode 'standard': the "
+            "cursor overlay is rendered by an embedded daemon and standard mode spawns none. Use "
+            "permission_mode 'bounded' (or the per-session YOLO toggle) if you want the overlay; "
+            "see #134243."
+        )
 
 # ``computer_use.ax_max_elements``: bound on the DRIVER's accessibility-tree walk per capture. The
 # visible-element cap in tool.py (_DEFAULT_MAX_ELEMENTS) trims the RESPONSE only, so without this an
@@ -220,7 +240,8 @@ def _linux_session_locked() -> Optional[bool]:
     half-disables the AX tree, so discovery legitimately returns nothing — which otherwise reads as a driver bug.
     True/False when loginctl answers, None when unavailable (non-Linux, no systemd-logind, probe failure)."""
     # Auto-detect: macOS overlay can peg a core indefinitely after a computer_use session (#47032). Prefer
-    # off until the driver teardown is solid; set computer_use.no_overlay: false to keep the cursor.
+    # off until the driver teardown is solid; set computer_use.no_overlay: false to keep the cursor
+    # (daemon-backed permission modes only — standard spawns no daemon, #134243).
     if sys.platform != "linux":
         return None
     try:
@@ -253,6 +274,7 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
             raise ValueError(f"unsupported cua-driver permission mode: {permission_mode}")
         self.permission_mode = permission_mode
         self._embedded_daemon: Optional[_EmbeddedCuaDaemon] = None
+        _warn_overlay_unreachable_in_standard_mode(permission_mode)
         if permission_mode != "standard":
             # Manifest: mandatory for bounded (the daemon validates it), optional for unrestricted where it still
             # caps what an approval-bypassed run may touch.

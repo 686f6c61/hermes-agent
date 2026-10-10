@@ -205,4 +205,23 @@ def update_plugin(
         except pc.PluginOperationError:
             raise
         except Exception as exc:
-            raise pc.PluginOperationError(f"Plugin '{target.name}' update was not published: {exc}") from exc
+            raise pc.PluginOperationError(
+                f"Plugin '{target.name}' update was not published: {_publication_blocked_reason(target, exc)}"
+            ) from exc
+
+
+def _publication_blocked_reason(target: Path, exc: Exception) -> str:
+    """Turn a failed publication into the user-facing reason.
+
+    On Windows the installed directory is the plugin's own MCP server cwd while
+    that server runs, so the rename in the publish step dies with WinError 32.
+    The bare OSError names neither the holder nor the way out, so that case
+    spells out both; every other failure keeps its original text.
+    """
+    if getattr(exc, "winerror", None) == 32 and target.name in str(exc):
+        return (
+            f"{exc}. The installed directory is the current directory of the "
+            "plugin's running MCP server, which blocks the rename. Stop the "
+            "plugin's MCP server or restart Hermes, then retry."
+        )
+    return str(exc)

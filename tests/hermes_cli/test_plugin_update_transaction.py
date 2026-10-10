@@ -256,3 +256,56 @@ def test_successful_update_publishes_matching_code_and_durable_workspace(install
                      if row.name == "transactional")
         assert check.klass == "catalog" and check.update_available is True
         assert check.current == record["revision"] and check.latest == state["sha"]
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_update_winerror32_names_running_mcp_server(installed, monkeypatch):
+    import os as os_module
+
+    from hermes_cli import plugins_cmd
+
+    root, home, repo, target, state = installed
+    state["sha"] = _version(repo, "2.0.0")
+
+    real_replace = os_module.replace
+
+    def busy_replace(src, dst, **kwargs):
+        if Path(src).name == target.name and ".previous-" in str(dst):
+            error = OSError(13, "The process cannot access the file because it is being used by another process",
+                            str(src))
+            error.winerror = 32
+            raise error
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os_module, "replace", busy_replace)
+    result = plugins_cmd.dashboard_update_user_plugin("transactional")
+
+    assert result["ok"] is False, result
+    assert result.get("error")
+    assert "MCP server" in result["error"], result
+    assert "restart Hermes" in result["error"], result
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_update_generic_publication_failure_keeps_bare_message(installed, monkeypatch):
+    import os as os_module
+
+    from hermes_cli import plugins_cmd
+
+    root, home, repo, target, state = installed
+    state["sha"] = _version(repo, "2.0.0")
+
+    real_replace = os_module.replace
+
+    def failing_replace(src, dst, **kwargs):
+        if Path(src).name == target.name and ".previous-" in str(dst):
+            raise OSError(13, "Permission denied", str(src))
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os_module, "replace", failing_replace)
+    result = plugins_cmd.dashboard_update_user_plugin("transactional")
+
+    assert result["ok"] is False, result
+    assert result.get("error")
+    assert "MCP server" not in result["error"], result
+    assert "Permission denied" in result["error"], result

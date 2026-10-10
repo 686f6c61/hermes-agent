@@ -360,6 +360,18 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
+    if args.assignee:
+        from hermes_cli.profiles import profile_exists
+
+        # Same write-time gate the tool handler applies (#99284): a card created
+        # for a profile that does not exist can never be dispatched.
+        if not profile_exists(args.assignee):
+            print(
+                f"kanban: unknown profile {args.assignee!r} — not an on-disk profile. "
+                "Create it with `hermes -p <name> setup` first.",
+                file=sys.stderr,
+            )
+            return 2
     with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title=args.title, body=body, assignee=args.assignee,

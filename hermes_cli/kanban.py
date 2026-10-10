@@ -570,9 +570,47 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_known_kanban_assignee(conn, profile: str) -> bool:
+    """True if *profile* is an on-disk Hermes profile or already on this board."""
+    try:
+        canon = kb._canonical_assignee(profile)
+    except ValueError:
+        return False
+    if not canon:
+        return False
+    try:
+        from hermes_cli.profiles import profile_exists
+        if profile_exists(canon):
+            return True
+    except OSError as exc:
+        # Unreadable profile dir must not block a reassign to an assignee the
+        # board already knows; say why instead of failing the CLI silently.
+        print(f"kanban: could not inspect profile dir for {canon!r}: {exc}", file=sys.stderr)
+    known = {entry["name"] for entry in kb.known_assignees(conn)}
+    return canon in known or profile in known
+
+
+def _reject_unknown_assignee(conn, profile: Optional[str]) -> Optional[int]:
+    """Refuse a brand-new typo assignee. Unassign (profile is None) is always ok."""
+    if profile is None:
+        return None
+    if _is_known_kanban_assignee(conn, profile):
+        return None
+    print(
+        f"kanban: unknown profile {profile!r} — not an on-disk profile "
+        "or an existing board assignee. Create it with "
+        f"`hermes -p {profile} setup`, or unassign with 'none'.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     with kbc.connect_closing() as conn:
+        refused = _reject_unknown_assignee(conn, profile)
+        if refused is not None:
+            return refused
         ok = kb.assign_task(conn, args.task_id, profile)
     return _ok_or_err(ok, f"no such task: {args.task_id}",
                       f"Assigned {args.task_id} to {profile or '(unassigned)'}")
@@ -609,6 +647,9 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     reclaim = bool(getattr(args, "reclaim", False))
     with kbc.connect_closing() as conn:
+        refused = _reject_unknown_assignee(conn, profile)
+        if refused is not None:
+            return refused
         ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
     return _ok_or_err(
         ok,

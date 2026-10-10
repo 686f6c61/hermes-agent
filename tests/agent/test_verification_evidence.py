@@ -290,6 +290,57 @@ def test_versioned_or_absolute_interpreter_records_ad_hoc_evidence(tmp_path, mon
     assert evidence.status == "passed"
 
 
+def test_root_containing_tempdir_still_records_ad_hoc_evidence(tmp_path, monkeypatch):
+    """The hermes bootstrap redirects TMPDIR into $HERMES_HOME/cache/scratch, so a project
+    root that contains that scratch dir (any session editing files under $HERMES_HOME) made
+    the old pair of path tests in `_is_temp_script_path` — under the temp dir AND outside
+    the root — mutually exclusive: ad-hoc evidence could never be recorded and the
+    verify-on-stop nudge re-fired forever.
+    """
+    hermes_home = tmp_path / ".hermes"
+    scratch = hermes_home / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    (hermes_home / "package.json").write_text("{}", encoding="utf-8")
+    script = Path(tempfile.gettempdir()) / f"hermes-verify-{tmp_path.name}.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    try:
+        evidence = classify_verification_command(
+            f"python {script}",
+            cwd=hermes_home,
+            session_id="s1",
+            exit_code=0,
+            output="ok",
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+    assert evidence.status == "passed"
+
+
+def test_prefixed_script_inside_root_outside_tempdir_is_not_evidence(tmp_path, monkeypatch):
+    """A repo-committed script wearing the reserved prefix sits inside the root and outside
+    the temp dir: it is suite code, not an ad-hoc run, and must not satisfy the gate.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "outside-tmp"))
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    script = tmp_path / "hermes-verify-committed.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python {script}",
+        cwd=tmp_path,
+        session_id="s1",
+        exit_code=0,
+        output="ok",
+    )
+
+    assert evidence is None
+
+
 def test_non_interpreter_command_touching_the_temp_script_is_not_evidence(tmp_path, monkeypatch):
     """The nudge also tells the agent to clean the temp script up. A command that merely names
     the script — `rm`, `chmod`, `cat` — runs no verification and must not satisfy the gate.

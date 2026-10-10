@@ -303,12 +303,24 @@ def _is_under(token: str, base: str | Path | None) -> bool:
 
 
 def _is_temp_script_path(token: str, root: str | Path | None) -> bool:
-    """An ad-hoc verify script: prefixed name, under the temp dir, outside the repo."""
+    """An ad-hoc verify script: reserved name prefix, under the temp dir or outside the
+    project root.
+
+    The bootstrap redirects TMPDIR into ``$HERMES_HOME/cache/scratch``, so requiring the
+    script to sit under ``tempfile.gettempdir()`` while *also* requiring it outside the
+    root made both conditions mutually exclusive whenever the root contains that scratch
+    dir ($HERMES_HOME itself): no ad-hoc run could ever be recorded. Accepting either
+    location keeps a committed suite excluded — its scripts sit inside the root and
+    outside the temp dir — while the nudge-mandated scratch path records again.
+    """
     try:
         name = Path(token).expanduser().name
     except Exception:
         return False
-    return name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) and _is_under(token, tempfile.gettempdir()) and not _is_under(token, root)
+    return (
+        name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES)
+        and (_is_under(token, tempfile.gettempdir()) or not _is_under(token, root))
+    )
 
 
 def _is_interpreter_token(token: str) -> bool:

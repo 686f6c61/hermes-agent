@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -77,6 +77,24 @@ describe('recordParentLifecycle', () => {
     const fresh = readFileSync(crashLog, 'utf8')
     expect(fresh).toContain('[tui-parent]')
     expect(fresh).toContain('gateway exit received')
+  })
+
+  it('skips rotation while another writer holds a fresh lock so the retained generation survives', async () => {
+    const { recordParentLifecycle } = await loadFresh(home)
+    mkdirSync(join(home, 'logs'), { recursive: true })
+    const crashLog = join(home, 'logs', 'tui_gateway_crash.log')
+    writeFileSync(crashLog, 'x'.repeat(5 * 1024 * 1024 + 1))
+    writeFileSync(`${crashLog}.1`, 'previous generation')
+    // The Python gateway (or a sibling parent) is mid-rotation: its lock file
+    // exists, so this writer must not rename the fresh active log over the
+    // retained .1 generation.
+    closeSync(openSync(`${crashLog}.rotate.lock`, 'w'))
+
+    recordParentLifecycle('gateway exit received')
+
+    expect(readFileSync(`${crashLog}.1`, 'utf8')).toBe('previous generation')
+    expect(readFileSync(crashLog, 'utf8')).toContain('gateway exit received')
+    expect(existsSync(`${crashLog}.rotate.lock`)).toBe(true)
   })
 
   it('is a no-op under VITEST so tests stay hermetic', async () => {

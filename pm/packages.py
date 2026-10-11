@@ -427,6 +427,22 @@ class Venv(StatePackage):
         h.update(members_stamp(enabled_member_dirs() if plugin_dirs is None else plugin_dirs).encode())
         return h.hexdigest()
 
+    def _seed_lock(self, prior: dict, members: list, project: Path) -> Path:
+        """Lock seeded into the fresh generation's workspace: the recorded one when plugin
+        members exist (so the recorded graph replays), the project lock otherwise.
+
+        A recorded seed that no longer exists would escape ``lock_and_sync`` as a raw
+        FileNotFoundError and leave the update's dependency follow-up owed in a retry loop
+        with no actionable reason (#136694). Match the repair branch's contract: name the
+        missing path instead of silently guessing a different lock."""
+        if members and prior.get("resolved_lock"):
+            seed = Path(prior["resolved_lock"])
+            if not seed.is_file():
+                raise InstallError(self.name, f"recorded dependency lock is missing: {seed}",
+                                   remedy="restore it from a prior generation's workspace, then retry")
+            return seed
+        return project / "uv.lock"
+
     def apply(self, extras: list[str], *, plugin_dirs=None, repair: bool = False, explicit: bool = False,
               skip_invalid_secondary: bool = False) -> dict:
         """Prepare one complete environment; the caller commits its selection.
@@ -469,8 +485,7 @@ class Venv(StatePackage):
                         or not recorded.is_file()):
                     raise InstallError(self.name, "recorded dependency lock is missing; refusing to drop plugins")
                 replay = recorded.parent
-            seed = (Path(prior["resolved_lock"]) if members and prior.get("resolved_lock")
-                    else project / "uv.lock")
+            seed = self._seed_lock(prior, members, project)
             lock_and_sync(members, extras, root=generation / "workspace",
                           seed_lock=seed, frozen=repair or not members, replay=replay,
                           source=project, environment=environment)

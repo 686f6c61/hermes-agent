@@ -1012,6 +1012,7 @@ def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseExcept
     import traceback
     with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        _rotate_crash_log()
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(
                 f"\n=== turn-dispatcher exception · "

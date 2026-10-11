@@ -123,7 +123,8 @@ class InsightsEngine:
     )
     _GET_TOOL_CALLS_ALL, _GET_TOOL_CALLS_WITH_SOURCE = _scoped(
         "SELECT m.session_id, m.message_uid, m.id, m.tool_calls" + _ASSISTANT_CALLS,
-        " AND m.role = 'assistant' AND m.tool_calls IS NOT NULL" + _VISIBLE_ACTIVE_CLAUSE,
+        " AND m.role = 'assistant' AND m.tool_calls IS NOT NULL" + _VISIBLE_ACTIVE_CLAUSE
+        + " ORDER BY m.id",
     )
     _GET_SKILL_CALLS_ALL, _GET_SKILL_CALLS_WITH_SOURCE = _scoped(
         "SELECT m.tool_calls, m.timestamp, m.message_uid, m.id" + _ASSISTANT_CALLS,
@@ -132,14 +133,23 @@ class InsightsEngine:
         " OR instr(m.tool_calls, 'skill_manage') > 0)"
         + _VISIBLE_ACTIVE_CLAUSE,
     )
+    # Tool names dedup on the SAME global logical-message identity as the
+    # message stats, attributed to the generation where the call happened
+    # (MIN(id)): a compression child carries byte-exact clones of the
+    # parent's tail rows with the same message_uid (_clone_message_rows skips
+    # only id/active/compacted/display_order), so grouping per session counted
+    # one logical call once per session (#136585). SQLite's single-min() rule
+    # makes the bare session_id come from that first row.
     _GET_TOOL_NAMES_ALL, _GET_TOOL_NAMES_WITH_SOURCE = _scoped(
-        f"""SELECT m.session_id, m.tool_name, COUNT(DISTINCT {_MESSAGE_IDENTITY_SQL}) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?""",
+        """SELECT session_id, tool_name, COUNT(*) as count FROM (
+                    SELECT m.session_id, m.tool_name, MIN(m.id) as first_id
+                    FROM messages m
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE s.started_at >= ?""",
         f"""
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL{_VISIBLE_ACTIVE_CLAUSE}
-                   GROUP BY m.session_id, m.tool_name""",
+                      AND m.role = 'tool' AND m.tool_name IS NOT NULL{_VISIBLE_ACTIVE_CLAUSE}
+                    GROUP BY m.tool_name, {_MESSAGE_IDENTITY_SQL})
+                    GROUP BY session_id, tool_name""",
     )
     _GET_MESSAGE_STATS_ALL, _GET_MESSAGE_STATS_WITH_SOURCE = _scoped(
         f"""SELECT
@@ -200,7 +210,7 @@ class InsightsEngine:
         models = self._compute_model_breakdown(sessions, cutoff, source)
         return {
             "days": days, "source_filter": source, "empty": False, "generated_at": time.time(),
-            "overview": self._compute_overview(sessions, message_stats, models),
+            "overview": self._compute_overview(sessions, message_stats, models, tool_usage),
             "models": models,
             "platforms": self._compute_platform_breakdown(sessions),
             "tools": self._compute_tool_breakdown(tool_usage),
@@ -238,11 +248,14 @@ class InsightsEngine:
         for row in self._query("_GET_TOOL_NAMES", cutoff, source):
             by_session_tool[(row["session_id"], row["tool_name"])] += row["count"]
         calls_by_session_tool = Counter()
-        seen_rows: set[tuple[str, str]] = set()
+        seen_rows: set[str] = set()
         for row in self._query("_GET_TOOL_CALLS", cutoff, source):
             # Parse one row per logical message, not per generation: copies of
             # an assistant row share message_uid and the same tool_calls JSON.
-            identity = (row["session_id"], row["message_uid"] or f"row:{row['id']}")
+            # Dedup is global (not per session) and rows arrive in id order,
+            # so a call carried into a compression child stays attributed to
+            # the session where it happened (#136585).
+            identity = row["message_uid"] or f"row:{row['id']}"
             if identity in seen_rows:
                 continue
             seen_rows.add(identity)
@@ -259,7 +272,7 @@ class InsightsEngine:
     def _get_skill_usage(self, cutoff: float, source: str | None = None) -> list[dict]:
         """Extract per-skill usage from assistant tool calls."""
         skill_counts: dict[str, dict[str, Any]] = {}
-        seen_rows: set[tuple[str, str]] = set()
+        seen_rows: set[str] = set()
         for row in self._query("_GET_SKILL_CALLS", cutoff, source):
             # Same per-logical-message dedup as _get_tool_usage (#136585).
             identity = row["message_uid"] or f"row:{row['id']}"
@@ -293,7 +306,8 @@ class InsightsEngine:
 
     # -------------------------------------------------------------- Compute
 
-    def _compute_overview(self, sessions: list[dict], message_stats: dict, models: Optional[list[dict]] = None) -> dict:
+    def _compute_overview(self, sessions: list[dict], message_stats: dict, models: Optional[list[dict]] = None,
+                          tool_usage: Optional[list[dict]] = None) -> dict:
         # Per-model breakdown includes auxiliary usage rows (vision/compression/
         # titles) plus reconciled residuals, while session counters carry
         # main-loop usage only — sum the breakdown when available so overview
@@ -301,7 +315,16 @@ class InsightsEngine:
         rows = models or sessions
         total_input, total_output, total_cache_read, total_cache_write = (sum(int(r.get(k) or 0) for r in rows) for k in _TOKEN_KEYS)
         total_tokens = total_input + total_output + total_cache_read + total_cache_write
-        total_tool_calls = sum(s.get("tool_call_count") or 0 for s in sessions)
+        # Tool totals come from the same deduplicated table the tools section
+        # renders, not from sessions.tool_call_count: a compression child
+        # inherits the parent's carried tail in its counter while the parent
+        # keeps its own, so summing session counters counts a split session's
+        # calls once per generation — the same two-halves-disagree shape the
+        # message total below fixes (#136585).
+        if tool_usage is not None:
+            total_tool_calls = sum(t.get("count") or 0 for t in tool_usage)
+        else:
+            total_tool_calls = sum(s.get("tool_call_count") or 0 for s in sessions)
         # Message totals come from the same visible/uid count as the role
         # breakdown, so both halves of the overview block agree (#136585);
         # sessions.message_count tracks only the live generation.

@@ -629,8 +629,11 @@ class TestTranscriptGenerations:
         self._insert(db, "g1", "user", "hello", uid="u1", active=0)
         # An archived generation with no live copy remains visible.
         self._insert(db, "g1", "user", "archived", uid="u2", active=0, compacted=1)
-        # Legacy row written before message_uid existed: its own identity.
+        # A legacy row whose uid is still NULL (written before the column and
+        # its insert trigger existed): the 'row:<id>' fallback keeps it its
+        # own message.
         self._insert(db, "g1", "assistant", "legacy")
+        db._conn.execute("UPDATE messages SET message_uid = NULL WHERE content = 'legacy'")
         db._conn.commit()
 
         stats = InsightsEngine(db)._get_message_stats(0.0)
@@ -660,6 +663,9 @@ class TestTranscriptGenerations:
         self._insert(db, "g1", "tool", "out", uid="t1", tool_name="search_files")
         self._insert(db, "g1", "tool", "out", uid="t1", tool_name="search_files", active=0)
         self._insert(db, "g1", "tool", "out", tool_name="legacy_tool")
+        # Same fallback exercise as the message-stats test above: NULL uid at
+        # read time, so 'row:<id>' identity applies.
+        db._conn.execute("UPDATE messages SET message_uid = NULL WHERE tool_name = 'legacy_tool'")
         db._conn.commit()
 
         rows = InsightsEngine(db)._query("_GET_TOOL_NAMES", 0.0, None)
@@ -714,3 +720,54 @@ class TestTranscriptGenerations:
                     + overview["tool_messages"])
         assert overview["total_messages"] == role_sum
         assert overview["total_messages"] == 4
+
+    def test_carried_tool_copy_counts_once_in_first_session(self, db):
+        """A compression child carries a byte-exact clone of the parent's tail
+        rows: same ``message_uid`` (``_clone_message_rows`` skips only id,
+        active, compacted and display_order). The tool aggregates must count
+        that logical call once and attribute it to the generation where it
+        happened — not once per session."""
+        db.create_session(session_id="p1", source="cli", model="m")
+        db.create_session(session_id="c1", source="cli", model="m")
+        calls = json.dumps([{"function": {"name": "search_files"}}])
+        # Parent generation (archived by compaction, still visible) ...
+        self._insert(db, "p1", "assistant", "a", uid="a1", tool_calls=calls,
+                     active=0, compacted=1)
+        self._insert(db, "p1", "tool", "out", uid="t1", tool_name="search_files",
+                     active=0, compacted=1)
+        # ... and its carried copy in the compression child.
+        self._insert(db, "c1", "assistant", "a", uid="a1", tool_calls=calls)
+        self._insert(db, "c1", "tool", "out", uid="t1", tool_name="search_files")
+        db._conn.commit()
+
+        rows = InsightsEngine(db)._query("_GET_TOOL_NAMES", 0.0, None)
+        counts = {(r["session_id"], r["tool_name"]): r["count"] for r in rows}
+        assert counts == {("p1", "search_files"): 1}
+
+        usage = InsightsEngine(db)._get_tool_usage(0.0)
+        assert usage == [{"tool_name": "search_files", "count": 1}]
+
+        stats = InsightsEngine(db)._get_message_stats(0.0)
+        assert stats["assistant_messages"] == 1
+        assert stats["tool_messages"] == 1
+
+    def test_overview_tool_total_matches_tool_table(self, db):
+        """'Tool calls' in the overview block must come from the same
+        deduplicated count as the tools table: a compression child inherits
+        the carried tail in its ``tool_call_count`` while the parent keeps
+        its own, so summing session counters counts a split session's calls
+        twice."""
+        db.create_session(session_id="p1", source="cli", model="m")
+        db.create_session(session_id="c1", source="cli", model="m")
+        self._insert(db, "p1", "tool", "out", uid="t1", tool_name="read_file",
+                     active=0, compacted=1)
+        self._insert(db, "c1", "tool", "out", uid="t1", tool_name="read_file")
+        # Session counters record the call in both generations, like the
+        # compression handoff does (child += tail_tool_calls, parent keeps
+        # its own).
+        db._conn.execute("UPDATE sessions SET tool_call_count = 1")
+        db._conn.commit()
+
+        report = InsightsEngine(db).generate(days=30)
+        assert report["overview"]["total_tool_calls"] == sum(t["count"] for t in report["tools"])
+        assert report["overview"]["total_tool_calls"] == 1

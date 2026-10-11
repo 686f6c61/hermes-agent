@@ -313,6 +313,85 @@ def test_send_returns_an_answer_committed_after_the_deadline_expired(capture, mo
     assert not server_requests._open
 
 
+def test_response_frame_from_one_of_two_clients_notifies_the_other(capture, monkeypatch):
+    """(#136709) With two clients attached, client A's response frame settles the request but
+    client B still shows the card. resolve_response emits request.cancel (reason "resolved") —
+    the same event approval.respond's settle() already produces — to every client except the
+    one that answered (its card is already gone)."""
+    from tui_gateway import server_requests
+
+    client_a, client_b = object(), object()
+    monkeypatch.setattr(server_requests, "_clients", lambda sid: [client_a, client_b])
+    cancels: list[dict] = []
+    monkeypatch.setattr(
+        server_requests, "_emit",
+        lambda event, sid, payload: cancels.append(payload) if event == "request.cancel" else None)
+
+    req = server_requests.ServerRequest("s1", "approval", {})
+    with server_requests._lock:
+        server_requests._open[req.id] = req
+
+    assert server_requests.resolve_response({"id": req.id, "result": {"choice": "once"}}, client_a)
+    assert req.event.is_set()
+    assert cancels == [{"id": req.id, "method": "approval", "reason": "resolved"}]
+
+
+def test_response_frame_from_the_only_attached_client_stays_silent(capture, monkeypatch):
+    """(#112548, kept) The answering client is the only card holder: a cancel after its own
+    answer would be noise, so a single-attached-client settlement emits nothing."""
+    from tui_gateway import server_requests
+
+    client_a = object()
+    monkeypatch.setattr(server_requests, "_clients", lambda sid: [client_a])
+    cancels: list[dict] = []
+    monkeypatch.setattr(server_requests, "_emit", lambda event, sid, payload: cancels.append(payload))
+
+    req = server_requests.ServerRequest("s1", "sudo", {})
+    with server_requests._lock:
+        server_requests._open[req.id] = req
+
+    assert server_requests.resolve_response({"id": req.id, "result": {"value": "yes"}}, client_a)
+    assert cancels == []
+
+
+def test_response_frame_without_a_transport_notifies_attached_clients(capture, monkeypatch):
+    """(#136709) A response that arrives without a client transport (the request.answer proxy,
+    the compute-host bridge) cannot be attributed to one of them: every attached client gets
+    the cancel so no card is left open."""
+    from tui_gateway import server_requests
+
+    client_a = object()
+    monkeypatch.setattr(server_requests, "_clients", lambda sid: [client_a])
+    cancels: list[dict] = []
+    monkeypatch.setattr(server_requests, "_emit", lambda event, sid, payload: cancels.append(payload))
+
+    req = server_requests.ServerRequest("s1", "approval", {})
+    with server_requests._lock:
+        server_requests._open[req.id] = req
+
+    assert server_requests.resolve_response({"id": req.id, "result": {"choice": "once"}})
+    assert cancels == [{"id": req.id, "method": "approval", "reason": "resolved"}]
+
+
+def test_final_batch_lock_notifies_attached_clients(capture, monkeypatch):
+    """(#136709) The last clarify.lock completes the batch exactly like a response frame does;
+    the attached clients (the same card was mirrored to each) get request.cancel "resolved"
+    instead of learning the batch is over only from the next open_requests resync."""
+    from tui_gateway import server_requests
+
+    monkeypatch.setattr(server_requests, "_clients", lambda sid: [object(), object()])
+    cancels: list[dict] = []
+    monkeypatch.setattr(server_requests, "_emit", lambda event, sid, payload: cancels.append(payload))
+
+    req = server_requests.ServerRequest("s1", "clarify", {}, qids=["q1"])
+    with server_requests._lock:
+        server_requests._open[req.id] = req
+
+    assert server_requests.lock_answer(req.id, "q1", "yes") == []
+    assert req.event.is_set()
+    assert cancels == [{"id": req.id, "method": "clarify", "reason": "resolved"}]
+
+
 def _silent_ws():
     """A WebSocket client build that predates server→client requests: receives the frame, never answers."""
     from tui_gateway.ws import WSTransport
@@ -542,8 +621,11 @@ def test_clarify_batch_locks_resolve_in_order_and_keep_partial_on_timeout(captur
     assert last["result"] == {"status": "ok", "remaining": []}
     thread.join(timeout=5)
     assert box["answer"] == {"answers": {"q0": "y", "q1": ""}, "outcome": "submitted"}
+    completed = req  # the batch the final lock just settled
 
-    # Deadline: locked answers survive, outcome timed_out, one request.cancel.
+    # Deadline: locked answers survive, outcome timed_out, one request.cancel. The other cancel on
+    # the wire is the batch above: the final lock settles it and the attached clients must tear
+    # their cards down (#136709) instead of waiting for the next open_requests resync.
     original_timeout = server._clarify_timeout_seconds
     try:
         thread, box, req = _start_batch_clarify(server, buf, ["q0", "q1"], timeout=1.5)
@@ -555,7 +637,7 @@ def test_clarify_batch_locks_resolve_in_order_and_keep_partial_on_timeout(captur
         server._clarify_timeout_seconds = original_timeout
     assert box["answer"] == {"answers": {"q0": "kept"}, "outcome": "timed_out"}
     cancels = [f for f in _frames(buf) if f.get("method") == "event" and f["params"]["type"] == "request.cancel"]
-    assert [c["params"]["payload"]["id"] for c in cancels] == [req.id]
+    assert [c["params"]["payload"]["id"] for c in cancels] == [completed.id, req.id]
 
 
 def test_clarify_batch_cancel_all_is_a_response_without_answers(capture):

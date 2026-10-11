@@ -11,6 +11,9 @@ part keeps a compute-host child's requests distinct from the parent's when both 
 A request that times out or is cancelled (interrupt, session close, shutdown) emits ONE
 ``request.cancel {id, method, reason}`` notification so every renderer tears the card down the
 same way. A response for an id that is no longer open is dropped — the wait already returned.
+A settlement that arrives as a response frame (or the final batch lock) notifies the OTHER
+attached clients the same way, with reason ``resolved`` (#136709): the answering client closed
+its own card when it sent the frame, but the same card was mirrored to every other client.
 
 Reconnect: unanswered requests are returned as ``open_requests`` by ``session.resume`` /
 ``session.activate`` / ``session.events.since`` (:func:`open_requests`); the shared TypeScript
@@ -302,6 +305,13 @@ def resolve_response(frame: dict, transport: Any = None) -> bool:
     if req.on_result is not None:
         req.on_result(req.result)
     req.event.set()
+    # The answering client closed its own card when it sent the frame; every OTHER attached client
+    # still shows it (#136709). Emit the same cancel approval.respond's settle() produces. Skipped
+    # when the answering transport is the only attached one — there a cancel would be pure noise
+    # (#112548's single-client race). A frame without a transport (request.answer proxy,
+    # compute-host bridge) cannot be attributed, so every attached client is notified.
+    if [t for t in _clients(req.sid) if t is not transport]:
+        _emit_cancel(req, "resolved")
     return True
 
 
@@ -322,6 +332,9 @@ def lock_answer(request_id: str, question_id: str, answer: str | None) -> list[s
             _open.pop(request_id, None)
     if not remaining:
         req.event.set()
+        # The batch just settled: without this, an attached client only learns the batch is over
+        # from the next open_requests resync (#136709). The same cancel approval.respond produces.
+        _emit_cancel(req, "resolved")
     return remaining
 
 

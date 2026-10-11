@@ -298,3 +298,72 @@ class TestFirecrawlScrapeTimeout:
         assert len(results) == 1
         assert results[0]["url"] == "https://example.com"
         assert results[0]["content"] == "content"
+
+
+# ---------------------------------------------------------------------------
+# Firecrawl keyed client request timeout (#136720)
+# ---------------------------------------------------------------------------
+
+
+class TestFirecrawlClientTimeout:
+    """The keyed/self-hosted/gateway SDK client must carry a bounded request timeout.
+
+    ``Firecrawl(**kwargs)`` gets no ``timeout`` today, so the SDK calls
+    ``requests.post(..., timeout=None)`` and waits forever on a stalled
+    upstream read; the tool then dies at the 420 s dispatch deadline instead
+    of failing fast like the keyless client (``httpx``, 60 s) already does.
+    """
+
+    @staticmethod
+    def _build_keyed_client(monkeypatch: pytest.MonkeyPatch) -> dict:
+        """Route ``_get_firecrawl_client`` to the direct SDK path and capture the
+        constructor kwargs via a fake ``Firecrawl``. Returns the captured kwargs."""
+        from plugins.web.firecrawl import provider as firecrawl_provider
+
+        captured: dict = {}
+
+        class _RecordingFirecrawl:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        monkeypatch.setattr(firecrawl_provider, "Firecrawl", _RecordingFirecrawl)
+        monkeypatch.setattr(firecrawl_provider, "_is_explicit_firecrawl_selection", lambda: False)
+        import tools.tool_backend_helpers as _tbh
+
+        monkeypatch.setattr(_tbh, "read_web_capability_selection", lambda capability=None: None)
+        wt = firecrawl_provider._wt()
+        monkeypatch.setattr(wt, "_firecrawl_client", None, raising=False)
+        monkeypatch.setattr(wt, "_firecrawl_client_config", None, raising=False)
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "test-key")
+        firecrawl_provider._get_firecrawl_client()
+        return captured
+
+    def test_keyed_client_built_with_default_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FIRECRAWL_TIMEOUT", raising=False)
+        captured = self._build_keyed_client(monkeypatch)
+        assert captured.get("timeout") == 60.0, (
+            f"Expected the keyed client to be bounded at 60s, got {captured.get('timeout')!r}"
+        )
+
+    def test_firecrawl_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FIRECRAWL_TIMEOUT", "7")
+        captured = self._build_keyed_client(monkeypatch)
+        assert captured.get("timeout") == 7.0
+
+    def test_invalid_firecrawl_timeout_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        monkeypatch.setenv("FIRECRAWL_TIMEOUT", "abc")
+        with caplog.at_level(logging.WARNING, logger="plugins.web.firecrawl.provider"):
+            captured = self._build_keyed_client(monkeypatch)
+        assert captured.get("timeout") == 60.0
+        assert any("FIRECRAWL_TIMEOUT" in record.message for record in caplog.records)
+
+    def test_non_positive_firecrawl_timeout_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FIRECRAWL_TIMEOUT", "-3")
+        captured = self._build_keyed_client(monkeypatch)
+        assert captured.get("timeout") == 60.0

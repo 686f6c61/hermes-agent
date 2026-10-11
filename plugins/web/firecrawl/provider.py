@@ -1,7 +1,7 @@
 """Firecrawl web search + extract provider (direct SDK, keyless cloud, or Nous tool-gateway).
 
 Config: ``web.backend`` / ``web.search_backend`` / ``web.extract_backend: firecrawl``.
-Env: FIRECRAWL_API_KEY, FIRECRAWL_API_URL (self-hosted), FIRECRAWL_GATEWAY_URL / TOOL_GATEWAY_*.
+Env: FIRECRAWL_API_KEY, FIRECRAWL_API_URL (self-hosted), FIRECRAWL_TIMEOUT (keyed SDK request timeout), FIRECRAWL_GATEWAY_URL / TOOL_GATEWAY_*.
 """
 
 from __future__ import annotations
@@ -71,6 +71,32 @@ def _wt():
 def _env(name: str) -> str:
     from hermes_cli.config import get_env_value
     return (get_env_value(name) or "").strip()
+
+
+_FIRECRAWL_CLIENT_DEFAULT_TIMEOUT_S = 60.0
+
+
+def _firecrawl_client_timeout() -> float:
+    """HTTP request timeout handed to the keyed Firecrawl SDK client.
+
+    The SDK forwards ``timeout`` verbatim to ``requests``, and ``None`` waits
+    forever on a stalled upstream read — the call then dies at the tool
+    dispatch deadline instead of failing fast. Bounded at 60s (mirroring the
+    keyless client) so worst case is 60s x retries, still inside the
+    deadline. Override with ``FIRECRAWL_TIMEOUT`` (seconds); invalid or
+    non-positive values fall back to the default.
+    """
+    raw = _env("FIRECRAWL_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Ignoring invalid FIRECRAWL_TIMEOUT=%r", raw)
+        else:
+            if value > 0:
+                return value
+            logger.warning("Ignoring non-positive FIRECRAWL_TIMEOUT=%r", raw)
+    return _FIRECRAWL_CLIENT_DEFAULT_TIMEOUT_S
 
 
 def _get_direct_firecrawl_config() -> Optional[tuple]:
@@ -216,7 +242,7 @@ def _get_firecrawl_client(capability: Optional[str] = None) -> Any:
     cached = getattr(wt, "_firecrawl_client", None)
     if cached is not None and getattr(wt, "_firecrawl_client_config", None) == client_config:
         return cached
-    wt._firecrawl_client = _KeylessFirecrawlClient(api_url=kwargs["api_url"]) if client_mode == "keyless" else Firecrawl(**kwargs)
+    wt._firecrawl_client = _KeylessFirecrawlClient(api_url=kwargs["api_url"]) if client_mode == "keyless" else Firecrawl(**{**kwargs, "timeout": _firecrawl_client_timeout()})
     wt._firecrawl_client_config = client_config
     return wt._firecrawl_client
 

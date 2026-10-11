@@ -20,7 +20,7 @@ from tui_gateway._stdin_recovery import handle_spurious_eof
 
 from tui_gateway import server
 from tui_gateway.event_replay import replay_epoch
-from tui_gateway.server import _CRASH_LOG, _err, dispatch, resolve_skin, write_json
+from tui_gateway.server import _CRASH_LOG, _err, _rotate_crash_log, dispatch, resolve_skin, write_json
 from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,7 @@ def _append_crash_log(header: str, dump=None) -> None:
     """Best-effort ``=== header ===`` entry in the crash log; ``dump(f)`` adds detail."""
     with suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        _rotate_crash_log()
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n=== {header} ===\n")
             if dump is not None:

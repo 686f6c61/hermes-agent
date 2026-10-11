@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -30,7 +30,23 @@ const enabled = !process.env.VITEST
 // or add noticeable blocking on the synchronous append. Mirrors the spirit of
 // GatewayClient's in-memory log-line cap.
 const MAX_BREADCRUMB = 4096
+// Size cap so the shared crash log cannot grow without bound: recurring
+// lifecycle breadcrumbs and the child's panics used to append forever
+// (15 MB / 778 records on one host). One kept generation (.1) bounds the
+// total at 2x the cap; a line lost to a concurrent rename matches the
+// best-effort contract this logger already has.
+const MAX_CRASH_LOG_BYTES = 5 * 1024 * 1024
 let warned = false
+
+function rotateCrashLogIfOverCap(): void {
+  try {
+    if (statSync(CRASH_LOG).size > MAX_CRASH_LOG_BYTES) {
+      renameSync(CRASH_LOG, `${CRASH_LOG}.1`)
+    }
+  } catch {
+    // Missing file or a racing rename: the append below recreates the log.
+  }
+}
 
 export function recordParentLifecycle(line: string): void {
   if (!enabled) {
@@ -49,6 +65,7 @@ export function recordParentLifecycle(line: string): void {
         : oneLine
 
     mkdirSync(logDir, { recursive: true })
+    rotateCrashLogIfOverCap()
     appendFileSync(CRASH_LOG, `[tui-parent] ${new Date().toISOString()} ${capped}\n`)
   } catch {
     if (!warned) {

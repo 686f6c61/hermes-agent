@@ -60,6 +60,19 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.p
 # ── Panic logger: crashes otherwise leave no forensics (stdout is the JSON-RPC pipe, stderr doesn't
 # flush before exit) → append every unhandled exception to the crash log + one-line stderr summary.
 _CRASH_LOG = os.path.join(_hermes_home, "logs", "tui_gateway_crash.log")
+# The crash log is best-effort forensics, not a data file: recurring benign events (restart/SIGHUP
+# cycles land a received+exit pair each time, per-thread panics hit the hooks) appended without
+# bound — 15 MB / 778 records on one host (#136624). Rotating to a single .1 generation before
+# appending bounds the total at 2x the cap; a line lost to a concurrent rename matches the
+# best-effort contract every writer of this file already has.
+_CRASH_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _rotate_crash_log() -> None:
+    """Best-effort one-generation rename once the crash log is over the cap."""
+    with contextlib.suppress(OSError):
+        if os.path.getsize(_CRASH_LOG) > _CRASH_LOG_MAX_BYTES:
+            os.replace(_CRASH_LOG, _CRASH_LOG + ".1")
 
 
 def _record_crash(kind: str, exc_type, exc_value, exc_tb, *, thread_name: str | None = None) -> None:
@@ -68,6 +81,7 @@ def _record_crash(kind: str, exc_type, exc_value, exc_tb, *, thread_name: str | 
     suffix = f" · thread={thread_name}" if thread_name is not None else ""
     with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        _rotate_crash_log()
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n=== {kind} · {time.strftime('%Y-%m-%d %H:%M:%S')}{suffix} ===\n")
             f.write(trace)

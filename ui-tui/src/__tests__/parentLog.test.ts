@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -62,6 +62,21 @@ describe('recordParentLifecycle', () => {
 
     expect(line).toContain('[truncated 10000 chars]')
     expect(line.length).toBeLessThan(4_500)
+  })
+
+  it('rotates an oversized crash log before appending so the file cannot grow without bound', async () => {
+    const { recordParentLifecycle } = await loadFresh(home)
+    mkdirSync(join(home, 'logs'), { recursive: true })
+    const crashLog = join(home, 'logs', 'tui_gateway_crash.log')
+    writeFileSync(crashLog, 'x'.repeat(5 * 1024 * 1024 + 1))
+
+    recordParentLifecycle('gateway exit received')
+
+    const rotated = readFileSync(`${crashLog}.1`, 'utf8')
+    expect(rotated.length).toBe(5 * 1024 * 1024 + 1)
+    const fresh = readFileSync(crashLog, 'utf8')
+    expect(fresh).toContain('[tui-parent]')
+    expect(fresh).toContain('gateway exit received')
   })
 
   it('is a no-op under VITEST so tests stay hermetic', async () => {

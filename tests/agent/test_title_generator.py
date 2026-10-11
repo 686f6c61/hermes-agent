@@ -898,3 +898,114 @@ class TestModelSwitchMarkerNotTitleable:
         assert apply_instant_title(db, "sess-1", "南京市秦淮区 小时级天气预报") == (
             "南京市秦淮区 小时级天气预报"
         )
+
+
+class TestMachineNoticeOpeners:
+    """#136716: background-process, watch and async-delegation notices persist under
+    ``role="user"`` and open a follow-up turn. None of them may title the session or
+    count as a real user turn, and the fix must not swallow skill invocations, which
+    also open with ``[IMPORTANT: `` but carry the user's real request."""
+
+    def test_process_registry_notice_shapes_are_not_titleable(self):
+        """Every shape the real formatter can emit starts a notice turn, never a title."""
+        from tools.process_registry_notifications import format_process_notification
+
+        shapes = {
+            "completion-failed": {
+                "type": "completion", "session_id": "proc_abc123", "command": "pytest tests/ -q",
+                "exit_code": 7, "output": "3 failed"},
+            "completion-ok": {
+                "type": "completion", "session_id": "proc_abc123", "command": "make build",
+                "exit_code": 0, "output": "built"},
+            "watch-match": {
+                "type": "watch_match", "session_id": "proc_abc123", "command": "make build",
+                "pattern": "READY", "output": "build READY"},
+            "heartbeat": {
+                "type": "heartbeat", "session_id": "proc_abc123", "command": "tail -f app.log",
+                "seq": 3, "elapsed": 65.0, "interval": 60, "output": "line"},
+            "watch-disabled": {
+                "type": "watch_disabled",
+                "message": "Watch patterns disabled for process proc_abc123 — 8 patterns is the cap"},
+            "watch-resumed": {
+                "type": "watch_overflow_released",
+                "message": "Watch-pattern notifications resumed. 2 matches were held back"},
+            "watch-overflow": {
+                "type": "watch_overflow_tripped",
+                "message": "Watch-pattern overflow: >20 matches/min; further matches suppressed"},
+            "delegation-complete": {
+                "type": "async_delegation", "deleg_id": "deleg_1", "goal": "Summarize the repo",
+                "summary": "done"},
+            "delegation-batch": {
+                "type": "async_delegation", "deleg_id": "deleg_1", "is_batch": True,
+                "results": [{"task_index": 0, "status": "completed"}], "goals": ["a", "b"]},
+            "delegation-task-failed": {
+                "type": "async_delegation", "deleg_id": "deleg_1", "task_failure_notice": True,
+                "results": [{"task_index": 0, "error": "boom", "status": "failed"}],
+                "goals": ["a", "b"], "n_tasks": 2},
+        }
+        for name, evt in shapes.items():
+            text = format_process_notification(evt)
+            assert text, name
+            assert is_titleable_user_message(text) is False, name
+
+    def test_gateway_formatter_watch_match_is_not_titleable(self):
+        """The gateway's own watch formatter (gateway/run.py) emits the same opener family."""
+        from gateway.run import _format_gateway_process_notification
+
+        text = _format_gateway_process_notification({
+            "type": "watch_match", "session_id": "proc_abc123", "command": "make build",
+            "pattern": "READY", "output": "build READY", "suppressed": 2})
+        assert text
+        assert is_titleable_user_message(text) is False
+
+    def test_batched_completions_header_is_not_titleable(self):
+        """The counted batch header varies with the count: a prefix cannot match it."""
+        from tools.process_registry_notifications import ProcessNotificationBatch, format_process_notification
+
+        batch = ProcessNotificationBatch(notifications=(
+            ({"session_id": "p1"}, format_process_notification({"session_id": "p1", "exit_code": 0})),
+            ({"session_id": "p2"}, format_process_notification({"session_id": "p2", "exit_code": 1})),
+        ))
+        registry = MagicMock()
+        registry.is_completion_consumed.return_value = False
+        rendered = batch.render(registry=registry)
+        assert rendered.startswith("[IMPORTANT: 2 background processes completed.")
+        assert is_titleable_user_message(rendered) is False
+        # Gateway variant of the same counted header (gateway/run_notifications.py).
+        assert is_titleable_user_message(
+            "[IMPORTANT: 2 background processes completed for this session.\n\n[IMPORTANT: "
+            "Background process p1 completed (exit code 0).]\nOutput:\nok]") is False
+
+    def test_skill_invocation_turn_stays_titleable(self):
+        """Skill invocations open with ``[IMPORTANT: `` too, but they carry the user's real
+        request and describe_skill_invocation recovers a good title — no bare prefix here."""
+        from agent.skill_commands import describe_skill_invocation
+
+        single = (
+            '[IMPORTANT: The user has invoked the "review" skill, indicating they want '
+            "you to follow its instructions. The full skill content is loaded below.]\n"
+            "\n"
+            "Update the changelog and bump the version")
+        assert is_titleable_user_message(single) is True
+        assert describe_skill_invocation(single)
+
+        bundle = (
+            "[IMPORTANT: The user has invoked the 2-skill bundle, "
+            "loading 2 skills together. Treat every skill below "
+            "as active guidance for this turn.]\n"
+            "\n"
+            "Skills loaded: review, changelog\n"
+            "\n"
+            "User instruction: update the changelog and bump the version")
+        assert is_titleable_user_message(bundle) is True
+
+    def test_notice_turns_do_not_count_as_real_user_turns(self):
+        """The maybe_auto_title turn thresholds must not count notice turns either."""
+        from agent.title_generator import _is_real_user_turn
+        from tools.process_registry_notifications import format_process_notification
+
+        notice = format_process_notification({
+            "type": "completion", "session_id": "proc_abc123", "command": "pytest tests/ -q",
+            "exit_code": 7, "output": "3 failed"})
+        assert _is_real_user_turn({"role": "user", "content": notice}) is False
+        assert _is_real_user_turn({"role": "user", "content": "Did the tests pass?"}) is True

@@ -141,7 +141,22 @@ _MACHINE_PREFIXES = (
     # message titled the session "[System: The active model for this chat has…" instead of the user's actual
     # question.
     "[System: The active model for this chat has changed to ",
+    # Background-process / watch / async-delegation notices (tools/process_registry_notifications.py
+    # and gateway/run.py's watch formatter) persist under role="user" and open a follow-up turn: a
+    # session was titled after "[IMPORTANT: Background process proc_… exited …]" and the notice counted
+    # as a real user turn (#136716). Skill invocations also open with "[IMPORTANT: " but carry the
+    # user's real request and recover a good title (describe_skill_invocation) — so NO bare
+    # "[IMPORTANT: " entry here.
+    "[IMPORTANT: Background process ",  # completion + watch match, both formatters
+    "[Background process ",             # heartbeat receipt
+    "[ASYNC DELEGATION ",               # complete / batch complete / task failed
+    "[IMPORTANT: Watch patterns disabled ",  # watch_disabled diagnostic
+    "[IMPORTANT: Watch-pattern ",       # resumed / overflow diagnostics
 )
+
+# "[IMPORTANT: 3 background processes completed. …]" (ProcessNotificationBatch.render and the gateway
+# batch header): the opener is a count, so no static prefix can match — regex instead (#136716).
+_BATCH_PROCESS_NOTICE_RE = re.compile(r"^\[IMPORTANT: \d+ background processes completed\b")
 
 
 def _title_config() -> dict:
@@ -333,6 +348,7 @@ def build_title_input(user_message: str, title_preview: str | None = None) -> st
 def is_titleable_user_message(user_message: str) -> bool:
     """False for machine-authored openers and turns that reduce to nothing once scaffolding is stripped."""
     return (isinstance(user_message, str) and bool(user_message.strip()) and not user_message.lstrip().startswith(_MACHINE_PREFIXES)
+            and not _BATCH_PROCESS_NOTICE_RE.match(user_message.lstrip())
             and bool(_summarize_user_message(user_message).strip())
             # An attachment-only opener (manual attach, no paste preview) is a
             # file drop, not a request: deriving its "title" from the message

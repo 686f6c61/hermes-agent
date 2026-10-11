@@ -174,8 +174,35 @@ def _probe_anthropic() -> ProbeResult:
     return _row(name, *{200: ("ok",), 401: ("fail", "(invalid API key)")}.get(r.status_code, ("warn", "(couldn't verify)")))
 
 
+def _key_source(env_vars) -> tuple:
+    """First non-empty variable of a provider's key chain, plus the variable that supplied it.
+
+    The chain may reach into a sibling profile's variable (``alibaba-token-plan-cn`` falls back to
+    ``ALIBABA_TOKEN_PLAN_API_KEY``), so callers need to know *which* variable answered, not just the value.
+    """
+    for ev in env_vars:
+        key = os.getenv(ev, "")
+        if key:
+            return ev, key
+    return None, ""
+
+
+def _key_rejected(pname, detail, own_var, src, label) -> ProbeResult:
+    """A rejected key: name the variable that supplied it, and keep a borrowed key a warning.
+
+    A fallback key belongs to another region's profile, so its rejection on this profile's endpoint says
+    nothing about the region the user never configured. It used to be a permanent ✗ pointing at
+    ``env_vars[0]``, a variable that may not be set anywhere (#136791).
+    """
+    if src != own_var:
+        return _row(pname, "warn", f"({detail}; key from {src})",
+                    [f"The key from {src} is not valid on {pname}'s endpoint; set {own_var} in .env if you use this region"],
+                    label=label)
+    return _row(pname, "fail", f"({detail})", [f"Check {own_var} in .env"], label=label)
+
+
 def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_health_check) -> ProbeResult:
-    key = next((k for k in (os.getenv(ev, "") for ev in env_vars) if k), "")
+    src, key = _key_source(env_vars)
     if not key:
         return _skip(pname)
     label = pname.ljust(20)
@@ -190,7 +217,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
             if r.status_code == 400:  # Anthropic-shaped 400 still proves route + auth (#66756)
                 return _row(pname, "ok", label=label)
             if r.status_code == 403:
-                return _row(pname, "fail", "(access denied)", [f"Check {env_vars[0]} in .env"], label=label)
+                return _key_rejected(pname, "access denied", env_vars[0], src, label)
         else:
             r = httpx.get(url, headers=headers, timeout=10)
         if pname == "Alibaba/DashScope" and not base and r.status_code == 401:
@@ -198,7 +225,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
     except Exception as e:
         return _row(pname, "warn", f"({e})", label=label)
     if r.status_code == 401:
-        return _row(pname, "fail", "(invalid API key)", [f"Check {env_vars[0]} in .env"], label=label)
+        return _key_rejected(pname, "invalid API key", env_vars[0], src, label)
     return _row(pname, "ok", label=label) if r.status_code == 200 else _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
 
 

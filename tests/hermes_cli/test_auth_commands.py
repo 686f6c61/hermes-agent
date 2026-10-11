@@ -1074,3 +1074,91 @@ def test_openrouter_loopback_callback_binds_nonce_path_and_rejects_forged_redire
     assert seen["forged_status"] == 404
     assert seen["genuine_status"] == 200
     assert code == "good-code"
+
+
+def test_auth_add_api_key_eof_takes_the_designed_no_answer_abort(tmp_path, monkeypatch):
+    """Exhausted stdin on `hermes auth add <p> --type api-key` (closed pipe or a heredoc shorter
+    than the prompts) must take the designed `No API key provided.` abort, not an EOFError
+    traceback out of getpass (#136736)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+
+    from hermes_cli import auth_commands
+    from hermes_cli.auth_commands import auth_add_command
+
+    def _eof(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr(auth_commands, "masked_secret_prompt", _eof)
+
+    class _Args:
+        provider = "openrouter"
+        auth_type = "api-key"
+        api_key = None
+        label = None
+
+    with pytest.raises(SystemExit) as excinfo:
+        auth_add_command(_Args())
+
+    assert "No API key provided." in str(excinfo.value)
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert "openrouter" not in payload.get("credential_pool", {})
+
+
+def test_auth_add_api_key_termios_error_takes_the_no_answer_abort(tmp_path, monkeypatch):
+    """When fd 0 reports a tty but rejects raw mode, getpass lets termios.error escape; the add
+    flow must map it to the no-answer abort exactly like an EOF (#136736)."""
+    import termios
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+
+    from hermes_cli import auth_commands
+    from hermes_cli.auth_commands import auth_add_command
+
+    def _termios_fail(_prompt):
+        raise termios.error(19, "Operation not supported by device")
+
+    monkeypatch.setattr(auth_commands, "masked_secret_prompt", _termios_fail)
+
+    class _Args:
+        provider = "openrouter"
+        auth_type = "api-key"
+        api_key = None
+        label = None
+
+    with pytest.raises(SystemExit) as excinfo:
+        auth_add_command(_Args())
+
+    assert "No API key provided." in str(excinfo.value)
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert "openrouter" not in payload.get("credential_pool", {})
+
+
+def test_auth_add_api_key_label_prompt_eof_falls_back_to_default_label(tmp_path, monkeypatch):
+    """Ctrl-D at the optional label prompt on a real tty must keep the default label instead of
+    letting line_input's EOFError crash the add flow (#136736)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+
+    from hermes_cli import auth_commands
+    from hermes_cli.auth_commands import auth_add_command
+
+    monkeypatch.setattr(auth_commands, "masked_secret_prompt", lambda _prompt: "sk-or-v1-pasted")
+    monkeypatch.setattr(auth_commands.sys, "stdin", type("Stdin", (), {"isatty": lambda self: True})())
+
+    def _eof(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr(auth_commands, "line_input", _eof)
+
+    class _Args:
+        provider = "openrouter"
+        auth_type = "api-key"
+        api_key = None
+        label = None
+
+    auth_add_command(_Args())
+
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert payload["credential_pool"]["openrouter"][0]["label"] == "api-key-1"

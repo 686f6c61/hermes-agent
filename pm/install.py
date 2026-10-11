@@ -153,12 +153,16 @@ def uv_launcher(name: str) -> Path | None:
 
 def _identity(lockfile: Lockfile, name: str, target: str):
     """The identity the lock currently pins for `name` on `target`:
-    (target, tuple(artifact sha256s)) — or None when the lock pins no
-    artifacts (nothing digest-bound to compare)."""
+    (target, tuple(artifact sha256s)) — or None when the lock pins nothing
+    digest-bound to compare. Artifacts without a sha256 (container
+    references, for example) bind nothing and are skipped."""
     artifacts = lockfile.artifacts(name, target)
-    if not artifacts:
+    digests = tuple(
+        a["sha256"] for a in artifacts if isinstance(a, dict) and "sha256" in a
+    )
+    if not artifacts or not digests:
         return None
-    return (target, tuple(a["sha256"] for a in artifacts))
+    return (target, digests)
 
 
 def lazy_installs_allowed() -> bool:

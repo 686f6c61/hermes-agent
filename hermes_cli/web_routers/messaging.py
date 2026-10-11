@@ -303,6 +303,7 @@ def _platform_payloads(scoped_dir: Optional[Path], entries) -> list[dict[str, An
     # so the two surfaces cannot disagree. Unscoped, the profile is the process's own home (a pooled
     # ``hermes --profile X serve``).
     own_home = scoped_dir if scoped_dir is not None else get_process_hermes_home()
+    served_name = profile_name_for_home(own_home) or "default"
     if (
         runtime is None
         or get_runtime_status_running_pid(runtime, expected_home=own_home) is None
@@ -311,8 +312,19 @@ def _platform_payloads(scoped_dir: Optional[Path], entries) -> list[dict[str, An
         if served is not None:
             # Fold on the profile NAME, not ``own_home.name``: the default root's basename is
             # ``.hermes`` (or any custom HERMES_HOME), so its flat keys never matched (#123088).
-            served_name = profile_name_for_home(own_home) or "default"
             runtime = {**served[1], "platforms": profile_platforms_from_multiplexer(served[1], served_name)}
+    else:
+        # The multiplexer's launch profile owns this record: its own live PID won the rung above,
+        # but its adapters are keyed ``<profile>:<platform>`` and a flat key left over from the
+        # profile's standalone days is never pruned — it even survives hand-deletion, because the
+        # live gateway rewrites the whole snapshot (#136734). When the record is this profile's
+        # multiplexer (``served_profiles`` proves it), project the same re-key the served profiles
+        # get; for the default profile the projection keeps its flat keys, which ARE its adapters.
+        served_names = runtime.get("served_profiles")
+        if isinstance(served_names, list) and served_name in {str(n) for n in served_names}:
+            rekeyed = profile_platforms_from_multiplexer(runtime, served_name)
+            if rekeyed:
+                runtime = {**runtime, "platforms": rekeyed}
     return [_messaging_platform_payload(entry, env_on_disk, runtime, scoped=scoped_dir is not None, profile_home=scoped_dir)
             for entry in entries]
 

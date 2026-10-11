@@ -856,10 +856,21 @@ def _absorb_turn_result(
                 _raw = (
                     f"{_prev_model} --provider {_prev_provider}" if _prev_provider else _prev_model)
                 try:
-                    _apply_model_switch(
-                        sid, session, _raw, confirm_expensive_model=False,
+                    # The restore goes back to the model the user was already on — not a new
+                    # expensive pick — and there is no UI here to consume confirm_required: with
+                    # the guard active, a large-context session silently dropped the restore and
+                    # stayed pinned to the MoA preset (#136710). Same assumption as the
+                    # config-adoption path.
+                    _restored = _apply_model_switch(
+                        sid, session, _raw, confirm_expensive_model=True,
                         pin_session_override=bool(_prev_override),
                         persist_override=False, count_switch=False)  # session-internal restore, never config.yaml
+                    if isinstance(_restored, dict) and _restored.get("confirm_required"):
+                        # Same contract as the dropped pending picks: an unattended drop must
+                        # leave a server-log line, never vanish silently.
+                        logger.warning(
+                            "MoA one-shot model restore dropped: confirmation required with no UI "
+                            "to ask (%s)", _restored.get("confirm_message"))
                 except Exception as _moa_restore_exc:
                     logger.warning("MoA one-shot model restore failed: %s", _moa_restore_exc)
         elif _restore is None:

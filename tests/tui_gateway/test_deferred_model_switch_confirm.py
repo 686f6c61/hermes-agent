@@ -273,3 +273,43 @@ class TestDroppedQueuedPickIsNotATurnError:
 
         assert "error" not in kinds
         assert "notification.show" in kinds
+
+
+class TestMoaOneShotRestoreIsUnattended:
+    """(#136710) The /moa one-shot restore is an internal switch back to the model the user was
+    already on. The expensive-selection guard saw the live session's large context, returned
+    confirm_required, and the unattended restore dropped it on the floor — no commit, no error,
+    and the session stayed pinned to the MoA preset for every later turn. There is no UI on this
+    path to consume a confirm, so the restore skips the guard like the config-adoption path."""
+
+    def test_restore_skips_the_expensive_model_guard(self, monkeypatch):
+        session = {"session_key": "s1",
+                   "moa_one_shot_restore": {"override": None, "model": "m-before", "provider": "p-before"}}
+        captured = {}
+
+        def _fake_apply(sid, sess, raw, **kwargs):
+            captured["raw"] = raw
+            captured["kwargs"] = kwargs
+            return {"confirm_required": False, "value": "m-before"}
+
+        monkeypatch.setattr(server, "_apply_model_switch", _fake_apply)
+
+        server._absorb_turn_result(
+            "sid", session, types.SimpleNamespace(result=None, agent=None), None, None, None)
+
+        assert captured["raw"] == "m-before --provider p-before"
+        assert captured["kwargs"]["confirm_expensive_model"] is True
+        assert captured["kwargs"]["count_switch"] is False
+
+    def test_dropped_confirm_leaves_a_server_log_line(self, monkeypatch, caplog):
+        session = {"session_key": "s1",
+                   "moa_one_shot_restore": {"override": None, "model": "m-before", "provider": ""}}
+        monkeypatch.setattr(
+            server, "_apply_model_switch",
+            lambda *_a, **_kw: {"confirm_required": True, "confirm_message": "guarded"})
+
+        with caplog.at_level(logging.WARNING):
+            server._absorb_turn_result(
+                "sid", session, types.SimpleNamespace(result=None, agent=None), None, None, None)
+
+        assert "restore dropped" in caplog.text and "guarded" in caplog.text

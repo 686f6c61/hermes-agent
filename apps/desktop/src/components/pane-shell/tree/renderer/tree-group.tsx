@@ -563,7 +563,12 @@ export function TreeGroup({
           bounds, strip refs, focus ownership and split geometry as the body. */}
       {(headerVisible || (topEdge && !verticalCollapse)) && (
         <div
-          className="relative flex min-w-0 shrink-0 bg-(--ui-sidebar-surface-background)"
+          // RTL (#136275): the row's spacers reserve PHYSICAL room for the window
+          // controls (--panel-titlebar-left) and the right-side titlebar tools.
+          // A plain `flex` row mirrors under dir="rtl", which lands the left
+          // spacer and the drag region on the tools and swallows their clicks;
+          // reverse it back so the physical order survives RTL.
+          className="relative flex min-w-0 shrink-0 bg-(--ui-sidebar-surface-background) rtl:flex-row-reverse"
           data-panel-header=""
           style={topEdge ? { height: TITLEBAR_HEIGHT + (tabsBelowControls && headerVisible ? 28 : 0) } : undefined}
         >

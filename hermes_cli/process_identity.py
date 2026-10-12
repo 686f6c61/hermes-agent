@@ -195,7 +195,11 @@ def _pid_alive_matches(pid: int, create_time: Optional[float], *, strict: bool =
         proc = psutil.Process(int(pid))
         if strict:
             return (create_time is not None and proc.create_time() == create_time
-                    and proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE)
+                    and proc.is_running()
+                    # psutil's Windows ``status()`` reports STOPPED or RUNNING and never the zombie
+                    # state, so the comparison is a no-op there; it costs ~36 ms per process, once per
+                    # ledger entry on every ``/api/status`` (#137045).
+                    and (os.name == "nt" or proc.status() != psutil.STATUS_ZOMBIE))
         # A zombie keeps its create_time until its parent reaps it, but it is already dead: the
         # dashboard stop check (``gateway.status._pid_exists``) books it stopped, so the ledger must
         # not report it as a live pre-update survivor. Windows has no zombies (and status() is slow there).

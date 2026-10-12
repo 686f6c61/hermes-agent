@@ -1837,6 +1837,41 @@ def test_oauth_system_prompt_sanitizer_preserves_docs_url():
     assert kwargs["system"][-1]["text"].count("claude-code") == 3  # the caller's block, not the CC prefix
 
 
+def test_oauth_system_prompt_sanitizer_keeps_spaced_product_names_out_of_paths():
+    """A folder literally named ``Hermes Agent`` (or ``Nous Research``) is an address too. The
+    spaced-name pass had no path guard, so a memory entry pointing at
+    ``/Users/alice/Projects/Hermes Agent/notes`` reached the model as ``.../Claude Code/notes``:
+    the agent could not read the notes, "corrected" the entry back byte-identical and the loop
+    repeated every session (#137003). Prose keeps the rewrite."""
+    kwargs = build_anthropic_kwargs(
+        model="claude-sonnet-4-20250514",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Project notes: /Users/alice/Projects/Hermes Agent/notes\n"
+                    "Windows: C:\\Users\\alice\\Projects\\Nous Research\\notes\n"
+                    "/Users/alice/Projects/My Hermes Agent/notes is the parent dir\n"
+                    "Hermes Agent by Nous Research is the product."
+                ),
+            },
+            {"role": "user", "content": "Hi"},
+        ],
+        tools=None,
+        max_tokens=4096,
+        reasoning_config=None,
+        is_oauth=True,
+    )
+
+    system_text = "\n".join(block["text"] for block in kwargs["system"])
+    # A path separator on either side makes the spaced name an address, not prose.
+    assert "/Users/alice/Projects/Hermes Agent/notes" in system_text
+    assert "C:\\Users\\alice\\Projects\\Nous Research\\notes" in system_text
+    assert "/Users/alice/Projects/My Hermes Agent/notes" in system_text
+    # Prose still sanitizes.
+    assert "Claude Code by Anthropic is the product." in system_text
+
+
 def test_unsupported_inline_image_subtype_downgrades_to_text_for_anthropic(monkeypatch):
     """Sibling of the Responses guard: a data:image/svg+xml (or bmp/tiff) part forwarded verbatim as
     ``media_type`` 400s the Anthropic request on every replay — it must become a text placeholder

@@ -568,8 +568,15 @@ def _oauth_wire_namer(anthropic_tools: list[dict[str, Any]]):
     return to_wire
 
 
+# The spaced product names are rewritten only as standalone prose. Joined to a path separator they
+# are an address the model dereferences (``/Users/alice/Projects/Hermes Agent/notes``,
+# ``C:\Users\alice\Projects\Nous Research\notes``) and the rewritten form points at a directory
+# that does not exist: the agent cannot read the notes, rewrites the memory entry byte-identical
+# and the loop repeats next session (#137003). Prose keeps the rewrite, which is what dodges the
+# server-side filters. Mirrors the slug guard below.
 _OAUTH_SYSTEM_REPLACEMENTS = (
-    ("Hermes Agent", "Claude Code"), ("Hermes agent", "Claude Code"), ("Nous Research", "Anthropic"),
+    (re.compile(r"(?<![/\\])Hermes [Aa]gent(?![/\\])"), "Claude Code"),
+    (re.compile(r"(?<![/\\])Nous Research(?![/\\])"), "Anthropic"),
 )
 # The slug is rewritten only as a standalone prose word. Joined to a host, path, repo, mailbox
 # or quoted as an identifier (``hermes-agent.nousresearch.com``, ``~/.hermes/hermes-agent/venv``,
@@ -591,8 +598,8 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     for block in system:
         if isinstance(block, dict) and block.get("type") == "text":
             text = block.get("text", "")
-            for old, new in _OAUTH_SYSTEM_REPLACEMENTS:
-                text = text.replace(old, new)
+            for pattern, new in _OAUTH_SYSTEM_REPLACEMENTS:
+                text = pattern.sub(new, text)
             text = _OAUTH_SLUG_PATTERN.sub("claude-code", text)
             block["text"] = _apply_oauth_prose_aliases(text)
     for tool in anthropic_tools or []:

@@ -39,7 +39,16 @@ class GatewayNotificationOwnershipMixin:
             if not target_session_id or target_session_id == pinned_session_id:
                 return "retry", None  # Rotation may not have published its continuation yet.
             tip_row = await session_db.get_session(target_session_id)
-            if tip_row is None or tip_row.get("ended_at"):
+            if tip_row is None:
+                return "retry", None
+            if tip_row.get("ended_at"):
+                # The continuation is closed. While a rotation is still publishing its next session the
+                # offer stays retryable, but a continuation the USER closed (/new, session switch, exit)
+                # will never accept it: classifying that as retry re-offers the same completion on every
+                # cycle, since the defer settlement refunds the attempt (#137046).
+                from gateway.run import _USER_BOUNDARY_END_REASONS
+                if str(tip_row.get("end_reason") or "") in _USER_BOUNDARY_END_REASONS:
+                    return "terminal", None
                 return "retry", None
             if session_entry is None or session_entry.session_id in {pinned_session_id, target_session_id}:
                 return "deliver", target_session_id

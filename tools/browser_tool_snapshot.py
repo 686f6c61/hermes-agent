@@ -108,18 +108,31 @@ def _truncate_snapshot(snapshot_text: str, max_chars: Optional[int] = None) -> s
     return '\n'.join(result)
 
 
-def _redact_browser_output(value: Any) -> Any:
+#: Nesting budget for the redaction walkers. The nesting depth of a snapshot / eval result is
+#: page-controlled, so past this the subtree is replaced instead of walked: an unhandled
+#: ``RecursionError`` here took the whole tool result down, and dropping is the fail-closed
+#: choice for a pass whose only job is to keep secrets out of the model boundary.
+_REDACT_MAX_DEPTH = 64
+_REDACT_DEPTH_MARKER = "[redacted: nested value beyond the depth budget]"
+
+
+def _redact_browser_output(value: Any, _depth: int = 0) -> Any:
     """Force-redact secrets in browser-originated data (snapshots, console, eval
     results can carry page-rendered keys/cookies/tokens). Tool output is a model
     boundary, so this applies even when global log redaction is disabled."""
     from agent.redact import redact_sensitive_text
 
+    if _depth > _REDACT_MAX_DEPTH:
+        return _REDACT_DEPTH_MARKER
     if isinstance(value, str):
         return redact_sensitive_text(value, force=True)
     if isinstance(value, list):
-        return [_redact_browser_output(item) for item in value]
+        return [_redact_browser_output(item, _depth + 1) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_browser_output(item) for item in value)
+        return tuple(_redact_browser_output(item, _depth + 1) for item in value)
     if isinstance(value, dict):
-        return {_redact_browser_output(key): _redact_browser_output(item) for key, item in value.items()}
+        return {
+            _redact_browser_output(key, _depth + 1): _redact_browser_output(item, _depth + 1)
+            for key, item in value.items()
+        }
     return value

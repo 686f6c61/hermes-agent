@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 from tools.registry import registry, tool_error
 from tools.browser_extension_router import routed_browser_handler
+from tools.browser_tool_snapshot import _REDACT_DEPTH_MARKER, _REDACT_MAX_DEPTH
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,8 @@ _CDP_FLAGGED_BINARY_PATHS: dict[str, tuple] = {
 }
 
 
-def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: tuple = ()) -> Any:
+def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: tuple = (),
+                       _depth: int = 0) -> Any:
     """Redact browser-originated CDP result text; opaque bytes stay byte-identical.
 
     Exemptions come ONLY from the calling method's spec as exact result paths. Path
@@ -53,13 +55,19 @@ def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: t
     solely as a sibling on the trusted carrier object — never as ambient trust a
     ``Runtime.evaluate`` by-value object could spoof.
 
+    Nesting depth is page-controlled, so past ``_REDACT_MAX_DEPTH`` the subtree is replaced
+    instead of walked: an unbounded walk raised ``RecursionError`` out of the tool result,
+    and dropping is the fail-closed choice for a redaction pass.
+
     See #94138, #94142.
     """
     from agent.redact import redact_sensitive_text
+    if _depth > _REDACT_MAX_DEPTH:
+        return _REDACT_DEPTH_MARKER
     if isinstance(value, str):
         return redact_sensitive_text(value, force=True)
     if isinstance(value, (list, tuple)):
-        return type(value)(_redact_cdp_output(item) for item in value)
+        return type(value)(_redact_cdp_output(item, _depth=_depth + 1) for item in value)
     if not isinstance(value, dict):
         return value
     base64_flagged = value.get("base64Encoded") is True
@@ -72,7 +80,8 @@ def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: t
         opaque = leaf(always_paths, key) or (leaf(flagged_paths, key) and base64_flagged)
         out_key = redact_sensitive_text(key, force=True) if isinstance(key, str) else key  # by-value objects can carry a secret as a KEY
         redacted[out_key] = item if isinstance(item, str) and opaque else _redact_cdp_output(
-            item, always_paths=descend(always_paths, key), flagged_paths=descend(flagged_paths, key))
+            item, always_paths=descend(always_paths, key), flagged_paths=descend(flagged_paths, key),
+            _depth=_depth + 1)
     return redacted
 
 

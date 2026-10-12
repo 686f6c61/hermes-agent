@@ -188,6 +188,51 @@ class TestBrowserSnapshotRedaction:
 
 
 
+class TestBrowserRedactionDepthBudget:
+    """A page-controlled deeply nested value must not exhaust the interpreter stack.
+
+    Both redaction walkers apply to untrusted browser/page data, so a crash there is a
+    denial of the tool's output; past the depth budget the subtree is dropped, never passed
+    through unredacted.
+    """
+
+    def test_browser_output_walker_survives_deep_page_values(self):
+        from tools.browser_tool_snapshot import _redact_browser_output
+
+        secret = "sk-" + "FAKESECRETVALUE1234567890ABCDEF"
+        value: object = secret
+        for _ in range(3000):
+            value = {"nested": value}
+
+        assert secret not in json.dumps(_redact_browser_output(value))
+
+    def test_browser_output_walker_still_redacts_shallow_values(self):
+        from tools.browser_tool_snapshot import _redact_browser_output
+
+        secret = "sk-" + "FAKESECRETVALUE1234567890ABCDEF"
+        redacted = _redact_browser_output({"a": [{"b": secret}]})
+
+        assert secret not in json.dumps(redacted)
+
+    def test_cdp_output_walker_survives_deep_page_values(self):
+        from tools.browser_cdp_tool import _redact_cdp_output
+
+        secret = "sk-" + "FAKESECRETVALUE1234567890ABCDEF"
+        value: object = secret
+        for _ in range(3000):
+            value = {"nested": value}
+
+        assert secret not in json.dumps(_redact_cdp_output(value))
+
+    def test_cdp_output_walker_still_redacts_shallow_values(self):
+        from tools.browser_cdp_tool import _redact_cdp_output
+
+        secret = "sk-" + "FAKESECRETVALUE1234567890ABCDEF"
+        redacted = _redact_cdp_output({"result": {"value": secret}})
+
+        assert secret not in json.dumps(redacted)
+
+
 class TestBrowserSupervisorRedaction:
     """Verify supervisor dialog snapshots redact page-originated secrets."""
 

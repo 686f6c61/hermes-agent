@@ -463,14 +463,32 @@ def _extract_member_atomically(
         raise
 
 
-def _count_session_rows(path: Path) -> Optional[tuple[int, int]]:
-    """Return ``(sessions, messages)`` stored in the session database *path*.
+#: Durable stores an import can silently shrink, in classification order: the
+#: row tables that identify the store, then the singular/plural nouns of the
+#: rows it holds.  The session store comes first because ``state.db`` is the
+#: common case.  A kanban board answers neither ``sessions`` nor ``messages``,
+#: so counting only the session store left the board's own replacement
+#: unreported (#137157).
+_DB_STORES: tuple[tuple[tuple[str, str], str, str], ...] = (
+    (("sessions", "messages"), "session", "message"),
+    (("tasks", "task_events"), "task", "event"),
+)
 
-    Read-only and best effort.  ``None`` means "unknown" — a missing file, a
-    database that is not a Hermes session store, or one that cannot be read.
-    Callers must never read ``None`` as "zero rows": acting on an unreadable
-    database would mask the very loss this count exists to surface.  Same
-    contract as :func:`_count_cron_jobs`.
+#: One row of the import's shrink report: the archive member plus the store
+#: counts on each side, each side ``((rows, writes), singular, plural)``.
+_ShrunkStore = tuple[str, tuple[tuple[int, int], str, str], tuple[tuple[int, int], str, str]]
+
+
+def _count_store_rows(path: Path) -> Optional[tuple[tuple[int, int], str, str]]:
+    """Classify the durable store in *path* and count its rows.
+
+    Returns ``((rows, writes), singular, plural)``: ``(sessions, messages)``
+    for a session store, ``(tasks, task_events)`` for a kanban board.  Read-only
+    and best effort.  ``None`` means "unknown" — a missing file, a database
+    that is neither store, or one that cannot be read.  Callers must never read
+    ``None`` as "zero rows": acting on an unreadable database would mask the
+    very loss this count exists to surface.  Same contract as
+    :func:`_count_cron_jobs`.
     """
     if not path.is_file():
         return None
@@ -479,13 +497,37 @@ def _count_session_rows(path: Path) -> Optional[tuple[int, int]]:
     except sqlite3.Error:
         return None
     try:
-        sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        return int(sessions), int(messages)
-    except (sqlite3.Error, TypeError, ValueError):
+        for tables, singular, plural in _DB_STORES:
+            rows_table, writes_table = tables
+            try:
+                rows = (
+                    int(conn.execute(f"SELECT COUNT(*) FROM {rows_table}").fetchone()[0]),
+                    int(conn.execute(f"SELECT COUNT(*) FROM {writes_table}").fetchone()[0]),
+                )
+            except (sqlite3.Error, TypeError, ValueError):
+                continue
+            return rows, singular, plural
         return None
     finally:
         conn.close()
+
+
+def _report_shrunk_stores(rows: list[_ShrunkStore], hint: str) -> None:
+    """Print the class warning for every store the import replaced with fewer rows.
+
+    One line class for both stores.  The replacement is reported, never refused:
+    failing closed would strand the operator who legitimately needs the restore,
+    and it is the silence that loses the work.
+    """
+    print("\n  ⚠ Data replaced by older backup contents:")
+    for rel, before, after in rows:
+        (before_rows, before_writes), singular, plural = before
+        after_rows, after_writes = after[0]
+        print(
+            f"    {rel}: {before_rows} {singular}(s) / {before_writes} {plural}(s)"
+            f" -> {after_rows} / {after_writes}"
+        )
+    print("    Anything recorded after the backup was taken is not in it. " f"{hint}")
 
 
 def _import_db_member(

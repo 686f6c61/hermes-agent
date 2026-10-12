@@ -31,13 +31,15 @@ from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, profile_root_entry
 from hermes_cli.sizefmt import format_bytes as _format_size
 
 from hermes_cli.backup_restore import (
-    _count_session_rows,
+    _count_store_rows,
     _default_new_file_mode,
     _detect_prefix,
     _extract_member_atomically,
     _import_db_member,
+    _report_shrunk_stores,
     _restore_auth_json,
     _safe_restore_db,
+    _ShrunkStore,
     _validate_backup_zip,
 )
 
@@ -799,10 +801,10 @@ def run_import(args) -> Optional[int]:
         restored = 0
         restored_external = 0
         skipped_runtime: list[str] = []
-        # (rel, live_counts, imported_counts) for every session database the
-        # import replaced with one holding fewer rows. A restore is allowed to
-        # do that — it just must not do it silently (issue #100960).
-        db_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
+        # (rel, live, imported) for every durable store the import replaced with
+        # one holding fewer rows — session store or board. A restore is allowed
+        # to do that; it just must not do it silently (#100960, #137157).
+        db_shrunk: list[_ShrunkStore] = []
         home_dir = Path.home().resolve()
         # Resolved once: every member is published via a temp file, and mkstemp
         # would otherwise create newly restored files as 0600.
@@ -896,10 +898,10 @@ def run_import(args) -> Optional[int]:
                 if target.suffix == ".db":
                     # Count before the write: afterwards the rows this import
                     # drops are gone and there is nothing left to compare.
-                    before = _count_session_rows(target)
+                    before = _count_store_rows(target)
                     _import_db_member(zf, member, target, new_file_mode)
-                    after = _count_session_rows(target)
-                    if before and after and after[1] < before[1]:
+                    after = _count_store_rows(target)
+                    if before and after and after[0][1] < before[0][1]:
                         db_shrunk.append((rel, before, after))
                 else:
                     _extract_member_atomically(zf, member, target, new_file_mode)
@@ -935,17 +937,9 @@ def run_import(args) -> Optional[int]:
         if db_shrunk:
             # The backup predates work that is now overwritten. Say so: the
             # reported incident was twelve sessions disappearing with nothing
-            # logged anywhere (issue #100960).
-            print("\n  ⚠ Session data replaced by older backup contents:")
-            for rel, before, after in db_shrunk:
-                print(
-                    f"    {rel}: {before[0]} session(s) / {before[1]} message(s)"
-                    f" -> {after[0]} / {after[1]}"
-                )
-            print(
-                "    Anything recorded after the backup was taken is not in it. "
-                f"{_snapshot_recovery_hint()}"
-            )
+            # logged anywhere (issue #100960), and a board imported just as
+            # silently its own committed cards (#137157).
+            _report_shrunk_stores(db_shrunk, _snapshot_recovery_hint())
 
         if skipped_runtime:
             print(

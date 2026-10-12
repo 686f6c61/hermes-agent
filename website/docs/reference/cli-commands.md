@@ -1199,11 +1199,12 @@ Stop the gateway before importing to avoid conflicts with running processes.
 
 If the live database cannot be replaced safely — the page copy failed *and* another process still holds the file open — the import leaves that database untouched and lists it under `Warnings (N files skipped)`. Stop the holding processes and re-run.
 
-Importing an older backup over newer work is still allowed, but it is no longer silent. When the imported `state.db` holds fewer messages than the one it replaced, the summary reports it:
+Importing an older backup over newer work is still allowed, but it is no longer silent. When the imported database holds fewer rows than the one it replaced, the summary reports it — for the session store (`state.db`, fewer messages) and for a kanban board (`kanban.db`, fewer tasks/events) alike:
 
 ```
-  ⚠ Session data replaced by older backup contents:
+  ⚠ Data replaced by older backup contents:
     state.db: 12 session(s) / 8912 message(s) -> 3 / 24
+    kanban.db: 373 task(s) / 10022 event(s) -> 351 / 9405
     Anything recorded after the backup was taken is not in it.
     Recover from a newer backup or snapshot: hermes snapshot list
 ```

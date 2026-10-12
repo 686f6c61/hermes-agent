@@ -5,6 +5,7 @@ instead of default browser tools
 """
 
 import contextlib
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -29,6 +30,9 @@ BACKEND_DISABLED = "off"
 
 # Cloud daemon names become the BU_NAME env var
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# BU_NAME of the hybrid local sidecar daemon, and the length cap its identity must fit in.
+_SIDECAR_DAEMON_PREFIX = "_local_"
+_SIDECAR_DAEMON_NAME_MAX = 64
 
 # Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
@@ -366,8 +370,17 @@ def _backend_cache_key(task_id: Optional[str], session_name: str = "", sidecar: 
 def _sidecar_daemon_name(name: str) -> str:
     """BU_NAME of the harness daemon serving the hybrid local sidecar. The daemon reads BU_CDP_* once at
     spawn and outlives the call, so sharing the cloud route's daemon would relay a private URL to the
-    cloud browser it is already attached to. User session names cannot start with ``_``."""
-    return f"_local_{name or 'default'}"[:64]
+    cloud browser it is already attached to. User session names cannot start with ``_``.
+
+    An identity that fits keeps its daemon name verbatim. Longer ones are truncated *and* tagged with a
+    digest of the whole identity: truncation alone mapped every identity sharing a 57-character prefix
+    onto one daemon, so the second session addressed the first session's daemon (#137047)."""
+    base = f"{_SIDECAR_DAEMON_PREFIX}{name or 'default'}"
+    if len(base) <= _SIDECAR_DAEMON_NAME_MAX:
+        return base
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    keep = _SIDECAR_DAEMON_NAME_MAX - len(_SIDECAR_DAEMON_PREFIX) - len(digest) - 1
+    return f"{_SIDECAR_DAEMON_PREFIX}{name[:keep]}-{digest}"
 
 
 def _resolve_lightpanda_cdp(env: dict, task_id: Optional[str], session_name: str = "",

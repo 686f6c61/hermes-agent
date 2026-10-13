@@ -36,6 +36,7 @@ from agent.conversation_compression_telemetry import (
     _emit_aborted_attempt_telemetry, _emit_blocked_attempt_telemetry, _emit_bypassed_attempt_telemetry,
     _emit_compression_attempt_telemetry, _record_committed_attempt_effect, _snapshot_compression_effect_input,
 )
+from agent.conversation_compression_todo import strip_todo_snapshot_block
 from agent.memory_provider import PRE_COMPRESS_CHECKPOINT_API_VERSION
 from agent.model_metadata import estimate_messages_tokens_rough, estimate_request_tokens_rough
 from agent.session_activity import ActivityProvenance, normalize_activity_provenance
@@ -2301,24 +2302,9 @@ def _compressed_has_busy_steer(messages: list) -> bool:
 def _strip_stale_todo_snapshot(content: Any) -> Any:
     """Remove a previously merged todo-snapshot block from message content.
     Snapshots are appended to the trailing user turn, so a surviving header is stale; stripping before
-    re-injection prevents accumulation across boundaries."""
-    from tools.todo_tool import TODO_INJECTION_HEADER
-    if isinstance(content, str):
-        idx = content.find(TODO_INJECTION_HEADER)
-        if idx == -1:
-            return content
-        return content[:idx].rstrip()
-    if isinstance(content, list):
-        cleaned = []
-        for part in content:
-            text = str(part.get("text") or "") if isinstance(part, dict) and part.get("type") == "text" else ""
-            idx = text.find(TODO_INJECTION_HEADER) if text else -1
-            if idx == -1:
-                cleaned.append(part)
-            elif stripped := text[:idx].rstrip():
-                cleaned.append({**part, "text": stripped})
-        return cleaned
-    return content
+    re-injection prevents accumulation across boundaries. Only the block goes: a pre-call repair can merge
+    the next user turn onto the snapshot row, and that text is not snapshot (#137652)."""
+    return strip_todo_snapshot_block(content, _PRUNED_SKILL_RELOAD_NOTICE_HEADER)
 
 
 def _todo_snapshot_is_only_content(content: Any, stripped: Any) -> bool:

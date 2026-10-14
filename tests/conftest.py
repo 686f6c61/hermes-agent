@@ -381,6 +381,21 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
             hermes_state_mod, "DEFAULT_DB_PATH", fake_hermes_home / "state.db"
         )
 
+    # 3d. agent/redact.py also snapshots at import time:
+    #     ``_REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true")``. Test
+    #     modules import agent.redact at collection, before the scrub above
+    #     deletes the variable, so launching pytest from a shell whose profile
+    #     has ``security.redact_secrets: false`` (bridged to that env var) left
+    #     redaction off for the whole run and failed four tests that never pin
+    #     the flag themselves — while CI, where the var is unset, stayed green.
+    #     Re-pin the snapshot to the same default the scrub just established and
+    #     drop the per-home cache, so local and CI agree. (Same shape as 3b.)
+    #     Tests that exercise the opt-out patch the seam themselves.
+    redact_mod = sys.modules.get("agent.redact")
+    if redact_mod is not None and hasattr(redact_mod, "_REDACT_ENABLED"):
+        monkeypatch.setattr(redact_mod, "_REDACT_ENABLED", True)
+        monkeypatch.setattr(redact_mod, "_REDACT_ENABLED_BY_HOME", {})
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")

@@ -100,7 +100,8 @@ def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
     """HEAD's sha unless HEAD is PROVEN not to contain ``commit``, then None.
 
     An unchosen default must never move a checkout backward on a guess, so an
-    unknown relation (shallow history, GitHub unreachable) keeps HEAD.
+    unknown relation (shallow history, GitHub unreachable, a probe that could not
+    answer) keeps HEAD.
     """
     from hermes_cli.source_check import _github_compare, source_git_env
 
@@ -109,15 +110,30 @@ def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
             [*git_cmd, *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=10, stdin=subprocess.DEVNULL, env=source_git_env(), check=False)
 
+    def relation(*args):
+        """A relation probe that cannot answer is not a failed update.
+
+        Its 10s cap is spent on a real ancestry walk (a partial clone on git < 2.44
+        also lazy-fetches here), so letting TimeoutExpired escape aborted the whole
+        channel resolution as "Could not resolve the stable source channel" (#138716).
+        An unanswered probe is the same guess a shallow boundary is: unknown.
+        """
+        try:
+            return run(*args)
+        except subprocess.SubprocessError:
+            return None
+
     head = run("rev-parse", "HEAD").stdout.strip()
     if not _SHA.fullmatch(head):
         return None
-    ancestry = run("merge-base", "--is-ancestor", commit, head).returncode
-    if ancestry == 0:
+    ancestry = relation("merge-base", "--is-ancestor", commit, head)
+    if ancestry is not None and ancestry.returncode == 0:
         return head
     # A shallow boundary makes exit 1 a guess; full history makes it proof.
-    if ancestry == 1 and run("rev-parse", "--is-shallow-repository").stdout.strip() == "false":
-        return None
+    if ancestry is not None and ancestry.returncode == 1:
+        shallow = relation("rev-parse", "--is-shallow-repository")
+        if shallow is not None and shallow.stdout.strip() == "false":
+            return None
     status = (_github_compare(commit, head, repository) or {}).get("status")
     return None if status in ("behind", "diverged") else head
 

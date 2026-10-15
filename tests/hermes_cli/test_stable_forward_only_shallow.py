@@ -49,3 +49,29 @@ def test_full_history_behind_release_is_proof(history, tmp_path, monkeypatch):
     monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: pytest.fail("no network on proof"))
     assert source_releases._head_containing(["git"], clone, shas[2], "o/r") is None
     assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[0]
+
+
+def test_ancestry_probe_that_times_out_keeps_head(history, tmp_path, monkeypatch):
+    """A merge-base that cannot finish is an unknown relation, not a failed update (#138716).
+
+    The reporter's ``hermes update`` died on "Could not resolve the stable source channel:
+    ... timed out after 10 seconds": the probe's TimeoutExpired escaped ``_head_containing``
+    and aborted the channel resolution. HEAD itself stays the answer the code documents.
+    """
+    origin, shas = history
+    clone = tmp_path / "full-timeout"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    real_run = subprocess.run
+
+    def slow(args, *a, **k):
+        if list(args)[1:3] == ["merge-base", "--is-ancestor"]:
+            raise subprocess.TimeoutExpired(args, 10)
+        return real_run(args, *a, **k)
+
+    monkeypatch.setattr(source_releases.subprocess, "run", slow)
+    # GitHub unreachable too: still unknown, so still HEAD.
+    monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: None)
+    assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[2]
+    # A proven "behind" verdict still decides when the local probe could not.
+    monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: {"status": "behind"})
+    assert source_releases._head_containing(["git"], clone, shas[0], "o/r") is None

@@ -2,6 +2,27 @@
 import asyncio
 
 
+def _configured_allowed_roles(config) -> object:
+    """The role allowlist as ``PlatformConfig.from_dict`` resolves it for the adapter's gate.
+
+    Every non-typed key of a platform block is promoted into ``extra`` (an explicit
+    ``extra:`` value wins on a clash), so ``platforms.discord.allowed_roles`` and
+    ``platforms.discord.extra.allowed_roles`` are the same gate the ingress reads. Only
+    the pre-``platforms:`` top-level ``discord:`` block is read as the fallback.
+    """
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    platform = mapping(mapping(config).get('platforms')).get('discord')
+    platform = mapping(platform)
+    extra = mapping(platform.get('extra'))
+    if 'allowed_roles' in extra:
+        return extra['allowed_roles']
+    if 'allowed_roles' in platform:
+        return platform['allowed_roles']
+    return mapping(mapping(config).get('discord')).get('allowed_roles', [])
+
+
 class DiscordAuthorizationMixin:
     async def reauthorize_native_roles(self, source):
         from plugins.platforms.discord.adapter import _read_dm_role_auth_guild, _scoped_gate_env
@@ -10,8 +31,8 @@ class DiscordAuthorizationMixin:
 
         # Unlike ingress caches, recovery reads current transport-scoped policy.
         def policy():
-            cfg = (read_raw_config() or {}).get('discord', {}) or {}
-            raw = _scoped_gate_env('DISCORD_ALLOWED_ROLES') or cfg.get('allowed_roles', [])
+            raw = (_scoped_gate_env('DISCORD_ALLOWED_ROLES')
+                   or _configured_allowed_roles(read_raw_config() or {}))
             roles = {int(str(item).strip()) for item in self._gate_csv_set(raw)
                      if str(item).strip().isdigit()}
             guild_id = _read_dm_role_auth_guild() if source.chat_type == 'dm' else source.scope_id

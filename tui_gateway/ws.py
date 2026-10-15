@@ -31,8 +31,22 @@ _dashboard_client_touched_at = 0.0
 _dashboard_client_touch_lock = threading.Lock()
 
 
-def _note_dashboard_client_activity(*, force: bool = False) -> None:
-    """Refresh the dashboard-client liveness marker (throttled, best-effort)."""
+def _touch_dashboard_client_heartbeat() -> None:
+    """The marker write itself: ``os.makedirs`` + ``open`` + ``os.utime``, blocking (see below)."""
+    from gateway.scale_to_zero import touch_dashboard_client_heartbeat
+
+    touch_dashboard_client_heartbeat()
+
+
+async def _note_dashboard_client_activity(*, force: bool = False) -> None:
+    """Refresh the dashboard-client liveness marker (throttled, best-effort).
+
+    The throttle is decided here; the write goes to a worker thread. On a filesystem
+    whose write path is slow for a few seconds that write used to run on the gateway's
+    own loop, so it stalled every managed-worker RPC sharing the loop (discovery and
+    the connect budget are five seconds each) until the worker latched
+    ``owner_unavailable`` and exited. See #139011.
+    """
     global _dashboard_client_touched_at
     now = time.monotonic()
     with _dashboard_client_touch_lock:
@@ -40,8 +54,7 @@ def _note_dashboard_client_activity(*, force: bool = False) -> None:
             return
         _dashboard_client_touched_at = now
     try:
-        from gateway.scale_to_zero import touch_dashboard_client_heartbeat
-        touch_dashboard_client_heartbeat()
+        await asyncio.to_thread(_touch_dashboard_client_heartbeat)
     except Exception:
         _log.debug("dashboard client heartbeat touch failed", exc_info=True)
 
@@ -414,7 +427,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         await (ws.accept(subprotocol=subprotocol) if subprotocol else ws.accept())
         disconnect_reason = "connected"
         # Mark the client attached before the (possibly slow) ready/skin setup so scale-to-zero sees it.
-        _note_dashboard_client_activity(force=True)
+        await _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
@@ -454,7 +467,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         while True:
             try:
                 raw = await _unless_dispatch_failed(ws.receive_text())
-                _note_dashboard_client_activity()
+                await _note_dashboard_client_activity()
             except _SendFailed:
                 raise
             except _WebSocketDisconnect as exc:

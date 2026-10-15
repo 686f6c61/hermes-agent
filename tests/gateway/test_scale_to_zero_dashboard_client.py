@@ -276,9 +276,73 @@ def test_note_activity_is_throttled(hermes_home, monkeypatch):
         s2z, "touch_dashboard_client_heartbeat", lambda path=None: calls.__setitem__("n", calls["n"] + 1) or True
     )
     monkeypatch.setattr(ws_mod, "_dashboard_client_touched_at", 0.0)
-    ws_mod._note_dashboard_client_activity(force=True)
-    ws_mod._note_dashboard_client_activity()
-    ws_mod._note_dashboard_client_activity()
+
+    async def _exercise() -> None:
+        await ws_mod._note_dashboard_client_activity(force=True)
+        await ws_mod._note_dashboard_client_activity()
+        await ws_mod._note_dashboard_client_activity()
+
+    asyncio.run(_exercise())
     assert calls["n"] == 1
-    ws_mod._note_dashboard_client_activity(force=True)
+    asyncio.run(ws_mod._note_dashboard_client_activity(force=True))
     assert calls["n"] == 2
+
+
+def test_slow_marker_write_does_not_stall_the_event_loop(hermes_home, monkeypatch):
+    """#139011: the marker write runs off the loop, so a slow one cannot stall accept.
+
+    ``os.utime`` on a filesystem under write pressure took seconds in the field. While
+    it ran on the gateway's loop, managed workers sharing that loop hit their
+    five-second owner budget and latched ``owner_unavailable``. Held open by a slow
+    write, the accept must not stop the loop from running anything else.
+    """
+    import threading
+
+    from tui_gateway import server, ws as ws_mod
+
+    monkeypatch.setattr(server, "_start_backend_heartbeat_refresher", lambda: None)
+    monkeypatch.setattr(server, "_schedule_startup_orphan_sweep", lambda: None, raising=False)
+    monkeypatch.setattr(server, "resolve_skin", lambda: "default")
+    monkeypatch.setattr(server, "_ensure_skin_watcher", lambda: None)
+    monkeypatch.setattr(server, "register_live_transport", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    monkeypatch.setattr(ws_mod, "_dashboard_client_touched_at", 0.0)
+
+    loop_thread = threading.get_ident()
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def _held_write(path=None):
+        assert threading.get_ident() != loop_thread, "the marker write ran on the event loop"
+        write_started.set()
+        release_write.wait(10.0)
+        return True
+
+    monkeypatch.setattr(s2z, "touch_dashboard_client_heartbeat", _held_write)
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            pass
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    async def _connect_with_the_write_held_open() -> None:
+        accept = asyncio.create_task(ws_mod.handle_ws(FakeWS()))
+        try:
+            # Bounded wait, off the loop, for the write to be in flight.
+            await asyncio.to_thread(write_started.wait, 5.0)
+            # Reaching this line at all means the loop was free while the marker
+            # write was held: on the loop, the accept would have finished by now.
+            assert not accept.done(), "the connection waited on the marker write"
+        finally:
+            release_write.set()
+        await accept
+
+    asyncio.run(_connect_with_the_write_held_open())

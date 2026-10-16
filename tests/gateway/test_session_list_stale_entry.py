@@ -5,6 +5,11 @@ routing entry, and ``authorize`` only refuses an id absent from ``self.sessions`
 ``_handle`` then indexed the missing row and raised ``TypeError``, which is not a
 ``RuntimeStoreError``, so the lister's ``except`` could not skip it: every ``session.list``
 failed until the gateway restarted, taking the whole picker down with one stale entry.
+
+The same entry poisons the Desktop feeder: ``session.active_list`` reads the same live
+registry and its ``except`` also only tolerates ``RuntimeStoreError``. An out-of-band row
+deletion (a maintenance script against ``state.db``, not the gateway's ``sessions delete``)
+leaves the same shape behind, so both feeders are pinned here.
 """
 from types import SimpleNamespace
 
@@ -35,10 +40,16 @@ async def owner(tmp_path, monkeypatch):
         assert 'result' in reply, reply
         return {row['session_id']: row for row in reply['result']['sessions']}
 
+    async def live_listing():
+        reply = await connection.dispatch({'id': 1, 'method': 'session.active_list', 'params': {}})
+        assert 'result' in reply, reply
+        return {row['id'] for row in reply['result']['sessions']}
+
     async def resolve(session_id):
         return await authority.resolve(connection.actor, SessionRef('live', session_id))
 
-    yield SimpleNamespace(authority=authority, listing=listing, resolve=resolve, db=store._db)
+    yield SimpleNamespace(authority=authority, listing=listing, live_listing=live_listing,
+                          resolve=resolve, db=store._db)
 
 
 @pytest.mark.asyncio
@@ -48,6 +59,15 @@ async def test_a_live_entry_whose_row_was_deleted_is_skipped_not_fatal(owner):
     owner.db.delete_session('chat')
 
     assert set(await owner.listing()) == {'kept'}
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_live_feed_skips_the_same_entry(owner):
+    assert await owner.live_listing() == {'chat', 'kept'}
+
+    owner.db.delete_session('chat')
+
+    assert await owner.live_listing() == {'kept'}
 
 
 @pytest.mark.asyncio

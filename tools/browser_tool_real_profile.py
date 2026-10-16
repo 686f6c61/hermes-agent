@@ -142,8 +142,14 @@ def _agent_browser_close_session(session_name: str) -> None:
     _agent_browser_session_cmd(session_name, "close", log_label="session close")
 
 
+# ``--remote-debugging-port=0`` is an ephemeral port, and an ephemeral port is exactly what
+# ``content/child/runtime_features.cc`` reads as automation: Blink turns on its ``AutomationControlled``
+# feature, this browser reports ``navigator.webdriver == true``, and the sites the snapshot's own logins
+# are for refuse it. The switch rides along with the port that causes it, as it does in the dock's
+# ``dock_argv`` (#137774).
 _REAL_PROFILE_CHROME_FLAGS = (
-    "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
+    "--remote-debugging-port=0", "--disable-blink-features=AutomationControlled",
+    "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-default-apps",
     "--disable-hang-monitor", "--disable-popup-blocking", "--disable-prompt-on-repost",
     "--disable-sync", "--disable-features=Translate", "--no-startup-window",

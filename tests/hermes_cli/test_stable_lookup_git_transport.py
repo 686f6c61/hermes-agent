@@ -59,6 +59,31 @@ def test_a_refused_git_connection_carries_git_s_own_error(published_stable, monk
     assert "Failed to connect to github.com port 443" in message
 
 
+def test_a_wrapped_windows_connect_failure_reports_the_cause_not_the_preamble(published_stable, monkeypatch):
+    """The same refused connection as Windows spells it: git wraps the cause onto its own line.
+
+    Reported on the issue after the first version of this file (#137244): on Windows the
+    sentence came out of a *connect* failure rather than the 60 s timeout, and the line that
+    names the cause is the second one -- ``fatal: unable to access …`` names the URL, not why.
+    """
+    stderr = (
+        "fatal: unable to access 'https://github.com/NousResearch/hermes-agent.git/':\n"
+        "  Failed to connect to github.com:443 after 21105 ms: Could not connect to server\n"
+    )
+
+    def refused(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, [*GIT, "ls-remote", "--tags", "origin"], stderr=stderr)
+
+    monkeypatch.setattr(source_releases.subprocess, "run", refused)
+    with pytest.raises(ValueError) as caught:
+        source_releases._resolve_stable("NousResearch/hermes-agent", GIT, "/tmp")
+    message = str(caught.value)
+    assert "No published stable release could be verified" not in message
+    assert "Could not connect to server" in message
+    # The preamble names the URL, so it is the wrong line to carry: the cause is the last one.
+    assert "unable to access" not in message
+
+
 def test_a_git_that_cannot_run_is_not_reported_as_a_missing_release(published_stable, monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "git")

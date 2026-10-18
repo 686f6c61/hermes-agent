@@ -20,8 +20,27 @@ Full reference: https://hermes-agent.nousresearch.com/docs/user-guide/configurat
 | `delegation` | `model`, `provider`, `max_concurrent_children`, `max_iterations` (50), `max_spawn_depth` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
 | `curator` | `enabled`, `consolidate` (false, opt-in aux-model consolidation), `interval_hours`, `stale_after_days` |
+| `skills` | `external_dirs` (extra shared roots), `create_dir` (where new skills are written) |
 
 `hermes config check` reports sections missing from an older config.
+
+### Sharing Skills Across Profiles (`skills.external_dirs`)
+
+Skills are per-profile: `~/.hermes/skills/` (or `~/.hermes/profiles/<name>/skills/`). To make **one** skill available to every profile, don't copy it and don't symlink it — list a shared root under `skills.external_dirs` and every profile that loads that config sees it:
+
+```yaml
+skills:
+  external_dirs:
+    - ~/.agents/skills          # a root shared with other agents
+    - ${SKILLS_REPO}/skills
+```
+
+- Paths expand `~` and `${VAR}` and resolve against `$HERMES_HOME`; missing directories are **silently skipped**, so a typo looks like "the skill does not exist".
+- Precedence for a same-named skill, lowest wins: `project → local (~/.hermes/skills/) → skills.create_dir → external_dirs`. Two *different* skills sharing a name inside one tier stay ambiguous and are refused, never guessed.
+- External dirs are **not** a write-protection boundary: `skill_manage` edits a skill where it was found, `external_dirs` included, and `create` still writes to `skills.create_dir` or the local dir. Keep shared roots read-only with filesystem permissions if that matters.
+- A **symlinked** skill directory is not a substitute: discovery walks with `Path.rglob`, which does not descend into a symlinked directory, so the skill silently disappears from `hermes skills list` without an error.
+
+Docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/skills#external-skill-directories
 
 ### Toolsets
 

@@ -415,6 +415,21 @@ def _install_single_query_signal_handlers(cli):
             kill_live_foreground_processes(now=True)
         os._exit(0)
 
+    def _teardown_in_progress() -> bool:
+        """True once the interactive TUI has begun its exit teardown.
+
+        ``_tui_shutting_down`` spans the whole of ``_tui_shutdown``: the interrupt also lands
+        before ``_run_cleanup`` (in ``_pet_stop_anim`` / the session persist) and after it (in
+        ``_release_active_session``). ``_cleanup_done`` gives the same guarantee on the paths
+        that only go through ``_run_cleanup`` (atexit, the classic CLI).
+        """
+        if getattr(cli, "_tui_shutting_down", False):
+            return True
+        with suppress(Exception):
+            import cli as _cli_facade
+            return bool(getattr(_cli_facade, "_cleanup_done", False))
+        return False
+
     def _signal_handler_q(signum, frame):
         logger.debug("Received signal %s in single-query mode", signum)
         _arm_exit_watchdog_on_shutdown_signal()  # covers wedges in the unwind below
@@ -445,6 +460,13 @@ def _install_single_query_signal_handlers(cli):
                 _flush_one_shot_session_store(cli)
             _flush_logging_and_stdio()
             _kill_foreground_and_exit()
+        # A repeat Ctrl+C once teardown has begun unwinds _tui_shutdown mid-way: session
+        # finalize, the memory-provider shutdown and _release_active_session are skipped and
+        # the shell gets a raw traceback (#140890). The watchdog armed above already covers a
+        # teardown that wedges, so a repeat signal has nothing left to do.
+        if _teardown_in_progress():
+            logger.debug("Ignoring signal %s: shutdown teardown already in progress", signum)
+            return
         raise KeyboardInterrupt()
     with suppress(Exception):  # restricted environments
         for _name in ("SIGINT", "SIGTERM", "SIGHUP"):

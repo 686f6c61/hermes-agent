@@ -222,8 +222,10 @@ def get_service_manager() -> ServiceManager:
 # /etc/s6-overlay/s6-rc.d/ as part of the image and are NOT managed here.
 # ---------------------------------------------------------------------------
 
-# s6-overlay's dynamic scandir (tmpfs) that s6-svscan watches; writes here trigger supervision
-# on the next rescan.
+# s6-overlay's dynamic scandir that s6-svscan watches; writes here trigger supervision
+# on the next rescan. Its filesystem is deployment-dependent: it is tmpfs only when the
+# runtime mounts /run as one, and in a plain container it lives in the writable layer, so
+# a slot registered here is not guaranteed to be wiped on container restart.
 S6_DYNAMIC_SCANDIR = Path("/run/service")
 S6_SERVICE_PREFIX = "gateway-"
 

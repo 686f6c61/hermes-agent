@@ -938,6 +938,108 @@ def _rmtree_if_exists(path: Path) -> bool:
     return True
 
 
+def _systemd_scope_commands() -> list[tuple[bool, list[str]]]:
+    """The scopes a Linux uninstall may sweep: the user manager always, the system manager
+    only as root (a non-root uninstall cannot stop or unlink a system unit anyway)."""
+    from hermes_cli.gateway import _systemctl_cmd
+
+    scopes = [(False, _systemctl_cmd(False))]
+    if os.geteuid() == 0:  # windows-footgun: ok — Linux-only systemd path
+        scopes.append((True, _systemctl_cmd(True)))
+    return scopes
+
+
+def _systemd_service_units(cmd: list[str]) -> list[str]:
+    """Every ``hermes-*.service`` the manager holds, loaded or not (``--all``), by unit name."""
+    try:
+        listed = subprocess.run(
+            cmd + ["list-units", "--type=service", "--all", "--no-legend", "--plain", "hermes-*.service"],
+            capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log_warn(f"Could not list systemd units: {e}")
+        return []
+    if listed.returncode != 0:
+        return []
+    names: list[str] = []
+    for line in (listed.stdout or "").splitlines():
+        parts = line.split()
+        if parts:
+            # ``--plain`` still prefixes a failed or pending unit with ``●`` on some systemd builds.
+            names.append(parts[0].lstrip("●*"))
+    return names
+
+
+def _systemd_unit_file(cmd: list[str], unit: str) -> Path | None:
+    """On-disk unit file for *unit* (``FragmentPath``), or ``None`` for a transient or masked one."""
+    try:
+        shown = subprocess.run(
+            cmd + ["show", unit, "--property=FragmentPath", "--value"],
+            capture_output=True, text=True, check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if shown.returncode != 0:
+        return None
+    fragment = (shown.stdout or "").strip()
+    if not fragment or fragment == "/dev/null":  # masked: no file of ours to delete
+        return None
+    path = Path(fragment)
+    # Unlink the unit file itself (a symlinked unit goes as its link, never through the target).
+    return path if path.is_file() or path.is_symlink() else None
+
+
+def remove_dashboard_systemd_units() -> list[str]:
+    """Linux: stop, disable and delete every ``hermes-dashboard*``/``hermes-serve*`` systemd
+    unit whose ``HERMES_HOME`` is this install's, returning the removed unit files.
+
+    ``_remove_systemd_gateway`` only reaches the gateway unit name, so a dashboard or serve
+    unit survives a full uninstall; with ``Restart=always`` systemd then restarts an
+    executable that no longer exists forever (the reported host reached
+    ``NRestarts=381287``, ``ExecMainStatus=203``). This is the Linux counterpart of
+    :func:`remove_dashboard_launchd_jobs`, and it runs in both uninstall modes because the
+    checkout — and with it the ``venv/bin/hermes`` those units execute — goes in both.
+
+    Unit names are account-global: two installs under one login register the same
+    ``hermes-dashboard.service``, so the name alone never proves ownership. A unit is
+    removed only when its live ``MainPID``'s environment or its declared
+    ``Environment=HERMES_HOME`` resolves to this home; an unreadable home is named for
+    manual cleanup instead of guessed. Linux only (empty list elsewhere)."""
+    if sys.platform != "linux":
+        return []
+    from hermes_cli.update_cmd_fleet import _is_serve_or_dashboard_unit
+    from hermes_cli.update_fleet_scope import systemd_unit_hermes_home
+
+    home = get_hermes_home().expanduser().resolve()
+    removed: list[str] = []
+    for _is_system, cmd in _systemd_scope_commands():
+        for unit in _systemd_service_units(cmd):
+            if not _is_serve_or_dashboard_unit(unit):
+                continue
+            unit_home = systemd_unit_hermes_home(cmd, unit)
+            if unit_home is None:
+                log_warn(
+                    f"Leaving {unit} in place: its HERMES_HOME could not be read. Remove it by "
+                    "hand if it belongs to this install.")
+                continue
+            if Path(unit_home).expanduser().resolve() != home:
+                continue
+            try:
+                subprocess.run(cmd + ["stop", unit], capture_output=True, check=False, timeout=90)
+                subprocess.run(cmd + ["disable", unit], capture_output=True, check=False, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                log_warn(f"Could not stop {unit}: {e}")
+                continue
+            unit_path = _systemd_unit_file(cmd, unit)
+            if unit_path is not None:
+                try:
+                    unit_path.unlink()
+                except OSError as e:
+                    log_warn(f"Could not remove {unit_path}: {e}")
+                    continue
+            removed.append(unit_path or unit)
+            subprocess.run(cmd + ["daemon-reload"], capture_output=True, check=False, timeout=30)
+    return removed
+
+
 def remove_dashboard_launchd_jobs() -> list[Path]:
     """macOS: boot out and delete every launchd job whose ``ProgramArguments`` runs a
     ``hermes dashboard`` / ``hermes serve`` backend, returning the removed plist paths.
@@ -1016,6 +1118,16 @@ def _perform_uninstall(
     log_info("Checking for running gateway...")
     if not uninstall_gateway_service():
         log_info("No gateway service or processes found")
+
+    # 1b. Linux: dashboard/serve systemd units the gateway uninstall never reaches (it only
+    #     removes the gateway unit name). Left alone, a ``Restart=always`` unit restarts a
+    #     ``venv/bin/hermes`` that step 4 deletes, forever (#141305). Kept out of the
+    #     ``full_uninstall`` block below because the code tree goes in both modes.
+    if sys.platform == "linux":
+        _remove_step(
+            "Removing dashboard/serve systemd units...",
+            remove_dashboard_systemd_units, "Removed {}",
+            "No dashboard/serve systemd units found")
 
     # 2-3b. PATH entries, wrapper, Windows launchers, node symlinks. Windows: hermes_home is
     #    %VAR%-expanded because install.ps1 writes literal C:\Users\<u>\...; hermes\bin (launchers +

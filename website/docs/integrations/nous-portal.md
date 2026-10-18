@@ -26,23 +26,27 @@ The Portal proxies a curated catalog of agentic models from across the ecosystem
 
 | Family | Models |
 |--------|--------|
-| **Anthropic Claude** | Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5 |
-| **OpenAI** | GPT-5.5, GPT-5.5 Pro, GPT-5.4 Mini, GPT-5.4 Nano, GPT-5.3 Codex |
-| **Google Gemini** | Gemini 3 Pro Preview, Gemini 3 Flash Preview, Gemini 3.1 Pro Preview, Gemini 3.1 Flash Lite Preview |
-| **DeepSeek** | DeepSeek V4 Pro |
-| **Qwen** | Qwen3.7-Max, Qwen3.6-35B-A3B |
-| **Kimi / Moonshot** | Kimi K2.6 |
-| **GLM / Zhipu** | GLM-5.1 |
-| **MiniMax** | MiniMax M2.7 |
-| **xAI** | Grok 4.3 |
+| **Anthropic Claude** | Opus 5.5, Opus 5, Sonnet 5.5, Sonnet 5, Haiku 5.5, Haiku 4.5, Opus 4.8 |
+| **OpenAI** | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-5.5, GPT-5.5 Pro, GPT-5.4 Mini |
+| **Google Gemini** | Gemini 4 Argon, Gemini 3.1 Pro Preview, Gemini 3.8 Flash, Gemini 3.7 Flash |
+| **DeepSeek** | DeepSeek V4.1 Flash, DeepSeek V4 Pro |
+| **Qwen** | Qwen3.8-Max, Qwen3.8-Flash |
+| **Kimi / Moonshot** | Kimi K3 |
+| **GLM / Zhipu** | GLM-5.3, GLM-5.2 (the current default) |
+| **MiniMax** | MiniMax M3 |
+| **xAI** | Grok 4.7, Grok 4.6 |
 | **NVIDIA** | Nemotron-3 Super 120B-A12B |
-| **Tencent** | Hunyuan 3 Preview |
-| **Xiaomi** | MiMo V2.5 Pro |
-| **StepFun** | Step 3.5 Flash |
+| **Meta** | Muse Spark 1.3, Muse Spark 1.2 |
+| **Tencent** | Hunyuan 4 Preview, Hunyuan 3 |
+| **Xiaomi** | MiMo V2.6 Pro, MiMo V2.6 Flash |
+| **StepFun** | Step 3.7 Flash |
+| **Sakana / Upstage / Stealth** | Fugu Ultra, Solar Pro4, Space Bunny Alpha |
 | **Hermes** | Hermes-4-70B, Hermes-4-405B (chat, see [note below](#a-note-on-hermes-4)) |
 | **+ everything else** | 280+ additional models — the full agentic frontier |
 
-Under the hood, the Portal routes each model to the backend best suited for it — some models go through OpenRouter, others through proprietary or secondary providers, and the routing for a given model can change over time. Everything is billed against your Nous subscription either way. Switch between Claude Sonnet 4.6 for code and Gemini 3 Pro for long context with `/model` mid-session — no new credentials, no top-ups, no surprise zero-balance errors.
+The table mirrors `website/static/api/model-catalog.json` — the manifest served at [`/docs/api/model-catalog.json`](/docs/api/model-catalog.json) and fetched into the `/model` picker. Catalogue as of **2026-10-17**; the Portal's own [model info page](https://portal.nousresearch.com/info) carries the same families with per-model pricing.
+
+Under the hood, the Portal routes each model to the backend best suited for it — some models go through OpenRouter, others through proprietary or secondary providers, and the routing for a given model can change over time. Everything is billed against your Nous subscription either way. Switch between Claude Sonnet 5.5 for code and Gemini 4 Argon for long context with `/model` mid-session — no new credentials, no top-ups, no surprise zero-balance errors.
 
 :::note
 Because routing is per-model and not always through OpenRouter, OpenRouter-specific request extensions (such as `provider` routing preferences, `session_id` sticky routing, or top-level `cache_control`) are not part of the Portal's API contract and may be ignored depending on which backend serves the model.
@@ -79,10 +83,10 @@ Nous Research's own **Hermes 4** family (Hermes-4-70B, Hermes-4-405B) is availab
 They are **not recommended for use inside Hermes Agent**, however. Hermes 4 is tuned for chat and reasoning, not the rapid-fire tool-calling loop the agent relies on. Use them for research workflows or via the [subscription proxy](../user-guide/features/subscription-proxy.md) from other tooling — but for agent work, pick a frontier agentic model from the catalog instead:
 
 ```bash
-/model anthropic/claude-sonnet-4.6     # best general-purpose agentic model
-/model openai/gpt-5.5-pro              # strong reasoning + tool calling
-/model google/gemini-3-pro-preview     # huge context window
-/model deepseek/deepseek-v4-pro        # cost-effective coder
+/model anthropic/claude-sonnet-5.5     # best general-purpose agentic model
+/model openai/gpt-6.1-sol              # strong reasoning + tool calling
+/model google/gemini-4-argon           # huge context window
+/model deepseek/deepseek-v4.1-flash    # cost-effective coder
 ```
 
 The Portal's own [model info page](https://portal.nousresearch.com/info) carries the same warning, so this isn't a Hermes-side opinion — it's the official guidance from Nous Research.
@@ -163,9 +167,9 @@ hermes portal open       # open the subscription management page in your browser
 Inside a session:
 
 ```bash
-/model anthropic/claude-sonnet-4.6
-/model openai/gpt-5.5-pro
-/model google/gemini-3-pro-preview
+/model anthropic/claude-sonnet-5.5
+/model openai/gpt-6.1-sol
+/model google/gemini-4-argon
 ```
 
 Or open the picker:
@@ -209,7 +213,7 @@ After `hermes setup --portal`, `~/.hermes/config.yaml` will look like:
 ```yaml
 model:
   provider: nous
-  default: anthropic/claude-sonnet-4.6     # or whatever model you picked
+  default: anthropic/claude-sonnet-5.5     # or whatever model you picked
   base_url: https://inference-api.nousresearch.com/v1
 ```
 

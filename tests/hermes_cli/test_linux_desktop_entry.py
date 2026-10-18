@@ -1323,6 +1323,57 @@ def test_install_resizes_decodable_png_to_panel_sizes(
     assert struct.unpack(">II", dest_256.read_bytes()[16:24]) == (256, 256)
 
 
+def test_install_writes_large_rasters_when_the_source_feeds_them(
+    tmp_path, xdg_home, monkeypatch
+):
+    """The shipped asset is 1024×1024: a compositor overview or a launcher grid on a scaled
+    display renders above 256px, and upscaling the 256px raster blurs there. The installer must
+    write the 512 and 1024 slots the hicolor index already advertises (#140957)."""
+    from PIL import Image, ImageDraw
+
+    root = _make_project(tmp_path)
+    im = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
+    ImageDraw.Draw(im).rectangle((256, 256, 768, 768), fill=(0, 0, 0, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    lde.icon_path(root).write_bytes(buf.getvalue())
+    _stub_install(tmp_path, monkeypatch)
+
+    lde.install_desktop_entry(root)
+
+    hicolor = xdg_home / "icons" / "hicolor"
+    for size in (24, 256, 512, 1024):
+        dest = hicolor / f"{size}x{size}" / "apps" / "hermes.png"
+        assert dest.is_file(), f"{size}x{size} was not written"
+        assert struct.unpack(">II", dest.read_bytes()[16:24]) == (size, size)
+    assert not (hicolor / "scalable" / "apps" / "hermes.png").exists()
+
+
+def test_install_skips_large_rasters_a_small_source_cannot_feed(
+    tmp_path, xdg_home, monkeypatch
+):
+    """A 256px asset upscaled into ``1024x1024`` is a blurry file under a sharp-looking dir name:
+    the large slots are only written when the source is at least that wide."""
+    from PIL import Image
+
+    root = _make_project(tmp_path)
+    buf = io.BytesIO()
+    Image.new("RGBA", (256, 256), (10, 20, 30, 255)).save(buf, format="PNG")
+    lde.icon_path(root).write_bytes(buf.getvalue())
+    _stub_install(tmp_path, monkeypatch)
+
+    lde.install_desktop_entry(root)
+
+    hicolor = xdg_home / "icons" / "hicolor"
+    assert (hicolor / "256x256" / "apps" / "hermes.png").is_file()
+    assert (hicolor / "24x24" / "apps" / "hermes.png").is_file()
+    assert not (hicolor / "512x512").exists()
+    assert not (hicolor / "1024x1024").exists()
+    assert lde._resizable_sizes(256) == (24, 32, 48, 256)
+    assert lde._resizable_sizes(512) == (24, 32, 48, 256, 512)
+    assert lde._resizable_sizes(1024) == (24, 32, 48, 256, 512, 1024)
+
+
 def test_deferred_install_skips_heal_after_exit_without_reveal():
     """Electron exiting without ever revealing a window (boot crash, --version, early quit) must
     NOT heal the entry: gnome-shell keeps the ShellApp in STARTING until the startup-notification

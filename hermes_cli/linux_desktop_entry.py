@@ -639,7 +639,14 @@ def _run_quiet(cmd: list[str], *, timeout: int = 60, on_error: Optional[bool] = 
 # indexed dir name), so a copy-only fallback lands in ``256x256``.
 _HICOLOR_INDEXED_SIZES = (16, 22, 24, 32, 36, 48, 64, 72, 96, 128, 192, 256, 512)
 # Cinnamon's panel is ~24–32px: write exact rasters so the theme needn't downscale a 1024px PNG.
-_HICOLOR_INSTALL_SIZES = (24, 32, 48, 256)
+# 512 and 1024 serve the contexts that render the icon larger than a panel — a compositor's
+# overview, a launcher grid on a scaled display — where upscaling the 256px raster blurs it.
+# They are only written when the source can feed them (see ``_resizable_sizes``): a 256px asset
+# upscaled to ``1024x1024`` would put a soft file where the theme looks for a sharp one.
+_HICOLOR_INSTALL_SIZES = (24, 32, 48, 256, 512, 1024)
+# Sizes the installer has always written regardless of the source, kept for the small slots the
+# theme downscales from: a 64px asset still yields a true 24px panel raster.
+_HICOLOR_PANEL_SIZES = (24, 32, 48, 256)
 
 
 def _png_dimensions(raw: bytes) -> Optional[tuple[int, int]]:
@@ -688,8 +695,19 @@ def _refresh_hicolor_cache() -> None:
             return
 
 
+def _resizable_sizes(source: int) -> tuple[int, ...]:
+    """The install sizes worth writing for a *source*-px asset.
+
+    The panel slots are always written (the theme downscales from them, and a small asset still
+    gets an exact 24px raster). A large slot is written only when the source is at least that
+    wide: upscaling a 256px icon into ``1024x1024`` would hand a launcher a blurry file, which is
+    the symptom this set exists to fix.
+    """
+    return tuple(size for size in _HICOLOR_INSTALL_SIZES if size in _HICOLOR_PANEL_SIZES or size <= source)
+
+
 def _resized_hicolor_pngs(raw: bytes) -> Optional[dict[str, bytes]]:
-    """Lanczos-resize *raw* to each panel size; ``None`` when it will not decode (truncated/fake
+    """Lanczos-resize *raw* to each hicolor size; ``None`` when it will not decode (truncated/fake
     PNG) so the caller falls back to a copy. Pillow is imported lazily to keep the uninstaller
     import-light."""
     try:
@@ -700,7 +718,7 @@ def _resized_hicolor_pngs(raw: bytes) -> Optional[dict[str, bytes]]:
         with Image.open(io.BytesIO(raw)) as im:
             rgba = im.convert("RGBA")
             out: dict[str, bytes] = {}
-            for size in _HICOLOR_INSTALL_SIZES:
+            for size in _resizable_sizes(min(rgba.size)):
                 buf = io.BytesIO()
                 rgba.resize((size, size), Image.Resampling.LANCZOS).save(buf, format="PNG")
                 out[f"{size}x{size}"] = buf.getvalue()

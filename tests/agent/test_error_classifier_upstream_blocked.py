@@ -32,3 +32,29 @@ def test_403_waf_block_is_upstream_blocked_not_auth(body):
 ])
 def test_generic_403_and_all_401_keep_auth(body, status, reason):
     assert classify_api_error(_APIError(body, status), provider="openai-api").reason == reason
+
+
+# Cloudflare's "Unable to load site" page: the edge could not or would not reach the origin. It
+# carries neither ``cf-error-details`` nor the challenge markers — only the title and the Ray ID
+# footer — so it used to fall through to ``auth`` and made a Codex OAuth session refresh its pool
+# entry (single-use refresh token, rotation-family revocation risk) over a network block (#141080).
+_CLOUDFLARE_UNABLE_TO_LOAD_SITE = """<!DOCTYPE html><html lang="en-US"><head>
+<title>Unable to load site</title></head><body>
+<h1>Unable to load site</h1><p>Please try again later.</p>
+<div class="cf-error-footer"><span>Cloudflare Ray ID:
+<strong>8d3f21c9be0a7d15</strong></span> &bull; Your IP: 203.0.113.7</div>
+</body></html>"""
+
+
+@pytest.mark.parametrize("body", [
+    _CLOUDFLARE_UNABLE_TO_LOAD_SITE,
+    # The Ray ID footer alone, with the title localized away.
+    "<!DOCTYPE html><html><body><p>Cloudflare Ray ID: <strong>8d3f21c9be0a7d15</strong></p></body></html>",
+])
+def test_cloudflare_unable_to_load_site_is_upstream_blocked_not_auth(body):
+    result = classify_api_error(
+        _APIError("Error code: 403 - " + body, 403), provider="openai-codex", model="gpt-6.1-sol"
+    )
+    assert result.reason == FailoverReason.upstream_blocked
+    assert result.is_auth is False and result.should_rotate_credential is False
+    assert result.should_fallback is True and result.retryable is False

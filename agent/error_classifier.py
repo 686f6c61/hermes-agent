@@ -437,10 +437,18 @@ _SSL_TRANSIENT_PATTERNS = (
 # challenge and block pages, plus the plain-text block relays return when they reject the SDK
 # User-Agent (#53099). Matched only on 403 (see ``_status_403``); a bare "access denied" or
 # "forbidden" stays auth because providers word real permission errors that way too.
+#
+# Cloudflare's "Unable to load site" page is the same class of refusal on a different template:
+# it is what the edge serves when it cannot or will not reach the origin, and the only
+# identifying marks it carries are that title and the Ray ID footer. Without the titles below it
+# fell through to ``auth``, so a Codex OAuth request blocked at the edge refreshed the pool entry
+# twice — burning a single-use refresh token, and, because Codex rotates its refresh-token family
+# on reuse, risking a revoked grant — while the Desktop blamed an expired sign-in (#141080).
 _UPSTREAM_BLOCKED_PATTERNS = (
     "your request was blocked", "request blocked", "sorry, you have been blocked",
     "enable javascript and cookies to continue", "cdn-cgi/challenge-platform", "cf-browser-verification",
     "challenge-error-text", "__cf_chl", "cf-error-details", "attention required! | cloudflare",
+    "unable to load site", "cloudflare ray id",
 )
 
 

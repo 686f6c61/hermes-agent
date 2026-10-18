@@ -282,3 +282,72 @@ def test_nested_dist_travels_but_root_dist_stays_out(tmp_path):
 
     assert (destination / "plugins/kanban/dashboard/dist/index.js").read_text(encoding="utf-8") == "ENTRY\n"
     assert not (destination / "dist").exists(), "root build output never enters the snapshot"
+
+
+def _seal(root: Path) -> None:
+    """Make ``root`` a sealed generation: directories 0555, files 0444."""
+    import os
+
+    for directory, directories, files in os.walk(root, topdown=False):
+        for name in files:
+            os.chmod(Path(directory) / name, 0o444)
+        for name in directories:
+            os.chmod(Path(directory) / name, 0o555)
+    os.chmod(root, 0o555)
+
+
+def _unseal(root: Path) -> None:
+    import os
+
+    for directory, directories, files in os.walk(root, topdown=True):
+        os.chmod(directory, 0o755)
+        for name in files:
+            os.chmod(Path(directory) / name, 0o644)
+
+
+def test_snapshot_of_a_sealed_source_is_writable(tmp_path):
+    """A sealed (read-only) install still gets a writable build snapshot (#141278)."""
+    core = tmp_path / "core"
+    (core / "sealed_pkg").mkdir(parents=True)
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="sealed"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[tool.setuptools.packages.find]\ninclude=["sealed_pkg*"]\n',
+        encoding="utf-8",
+    )
+    (core / "sealed_pkg/__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (core / "sealed_pkg/values.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _seal(core)
+    root = tmp_path / "generation"
+    try:
+        workspace._generate_pyproject([], root, source=core)
+        assert (root / "pyproject.toml").is_file()
+        assert (root / "sealed_pkg/values.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+        # The generation's own metadata write and any later dependency sync must land.
+        (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (root / "sealed_pkg/extra.py").write_text("EXTRA = 3\n", encoding="utf-8")
+    finally:
+        _unseal(core)
+        if root.exists():
+            _unseal(root)
+
+
+def test_failed_generation_of_a_sealed_source_is_removable(tmp_path):
+    """The ghost ``environments/<uuid>/`` of a failed install of a sealed source is removable (#141278)."""
+    core = tmp_path / "core"
+    (core / "sealed_pkg").mkdir(parents=True)
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="sealed"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[tool.setuptools.packages.find]\ninclude=["sealed_pkg*"]\n',
+        encoding="utf-8",
+    )
+    (core / "sealed_pkg/__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _seal(core)
+    root = tmp_path / "generation"
+    try:
+        workspace._generate_pyproject([], root, source=core)
+        shutil.rmtree(root)  # the failure path's cleanup, without ignore_errors
+        assert not root.exists()
+    finally:
+        _unseal(core)
+        if root.exists():
+            _unseal(root)

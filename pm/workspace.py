@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -107,6 +108,30 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(entry, target)
+    _thaw_snapshot(destination)
+
+
+def _thaw_snapshot(root: Path) -> None:
+    """Add owner-write to a snapshot copied from a sealed source (#141278).
+
+    ``copytree``/``copy2`` preserve modes, so an immutable deployment (dirs
+    ``0555``, files ``0444``) yields a read-only snapshot: the ``pyproject.toml``
+    write right after the copy, and every extra's dependency sync, fail with
+    ``EACCES``, and the failure path cannot remove the generation either. The
+    snapshot is ours alone, so it is writable no matter how the source is sealed.
+    """
+    for directory, _, names in os.walk(root):
+        paths_ = [Path(directory)] + [Path(directory) / name for name in names]
+        for path in paths_:
+            try:
+                mode = path.lstat().st_mode
+            except OSError:
+                continue
+            if not mode & stat.S_IWUSR:
+                try:
+                    os.chmod(path, mode | stat.S_IWUSR)
+                except OSError:
+                    pass
 
 
 def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path) -> None:

@@ -601,6 +601,37 @@ class TestSweepOrphanedSessions:
         assert second["pruned"] == 1
         assert db.get_session("recovered-0") is None
 
+    def test_auto_prune_closes_a_one_shot_run_a_kill_left_open(self, db):
+        """#141205: a ``chat -q`` / ``-z`` run killed mid-run (hard kill, OOM, supervisor
+        timeout) keeps ``ended_at IS NULL``. ``oneshot`` is a finite state-owned producer —
+        no live owner survives the process — so without it in
+        ``_AUTO_PRUNE_STALE_OPEN_SOURCES`` those rows are immortal: never closed by the
+        sweep and therefore never reached by ``prune_sessions`` either. A fresh one-shot
+        row stays open, so a running query is untouched."""
+        stale = time.time() - 200 * 86400
+        _make_session(db, "oneshot-killed", source="oneshot", started_at=stale, message_at=stale)
+        _set_last_activity(db, "oneshot-killed", stale)
+        # A row a live query opened moments ago: fresh activity, so it is never a candidate.
+        _make_session(db, "oneshot-live", source="oneshot", started_at=time.time())
+
+        first = db.maybe_auto_prune_and_vacuum(
+            retention_days=90, min_interval_hours=0, vacuum=False
+        )
+        assert first["closed"] == 1
+        assert db.get_session("oneshot-killed")["end_reason"] == "startup_orphan_reap"
+        assert db.get_session("oneshot-live")["ended_at"] is None
+
+        db._conn.execute(
+            "UPDATE sessions SET ended_at = ended_at - 91 * 86400 WHERE id = 'oneshot-killed'"
+        )
+        db._conn.commit()
+        second = db.maybe_auto_prune_and_vacuum(
+            retention_days=90, min_interval_hours=0, vacuum=False
+        )
+        assert second["pruned"] == 1
+        assert db.get_session("oneshot-killed") is None
+        assert db.get_session("oneshot-live")["source"] == "oneshot"
+
     def test_real_recovery_placeholders_age_out_but_fresh_one_stays_open(self, db, tmp_path):
         """Through the real `_reconstruct_missing_sessions` path: a stale placeholder is closed
         then deleted; a fresh one is left open (source survives as 'recovered')."""

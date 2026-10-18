@@ -470,8 +470,10 @@ class SessionDB(
     # sources have their own lifecycle owners; unknown sources fail closed.
     # See #60609.  `recovered` = placeholders `hermes sessions recover` synthesizes for
     # orphaned messages (no live owner, never stamped ended_at); without it they are immortal.
+    # `oneshot` = finite `chat -q` / `-z` runs: they normally stamp ended_at on exit, so an open
+    # one is a killed run (hard kill, OOM, supervisor timeout) with no owner left to close it.
     _AUTO_PRUNE_STALE_OPEN_SOURCES: tuple[str, ...] = (
-        "cli", "cron", "kanban", "acp", "api_server", "subagent", "tool", "recovered",
+        "cli", "cron", "kanban", "acp", "api_server", "subagent", "tool", "recovered", "oneshot",
     )
 
     # ── Write-contention tuning ──

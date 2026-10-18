@@ -112,6 +112,23 @@ function classify(entry: CompletionEntry): {
     }
   }
 
+  // A contributed palette starter (`@wiki:`) is a prefix with no value — the
+  // shape the core starters get from KIND_RE above, which only knows the
+  // built-in kinds. It has to keep `insertId` empty for the same reason they
+  // do: the insertion path commits a value-less token verbatim, so a non-empty
+  // `insertId` would make the formatter splice the whole token in as the value
+  // and the composer ended up with `@wiki:@wiki:`.
+  const palettePrefix = /^@[^:\s]+:$/.exec(entry.text)
+
+  if (palettePrefix) {
+    return {
+      type: 'simple',
+      insertId: '',
+      display: textValue(entry.display, entry.text),
+      meta: textValue(entry.meta)
+    }
+  }
+
   return {
     type: 'simple',
     insertId: entry.text,

@@ -4,10 +4,12 @@
  * appear, prefix filtering is delegated to the source, contributed rows lead,
  * and a throwing source is isolated instead of killing the popover.
  */
+import type { Unstable_TriggerItem } from '@assistant-ui/core'
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { COMPOSER_AREAS, type ComposerAtCompletionSource } from '@/app/chat/composer/contrib'
+import { hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
 import { registry } from '@/contrib/registry'
 import { queryClient } from '@/lib/query-client'
 
@@ -51,6 +53,27 @@ async function searchAndRead(
   })
 
   return rows.map(r => r.label)
+}
+
+/** Same drive, but returns the adapter's items so a test can inspect the
+ *  metadata the formatter later serializes. */
+async function searchAndReadItems(
+  result: { current: { adapter: { search?: (q: string) => readonly Unstable_TriggerItem[] } } },
+  q: string
+): Promise<readonly Unstable_TriggerItem[]> {
+  act(() => {
+    result.current.adapter.search?.(q)
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(300)
+  })
+
+  let items: readonly Unstable_TriggerItem[] = []
+  act(() => {
+    items = result.current.adapter.search?.(q) || []
+  })
+
+  return items
 }
 
 afterEach(() => {
@@ -182,5 +205,29 @@ describe('contributed @ completion sources', () => {
     const rows = await searchAndRead(result, 'rese')
     expect(rows[0]).toBe('@researcher')
     expect(rows.length).toBeGreaterThan(1)
+  })
+
+  it('serializes a contributed palette starter once, not twice', async () => {
+    vi.useFakeTimers()
+    // `@wiki:` is a plugin prefix with no value, the same shape the built-in
+    // starters get from `@file:`. It has to serialize to the token the row
+    // shows, because the insertion path inserts that string verbatim when it
+    // ends with a colon; any `insertId` makes the formatter splice the whole
+    // token back in as the VALUE (`@wiki:@wiki:`), which is the duplication.
+    addSource('wiki', q =>
+      q ? [] : [{ insert: '@wiki:', display: 'Wikipedia article', meta: 'wiki-ref' }]
+    )
+
+    const gateway = gatewayStub([{ text: '@file:', display: '@file:', meta: 'file' }])
+
+    const { result } = renderHook(() => useAtCompletions({ gateway: gateway as never, sessionId: 's1', cwd: '/repo' }))
+
+    const items = await searchAndReadItems(result, '')
+    const starter = (text: string) => items.find(item => (item.metadata as { rawText?: string }).rawText === text)
+
+    expect(starter('@wiki:')).toBeTruthy()
+    expect(hermesDirectiveFormatter.serialize(starter('@wiki:')!)).toBe('@wiki:')
+    // The core starters keep the same contract — this guards the shared branch.
+    expect(hermesDirectiveFormatter.serialize(starter('@file:')!)).toBe('@file:')
   })
 })

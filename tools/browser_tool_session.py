@@ -647,6 +647,15 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
                 return {"success": True, "data": {"path": recovered_path, "raw": raw}}
         return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}", "returncode": returncode}
 
+    if parsed is None or isinstance(parsed, (str, int, float, bool)):
+        # ``null`` (an empty ``back``/batch result) and bare scalars are valid JSON but nothing a
+        # caller can read: they hold a dict, or the batch list ``_unwrap_batch_result`` reshapes.
+        # The JSON space is dict/list/scalar, so this is the whole leak. Normalise here instead of
+        # raising ``AttributeError`` on ``.get`` further down.
+        _bt.logger.warning("browser '%s' returned non-object JSON (rc=%s): %s", command, returncode, stdout_text[:200])
+        return {"success": False, "error": f"agent-browser returned non-object JSON for '{command}': {stdout_text[:200]}",
+                "returncode": returncode}
+
     # Empty snapshot content is a common sign of daemon/CDP issues.
     if command == "snapshot" and parsed.get("success"):
         snap_data = parsed.get("data", {})

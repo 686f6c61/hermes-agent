@@ -191,6 +191,43 @@ class TestRunJobScript:
         assert success is True
         assert output == "ABSENT"
 
+    def test_script_child_gets_the_users_toolchain_before_hermes_runtimes(
+        self, cron_env, tmp_path, monkeypatch
+    ):
+        """A cron script runs a *user* program, so the bundled runtime dirs the launcher and the
+        service definitions prepend must not shadow the user's own Node (#141012: a
+        ``#!/usr/bin/env node`` tool built for the system Node died on NODE_MODULE_VERSION)."""
+        from cron.scheduler_script import _run_job_script
+
+        managed_node = cron_env / "node" / "bin"
+        managed_tools = cron_env / "tools" / "node-26.7.0-darwin-arm64" / "bin"
+        user_bin = tmp_path / "user-bin"
+        user_bin.mkdir()
+        monkeypatch.setenv(
+            "PATH", os.pathsep.join([str(managed_node), str(managed_tools), str(user_bin)])
+        )
+
+        script = cron_env / "scripts" / "path_probe.py"
+        script.write_text(
+            textwrap.dedent(
+                """\
+                import os
+
+                print(os.environ.get("PATH", ""))
+                """
+            )
+        )
+
+        success, output = _run_job_script("path_probe.py")
+
+        assert success is True, output
+        entries = output.split(os.pathsep)
+        # Still available (nothing is dropped), but behind the user's own toolchain.
+        assert str(managed_node) in entries
+        assert str(managed_tools) in entries
+        assert entries.index(str(user_bin)) < entries.index(str(managed_node))
+        assert entries.index(str(user_bin)) < entries.index(str(managed_tools))
+
     @pytest.mark.platforms("windows")
     def test_windows_uv_venv_python_script_bypasses_launcher(self, cron_env, tmp_path, monkeypatch):
         # Windows-only: the fake ``sys.platform`` could not reproduce the

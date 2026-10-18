@@ -429,6 +429,50 @@ def _script_argv(
     return [python_exe, str(path)], env_overlay, None
 
 
+def _hermes_owned_path_dirs() -> tuple[Path, ...]:
+    """Roots whose executables belong to Hermes' own bootstrap, not to the user's toolchain."""
+    from hermes_constants import get_hermes_home
+    from pm.paths import install_root
+
+    roots: list[Path] = []
+    for getter in (get_hermes_home, install_root):
+        try:
+            roots.append(Path(getter()).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return tuple(dict.fromkeys(roots))
+
+
+def _user_toolchain_first(path_value: str) -> str:
+    """Order a script child's PATH so the user's own toolchain wins over Hermes' runtimes.
+
+    The launcher shim and the generated service definitions prepend Hermes' bundled Node and
+    tool directories to PATH, which is what Hermes itself needs. A cron script is a *user*
+    program: a tool with a ``#!/usr/bin/env node`` shebang that was built against the system
+    Node must resolve to that one, not to the bundled runtime (#141012 — a native addon then
+    dies on NODE_MODULE_VERSION). The managed directories stay on PATH, after the user's, so a
+    script that does want the bundled runtime still finds it. Same rule the interpreter overlay
+    above already applies to PYTHONPATH: managed-store paths must not shadow the user's.
+    """
+    roots = _hermes_owned_path_dirs()
+    if not roots:
+        return path_value
+    user_dirs: list[str] = []
+    managed_dirs: list[str] = []
+    for entry in path_value.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            resolved = None
+        owned = resolved is not None and any(
+            resolved == root or root in resolved.parents for root in roots
+        )
+        (managed_dirs if owned else user_dirs).append(entry)
+    return os.pathsep.join(dict.fromkeys(user_dirs + managed_dirs))
+
+
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
@@ -480,6 +524,10 @@ def _run_job_script(
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
         env = build_subprocess_env(strip_launch_profile=True)
         env.update(env_overlay)
+        # The script child runs a *user* program, so Hermes' managed runtime dirs go after the
+        # user's own toolchain entries instead of in front of them (#141012).
+        if env.get("PATH"):
+            env["PATH"] = _user_toolchain_first(env["PATH"])
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent

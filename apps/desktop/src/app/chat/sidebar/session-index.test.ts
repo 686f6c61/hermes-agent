@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionInfo } from '@/types/hermes'
 
-import { buildSessionByAnyId, resolvePinnedSessions } from './session-index'
+import { buildPinnedIdentitySet, buildSessionByAnyId, resolvePinnedSessions } from './session-index'
 
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
@@ -153,5 +153,49 @@ describe('resolvePinnedSessions', () => {
     const index = buildSessionByAnyId(sessions, [], [])
 
     expect(resolvePinnedSessions([], index, sessions, settled)).toEqual([])
+  })
+})
+
+describe('buildPinnedIdentitySet', () => {
+  it('does not hide a row for a stored pin the Pinned section cannot render', () => {
+    // The reported state (#141717): a compression moved the tip, the connection-scoped local
+    // pin set kept the old lineage-root id, and no loaded row carries that id. Pinned resolves
+    // ids against the loaded rows, so it renders nothing for it — and the raw id alone used to
+    // drop the conversation from its Project too, leaving it in neither list.
+    const projectRow = row('tip', { _lineage_root_id: 'root' })
+    const stale = ['root']
+    const index = buildSessionByAnyId([], [], [])
+    const pinned = resolvePinnedSessions(stale, index, [projectRow], settled)
+
+    expect(pinned).toEqual([])
+
+    const identities = buildPinnedIdentitySet(stale, index, pinned)
+
+    // Neither identity of the project row is suppressed, so the Project keeps rendering it.
+    expect(identities.has(projectRow.id)).toBe(false)
+    expect(identities.has('root')).toBe(false)
+  })
+
+  it('keeps both identities of a pin Pinned does resolve', () => {
+    const tip = row('tip', { _lineage_root_id: 'root' })
+    const index = buildSessionByAnyId([tip], [], [])
+    const pinned = resolvePinnedSessions(['root'], index, [tip], settled)
+
+    const identities = buildPinnedIdentitySet(['root'], index, pinned)
+
+    expect(identities).toEqual(new Set(['tip', 'root']))
+  })
+
+  it('keeps a server-flagged pin the local set never saw', () => {
+    const tip = row('tip', { _lineage_root_id: 'root', pinned: true })
+    const index = buildSessionByAnyId([tip], [], [])
+
+    expect(buildPinnedIdentitySet([], index, resolvePinnedSessions([], index, [tip], settled))).toEqual(
+      new Set(['tip', 'root'])
+    )
+  })
+
+  it('suppresses nothing while no row has loaded, so a cold sidebar never hides sessions', () => {
+    expect(buildPinnedIdentitySet(['a', 'b'], buildSessionByAnyId([], [], []), [])).toEqual(new Set())
   })
 })

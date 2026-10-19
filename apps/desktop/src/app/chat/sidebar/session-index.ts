@@ -93,3 +93,37 @@ export function resolvePinnedSessions(
 
   return out
 }
+
+/**
+ * Every id whose rows the other lists suppress because Pinned renders them.
+ *
+ * Suppression and rendering have to agree. A stored pin id that resolves to no loaded session
+ * is not rendered by Pinned, so it must not hide the row either: a conversation whose
+ * compression moved the tip kept the old lineage-root id in the connection-scoped local pin
+ * set, and the raw id alone then removed it from its Project (which filters pins out) while
+ * Pinned, resolving the id against the loaded rows, had nothing to show. Hidden from both is
+ * the one outcome the sidebar must never produce (#141717).
+ *
+ * A resolved pin contributes BOTH identities of its session: the pin is stored on the durable
+ * lineage root, while the lists that filter it are fed by three independent fetches (recents,
+ * the messaging slice, the backend project tree) and each can surface the conversation under
+ * either its live tip or its root. Comparing one identity against the other is how a pinned
+ * session ended up rendered twice — once in Pinned, once in its project group.
+ */
+export function buildPinnedIdentitySet(
+  pinnedSessionIds: readonly string[],
+  sessionByAnyId: Map<string, SessionInfo>,
+  pinnedSessions: readonly SessionInfo[]
+): Set<string> {
+  const ids = new Set(pinnedSessionIds.filter(id => sessionByAnyId.has(id)))
+
+  for (const session of pinnedSessions) {
+    ids.add(session.id)
+
+    if (session._lineage_root_id) {
+      ids.add(session._lineage_root_id)
+    }
+  }
+
+  return ids
+}

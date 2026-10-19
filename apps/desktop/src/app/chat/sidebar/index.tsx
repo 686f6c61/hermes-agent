@@ -187,7 +187,7 @@ import {
   SidebarSessionSkeletons,
   SidebarStorageCorruptNotice
 } from './section-states'
-import { buildSessionByAnyId, resolvePinnedSessions } from './session-index'
+import { buildPinnedIdentitySet, buildSessionByAnyId, resolvePinnedSessions } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
@@ -702,26 +702,13 @@ export function ChatSidebar({
     [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions, unconfirmedPinWrites]
   )
 
-  // Every id a pin is reachable under: the raw stored ids, plus BOTH identities
-  // of each session we resolved one to. A pin is stored on the durable lineage
-  // root, but the lists that must filter it out are fed from three independent
-  // fetches (recents, the messaging slice, the backend project tree) and each
-  // can surface the same conversation under either its live tip or its root.
-  // Comparing one identity against the other is how a pinned session ended up
-  // rendered twice — once in Pinned, once in its project group.
-  const pinnedIdentitySet = useMemo(() => {
-    const ids = new Set(pinnedSessionIds)
-
-    for (const session of pinnedSessions) {
-      ids.add(session.id)
-
-      if (session._lineage_root_id) {
-        ids.add(session._lineage_root_id)
-      }
-    }
-
-    return ids
-  }, [pinnedSessionIds, pinnedSessions])
+  // Every id whose rows the other lists suppress because Pinned renders them. A stored id
+  // counts only while it resolves to a loaded row: Pinned can only render what it found, so
+  // an unresolvable id must not hide the row anywhere (#141717, buildPinnedIdentitySet).
+  const pinnedIdentitySet = useMemo(
+    () => buildPinnedIdentitySet(pinnedSessionIds, sessionByAnyId, pinnedSessions),
+    [pinnedSessionIds, sessionByAnyId, pinnedSessions]
+  )
 
   // A pinned session belongs to the Pinned section and nowhere else, so every
   // other list filters it out. Match on either identity the row carries — a

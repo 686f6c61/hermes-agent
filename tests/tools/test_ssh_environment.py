@@ -453,3 +453,71 @@ class TestRealSSHBackend:
         assert _run(f"wc -c < {shlex.quote(path)}")["output"].strip() == str(len(content.encode()))
         read = json.loads(read_file_tool(path, task_id="ssh_test"))
         assert "beta: ünïcödé ✓" in read["content"], read
+
+
+class TestSessionArtifactCleanup:
+    """#141497: cleanup() must drop the per-session files BaseEnvironment.__init__ writes into
+    the remote temp dir, the way LocalEnvironment.cleanup() already does."""
+
+    @pytest.fixture
+    def _recorded_ssh(self, monkeypatch, _mock_ssh_runtime):
+        calls = []
+
+        def _run_capture(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(ssh_env, "run_capture", _run_capture)
+        monkeypatch.setattr(ssh_env.subprocess, "run",
+                            lambda *a, **k: subprocess.CompletedProcess([], 0))
+        return calls
+
+    def _rm_commands(self, calls):
+        return [cmd for cmd, _kw in calls if cmd and cmd[-1].startswith("rm -f ")]
+
+    def test_cleanup_removes_snapshot_cwd_and_atomic_write_leftovers(self, _recorded_ssh):
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice")
+        env.cleanup()
+
+        rm = self._rm_commands(_recorded_ssh)
+        assert len(rm) == 1, rm
+        remote_cmd = rm[0][-1]
+        sid = env._session_id
+        assert f"/tmp/hermes-snap-{sid}.sh" in remote_cmd
+        assert f"/tmp/hermes-cwd-{sid}.txt" in remote_cmd
+        # The glob suffix stays outside the quotes so the remote shell expands it.
+        assert remote_cmd.endswith(f"/tmp/hermes-snap-{sid}.sh.tmp.*")
+        assert "*'" not in remote_cmd
+        # Bounded: cleanup must not wait on a wedged host.
+        assert _recorded_ssh[0][1].get("timeout") == 5
+
+    def test_removal_happens_before_the_control_master_closes(self, monkeypatch, _recorded_ssh):
+        order = []
+        monkeypatch.setattr(ssh_env, "run_capture",
+                            lambda cmd, **kw: (order.append("rm"),
+                                               subprocess.CompletedProcess(cmd, 0))[1])
+        monkeypatch.setattr(ssh_env.subprocess, "run",
+                            lambda *a, **k: (order.append("control-exit"),
+                                             subprocess.CompletedProcess([], 0))[1])
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice")
+        env.control_socket.touch()
+        env.cleanup()
+
+        assert order == ["rm", "control-exit"], order
+
+    def test_a_failed_removal_does_not_break_cleanup(self, monkeypatch, _recorded_ssh):
+        def _boom(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 5))
+
+        monkeypatch.setattr(ssh_env, "run_capture", _boom)
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice")
+        env.control_socket.touch()
+        env.cleanup()
+
+        assert not env.control_socket.exists()
+
+    def test_probe_only_issues_no_removal(self, _recorded_ssh):
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice", probe_only=True)
+        env.cleanup()
+
+        assert self._rm_commands(_recorded_ssh) == []

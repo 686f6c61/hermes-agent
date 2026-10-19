@@ -61,6 +61,7 @@ class SSHEnvironment(BaseEnvironment):
                  probe_only: bool = False, sync_files: bool = True, persistent: bool = True):
         super().__init__(cwd=cwd, timeout=timeout, persist_env=persistent)
         self.host, self.user, self.port, self.key_path = host, user, port, key_path
+        self._probe_only = probe_only
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         # Short, deterministic socket name: the path must stay under macOS's 104-byte sun_path
@@ -288,10 +289,35 @@ class SSHEnvironment(BaseEnvironment):
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
 
+    def _session_artifact_rm_command(self) -> str:
+        """``rm -f`` for this session's remote artifacts, plus the atomic-write leftovers.
+
+        Same three names ``LocalEnvironment.cleanup()`` unlinks: the snapshot, the cwd
+        sidecar and ``<snapshot>.tmp.*`` from an interrupted ``mv``. The glob's suffix stays
+        unquoted so the remote shell expands it; every other byte is quoted (#141497).
+        """
+        return (quoted_rm_command([self._snapshot_path, self._cwd_file])
+                + " " + shlex.quote(f"{self._snapshot_path}.tmp.") + "*")
+
+    def _remove_session_artifacts(self) -> None:
+        """Drop the per-session files ``BaseEnvironment.__init__`` places in the remote temp dir.
+
+        ``LocalEnvironment.cleanup()`` has always removed them; the remote backends had no
+        equivalent, so one ``hermes-snap-<id>.sh`` (~700 B, a dump of the session environment)
+        plus its cwd sidecar survived every session and piled up in ``/tmp`` proportional to
+        the session count — and on a tmpfs that counts against RAM (#141497). Bounded and
+        best-effort: cleanup must not fail because the host went away.
+        """
+        with contextlib.suppress(Exception):
+            self._run_ssh(self._session_artifact_rm_command(), timeout=5)
+
     def cleanup(self):
         if self._sync_manager:
             logger.info("SSH: syncing files from sandbox...")
             self._sync_manager.sync_back()
+        if not self._probe_only:
+            # Before the ControlMaster goes: the removal rides the multiplexed connection.
+            self._remove_session_artifacts()
         for socket in self._control_sockets():
             if not socket.exists():
                 continue

@@ -980,6 +980,12 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> dict[str
 # ── Audio playback (interruptable) ──
 _active_playback: Optional[subprocess.Popen] = None  # so stop_playback can interrupt it
 _playback_lock = threading.Lock()
+# Bumped by every ``stop_playback()``. A player killed by an interrupt exits non-zero, which
+# looks exactly like a broken player, so the loop that tries each candidate needs to tell the
+# two apart: after an interrupt the same sentence must NOT start again in the next player
+# (Linux ``aplay`` then reads MP3 bytes as PCM — seconds of loud static — and ``afplay``/
+# ``ffplay`` simply replay the cut sentence from the top).
+_playback_interrupts = 0
 
 
 def _set_active_playback(proc) -> None:
@@ -988,12 +994,19 @@ def _set_active_playback(proc) -> None:
         _active_playback = proc
 
 
+def _playback_interrupt_count() -> int:
+    """Number of interrupts issued so far; compare it around one playback attempt."""
+    with _playback_lock:
+        return _playback_interrupts
+
+
 def stop_playback() -> None:
     """Interrupt the currently playing audio (if any)."""
-    global _active_playback
+    global _active_playback, _playback_interrupts
     with _playback_lock:
         proc = _active_playback
         _active_playback = None
+        _playback_interrupts += 1
     if proc and proc.poll() is None:
         with suppress(Exception):
             proc.terminate()
@@ -1127,12 +1140,22 @@ def _play_audio_file_impl(file_path: str) -> bool:
     if not os.path.isfile(file_path):
         logger.warning("Audio file not found: %s", file_path)
         return False
+    interrupts = _playback_interrupt_count()
     # macOS skips sounddevice output (TCC media-library prompt); afplay handles all formats.
     if file_path.endswith(".wav") and _sounddevice_output_allowed() and _play_wav_via_sounddevice(file_path):
         return True
+    if _playback_interrupt_count() != interrupts:
+        return False  # cut during the sounddevice attempt; do not replay it from the top
     for cmd in _system_player_candidates(file_path):
         if shutil.which(cmd[0]) and _run_system_player(cmd):
             return True
+        # A player killed by stop_playback() exits non-zero, so the fall-through below cannot
+        # tell "this player cannot play here" from "the user cut the sentence". Retrying after
+        # an interrupt restarts the sentence in the next player — on Linux, aplay reads the
+        # MP3 bytes as PCM and plays seconds of loud static. Treat it as the interrupt it was.
+        if _playback_interrupt_count() != interrupts:
+            logger.debug("Audio playback interrupted; not falling through to the next player")
+            return False
     logger.warning("No audio player available for %s", file_path)
     return False
 

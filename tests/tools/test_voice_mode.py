@@ -896,6 +896,57 @@ class TestPlaybackInterrupt:
         with _playback_lock:
             assert vm._active_playback is None
 
+    def test_an_interrupted_player_does_not_fall_through(self, tmp_path, monkeypatch):
+        """A player killed by stop_playback() exits non-zero; that must not replay the sentence."""
+        import tools.voice_mode as vm
+
+        audio = tmp_path / "sentence.mp3"
+        audio.write_bytes(b"\xff\xfb\x90\x00" * 64)
+        played: list[str] = []
+
+        monkeypatch.setattr(vm, "_system_player_candidates", lambda p: [
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p], ["aplay", "-q", p]])
+        monkeypatch.setattr(vm.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+        def fake_run(cmd):
+            played.append(cmd[0])
+            if cmd[0] == "ffplay":
+                vm.stop_playback()  # the interrupt terminates ffplay, which exits non-zero
+            return False
+
+        monkeypatch.setattr(vm, "_run_system_player", fake_run)
+
+        assert vm._play_audio_file_impl(str(audio)) is False
+        assert played == ["ffplay"]
+
+    def test_a_player_that_cannot_play_still_falls_through(self, tmp_path, monkeypatch):
+        """Without an interrupt, a non-zero player is still a player to skip, not a stop."""
+        import tools.voice_mode as vm
+
+        audio = tmp_path / "sentence.mp3"
+        audio.write_bytes(b"\xff\xfb\x90\x00" * 64)
+        played: list[str] = []
+
+        monkeypatch.setattr(vm, "_system_player_candidates", lambda p: [
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", p], ["aplay", "-q", p]])
+        monkeypatch.setattr(vm.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+        def fake_run(cmd):
+            played.append(cmd[0])
+            return cmd[0] == "aplay"
+
+        monkeypatch.setattr(vm, "_run_system_player", fake_run)
+
+        assert vm._play_audio_file_impl(str(audio)) is True
+        assert played == ["ffplay", "aplay"]
+
+    def test_stop_playback_bumps_the_interrupt_generation(self):
+        import tools.voice_mode as vm
+
+        before = vm._playback_interrupt_count()
+        vm.stop_playback()
+        assert vm._playback_interrupt_count() == before + 1
+
 # ============================================================================
 # Continuous mode flow
 # ============================================================================

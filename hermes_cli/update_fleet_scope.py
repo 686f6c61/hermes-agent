@@ -16,6 +16,7 @@ outage.
 
 from __future__ import annotations
 
+import os
 import shlex
 from contextlib import suppress
 from pathlib import Path
@@ -77,12 +78,51 @@ def gateway_pid_home(pid: int) -> str | None:
     return home or _ledger_gateway_home(pid)
 
 
+def _path_identity(path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of *path*, or ``None`` when it cannot be stat'ed."""
+    try:
+        stat = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def home_path_shared_with_pid(pid: int, home) -> bool | None:
+    """Does *home* name the same file through *pid*'s own root as it does here?
+
+    ``HERMES_HOME`` is a pathname, and a pathname only identifies an install inside one
+    filesystem view: the gateway of an LXC container inherits ``/root/.hermes`` verbatim,
+    so the host-side string equality in :func:`home_in_update_scope` reads it as ours and
+    the restart sweep can SIGTERM another installation's gateway (#141516). ``/proc/<pid>/root``
+    is that process' own root, so the same path resolves to the file it actually runs on;
+    ``(st_dev, st_ino)`` equal means the same file, different means another filesystem.
+
+    ``None`` when either side cannot be read — no procfs off Linux, or a process this
+    account may not inspect — because an unproven identity must not change a verdict that
+    every non-Linux platform still takes from the pathname alone.
+    """
+    resolved = _resolved(home)
+    if resolved is None or pid <= 0:
+        return None
+    ours = _path_identity(resolved)
+    theirs = _path_identity(f"/proc/{pid}/root{resolved}")
+    if ours is None or theirs is None:
+        return None
+    return ours == theirs
+
+
 def gateway_pid_in_update_scope(pid: int, scope: set[Path] | None = None) -> bool | None:
     """Does gateway *pid* run on a home this update owns? ``None`` when its home cannot be read."""
     home = gateway_pid_home(pid)
     if home is None:
         return None
-    return home_in_update_scope(home, scope)
+    if not home_in_update_scope(home, scope):
+        return False
+    # Matching pathnames are not proof across filesystems: a container gateway that runs
+    # on another root is somebody else's process even when it reads ``/root/.hermes``.
+    if home_path_shared_with_pid(pid, home) is False:
+        return False
+    return True
 
 
 def partition_gateway_pids_by_scope(pids, scope: set[Path] | None = None) -> tuple[list[int], list[tuple[int, str | None]]]:
@@ -100,6 +140,10 @@ def partition_gateway_pids_by_scope(pids, scope: set[Path] | None = None) -> tup
                 with suppress(Exception):
                     from hermes_cli.dashboard_procs import _hermes_home_for_pid
                     home = _hermes_home_for_pid(pid)
+                if home is not None and home_in_update_scope(home, scope):
+                    # Same pathname, different file: name the reason so the notice does not
+                    # read as this install's own home.
+                    home = f"{home} (same pathname, different filesystem)"
             foreign.append((pid, home))
     return owned, foreign
 

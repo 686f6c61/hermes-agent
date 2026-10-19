@@ -44,7 +44,7 @@ A run has two phases:
 By default the curator only **prunes** — the deterministic inactivity pass marks skills stale and archives long-unused ones. The opinionated LLM **consolidation** pass (umbrella-building, merging overlapping skills) is off by default because it costs aux-model tokens on every run and makes broad structural changes to your library. Turn it on with `curator.consolidate: true`, or run it once on demand with `hermes curator run --consolidate`.
 :::
 
-Pinned skills are off-limits to both the curator's auto-transitions and the agent's own `skill_manage` tool. See [Pinning a skill](#pinning-a-skill) below.
+Pinned skills are skipped by the curator's auto-transitions, and the agent's `skill_manage` tool refuses to delete them. Edits and patches are still allowed; to require approval for every skill write, set `skills.write_approval: true` (see [Gating agent skill writes](./skills.md#gating-agent-skill-writes-skillswrite_approval)). See [Pinning a skill](#pinning-a-skill) below.
 
 ## Configuration
 

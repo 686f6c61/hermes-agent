@@ -28,6 +28,27 @@ def _pending_delete_root() -> Path:
     return get_hermes_home() / "cache" / _PENDING_DELETE_DIR
 
 
+def parked_delete_note(tree: Path) -> Path | None:
+    """The ``.path`` note that parks *tree* for deletion, when one names it; ``None`` otherwise.
+
+    :func:`_discard_tree` writes it when the tree itself is held (a process's cwd, an open handle) and
+    could not even be renamed out of ``plugins/``. Matched by the path the note records, not by its
+    file name, so the note's naming stays free.
+    """
+    root = _pending_delete_root()
+    if not root.is_dir():
+        return None
+    wanted = os.path.normcase(os.path.abspath(tree))
+    for note in root.glob("*.path"):
+        try:
+            held = note.read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            continue
+        if held and os.path.normcase(os.path.abspath(held)) == wanted:
+            return note
+    return None
+
+
 def sweep_pending_plugin_deletes() -> None:
     """Delete what an earlier remove parked because another process held it; cheap when empty.
     A ``<name>.path`` note names a stripped tree that could not even be moved out of ``plugins/``."""

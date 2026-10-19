@@ -328,6 +328,38 @@ def _known_issue_warnings(entry) -> list[str]:
     return [f"Known issue: {issue}" for issue in entry.known_issues]
 
 
+def _refuse_existing_install(plugin_name: str) -> None:
+    from pm.environments import cli_command_name
+    from pm.paths import repo_root
+
+    raise _pc().PluginOperationError(
+        f"Plugin '{plugin_name}' already exists. Use force reinstall "
+        f"or run `{cli_command_name(repo_root())} plugins update {plugin_name}`.",
+        failure_class="already_installed")
+
+
+def _clear_parked_remnant(plugin_name: str, target: Path) -> None:
+    """Finish the removal that parked *target*, or refuse naming the real blocker.
+
+    ``_discard_tree`` strips a tree another process holds and parks its path under
+    ``cache/plugin-pending-delete``; the sweep that finishes the job runs only at gateway start-up, so
+    before the next start the remnant is not an installed plugin — every state Hermes keeps says it is
+    gone (install record deleted, manifests stripped, ``plugins list`` clean) — and a reinstall must
+    not be refused with "already exists" plus a ``plugins update`` remedy that needs the very record
+    the removal deleted (#141539).
+    """
+    from hermes_cli.plugins_cmd_remove import parked_delete_note, sweep_pending_plugin_deletes
+
+    if parked_delete_note(target) is None:
+        _refuse_existing_install(plugin_name)
+    sweep_pending_plugin_deletes()
+    if target.exists():
+        raise _pc().PluginOperationError(
+            f"Plugin '{plugin_name}' was removed, but its directory is still held by another process; "
+            f"close that process or restart Hermes, then install again: {target}",
+            failure_class="already_installed")
+
+
 def _install_plugin_core(
     identifier: str,
     *,
@@ -427,13 +459,7 @@ def _install_plugin_core(
         _refuse_unavailable_portable_plugin(plugin_name, tmp_target)
 
         if target.exists() and not force:
-            from pm.environments import cli_command_name
-            from pm.paths import repo_root
-
-            raise _pc().PluginOperationError(
-                f"Plugin '{plugin_name}' already exists. Use force reinstall "
-                f"or run `{cli_command_name(repo_root())} plugins update {plugin_name}`.",
-                failure_class="already_installed")
+            _clear_parked_remnant(plugin_name, target)
         if target.exists() and requested_revision is None and isinstance(prior, dict) and prior.get("pinned") is True:
             raise _pc().PluginOperationError(
                 f"Plugin '{plugin_name}' is pinned. Reinstall it with an explicit "

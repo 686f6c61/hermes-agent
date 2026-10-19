@@ -681,7 +681,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             return None
 
         def _opt(field: str) -> Optional[str]:
-            return str(evt.get(field) or "").strip() or None
+            return str(evt.get(field) or derived.get(field) or "").strip() or None
 
         scope_id = _opt("scope_id")
         if scope_id is None and chat_type not in ("dm", "thread"):

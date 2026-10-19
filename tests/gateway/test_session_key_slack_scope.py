@@ -100,3 +100,42 @@ def test_async_delegation_routing_carries_the_channel_and_the_workspace():
     assert evt["chat_type"] == "group"
     assert evt["chat_id"] == CHANNEL
     assert evt["scope_id"] == WORKSPACE
+
+
+def test_async_delegation_routing_carries_a_dm_threads_workspace_and_thread():
+    """The reported case: a Slack DM thread. Every slot shifts, thread included (#141356)."""
+    evt = {"session_key": f"agent:main:slack:dm:{WORKSPACE}:{DM}:{THREAD}"}
+    GatewayRunner._enrich_async_delegation_routing(SimpleNamespace(), evt)
+    assert evt["platform"] == "slack"
+    assert evt["chat_type"] == "dm"
+    assert evt["chat_id"] == DM
+    assert evt["scope_id"] == WORKSPACE
+    assert evt["thread_id"] == THREAD
+
+
+class _EventRunner:
+    """Enough of a runner for the source fallback: no stored origin, nothing cached."""
+
+    _session_sources = None
+
+    class session_store:
+        @staticmethod
+        def _ensure_loaded():
+            raise RuntimeError("store unavailable in this test")
+
+    @staticmethod
+    def _get_cached_session_source(session_key):
+        return None
+
+
+def test_process_event_source_falls_back_to_the_parsed_dm_thread_key():
+    """The delivery source a Slack DM thread gets when only the key survives: chat, workspace, thread."""
+    source = GatewayRunner._build_process_event_source(
+        _EventRunner(), {"session_key": f"agent:main:slack:dm:{WORKSPACE}:{DM}:{THREAD}"}
+    )
+    assert source is not None
+    assert source.platform is Platform.SLACK
+    assert source.chat_type == "dm"
+    assert source.chat_id == DM
+    assert source.scope_id == WORKSPACE
+    assert source.thread_id == THREAD

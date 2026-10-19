@@ -62,6 +62,11 @@ export interface PreviewTarget {
   language?: string
   mimeType?: string
   path?: string
+  /** A URL fragment naming a position INSIDE the file, split off the target
+   * before it is resolved on disk (`[spec](../1.pdf#page=8)`): the `#…` part is
+   * not a file name, and resolving it as one 404s on a file called
+   * `1.pdf#page=8` (#141766). The viewer applies it when it can. */
+  fragment?: string
   /** `directory`/`missing` are typed non-previewable results from main-process
    * normalization (#101683): they never reach `openPreview` — callers branch on
    * them for the native folder action / not-found reporting instead. */

@@ -14,6 +14,7 @@ import {
   normalizeOrLocalPreviewTarget,
   openPreviewTargetInBrowser,
   remoteHtmlPreviewDocument,
+  splitPreviewFragment,
   validatedRemoteHtmlDataUrl
 } from './local-preview'
 
@@ -198,6 +199,60 @@ describe('remote HTML previews', () => {
       openPreviewTargetInBrowser({ ...remoteTarget, renderMode: 'source', transient: true })
     ).rejects.toThrow('Remote HTML preview could not be loaded')
     expect(openPreviewInBrowser).not.toHaveBeenCalled()
+  })
+})
+
+describe('preview fragments', () => {
+  it('keeps a #page fragment out of the path it resolves on disk', () => {
+    expect(localPreviewTarget('../pdfs/1.pdf#page=8', '/notes/lectures')).toMatchObject({
+      fragment: 'page=8',
+      label: '1.pdf',
+      path: '/notes/pdfs/1.pdf',
+      previewKind: 'pdf',
+      source: '../pdfs/1.pdf#page=8',
+      url: 'file:///notes/pdfs/1.pdf'
+    })
+  })
+
+  it('resolves the path alone and carries the fragment onto the target', async () => {
+    vi.clearAllMocks()
+
+    const normalizePreviewTarget = vi.fn(async () => ({
+      kind: 'file' as const,
+      label: '1.pdf',
+      path: '/srv/1.pdf',
+      previewKind: 'pdf' as const,
+      source: '/srv/1.pdf#page=8',
+      url: 'file:///srv/1.pdf'
+    }))
+
+    window.hermesDesktop = { normalizePreviewTarget } as never
+
+    await expect(normalizeOrLocalPreviewTarget('/srv/1.pdf#page=8')).resolves.toMatchObject({
+      fragment: 'page=8',
+      path: '/srv/1.pdf',
+      previewKind: 'pdf'
+    })
+    expect(normalizePreviewTarget).toHaveBeenCalledWith('/srv/1.pdf', undefined)
+  })
+
+  it('leaves a web URL fragment to the browser', () => {
+    const target = localPreviewTarget('https://example.com/paper.pdf#page=8')
+
+    expect(target?.url).toBe('https://example.com/paper.pdf#page=8')
+    expect(target?.fragment).toBeUndefined()
+  })
+
+  it('does not read a same-document anchor as a file fragment', () => {
+    expect(splitPreviewFragment('#page=8')).toEqual({ target: '#page=8' })
+  })
+
+  it('leaves a # inside a file name with the path', () => {
+    expect(localPreviewTarget('/srv/notes#draft.md')).toMatchObject({
+      label: 'notes#draft.md',
+      path: '/srv/notes#draft.md',
+      previewKind: 'text'
+    })
   })
 })
 

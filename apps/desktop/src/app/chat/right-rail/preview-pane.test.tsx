@@ -645,6 +645,42 @@ describe('PreviewPane console state', () => {
     expect(fireEvent.click(sourceLink!)).toBe(false)
   })
 
+  it('carries a link fragment to the embedded PDF viewer', async () => {
+    const dataUrl = 'data:application/pdf;base64,JVBERi0xLjQ='
+    const readFileDataUrl = vi.fn(async () => dataUrl)
+    stubPdfObjectUrls()
+    $connection.set({ mode: 'local' } as never)
+    vi.stubGlobal('window', {
+      ...window,
+      hermesDesktop: {
+        readFileDataUrl
+      }
+    })
+
+    let rendered!: ReturnType<typeof render>
+    await act(async () => {
+      rendered = render(
+        <PreviewPane
+          target={{
+            fragment: 'page=8',
+            kind: 'file',
+            label: 'spec.pdf',
+            path: '/tmp/spec.pdf',
+            previewKind: 'pdf',
+            source: '/tmp/spec.pdf#page=8',
+            url: 'file:///tmp/spec.pdf'
+          }}
+        />
+      )
+    })
+
+    await waitFor(() => expect(rendered.container.querySelector('iframe')).not.toBeNull(), {
+      container: rendered.container
+    })
+    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1#page=8')
+    expect(readFileDataUrl).toHaveBeenCalledWith('/tmp/spec.pdf')
+  })
+
   it('renders PDF targets in an embedded viewer', async () => {
     const dataUrl = 'data:application/pdf;base64,JVBERi0xLjQ='
     const readFileDataUrl = vi.fn(async () => dataUrl)

@@ -223,6 +223,31 @@ export async function openPreviewTargetInBrowser(target: PreviewTarget): Promise
   await bridge.openPreviewInBrowser(pathToFileUrl(filePath))
 }
 
+/** A file-viewer fragment: `page=8`, `page=8&zoom=100`, `zoom=100,50,200`,
+ *  `nameddest=chapter`. Only that shape is split off the target, because `#` is
+ *  also a legal character in a POSIX file name (`//srv/share/report #1?.html`,
+ *  covered by `preserves POSIX double-slash file paths`), and a bare
+ *  `#section` is a document anchor with no file target at all. */
+const VIEWER_FRAGMENT_RE = /^[A-Za-z][\w.-]*=[^#\s]*$/
+
+/** Split a link target into the path and the URL fragment that follows it.
+ *
+ *  A Markdown link can name a position INSIDE the file it opens:
+ *  `[spec](../pdfs/1.pdf#page=8)`. The `#…` part is a fragment, never part of
+ *  the name, so resolving the whole string as a path looks for a file called
+ *  `1.pdf#page=8` and reports it as missing (#141766). */
+export function splitPreviewFragment(raw: string): { fragment?: string; target: string } {
+  const hash = raw.lastIndexOf('#')
+
+  if (hash <= 0) {
+    return { target: raw }
+  }
+
+  const fragment = raw.slice(hash + 1)
+
+  return VIEWER_FRAGMENT_RE.test(fragment) ? { fragment, target: raw.slice(0, hash) } : { target: raw }
+}
+
 export function localPreviewTarget(rawTarget: string, cwd?: string | null): PreviewTarget | null {
   const raw = rawTarget.trim().replace(/^`|`$/g, '')
 
@@ -234,16 +259,17 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
     return { kind: 'url', label: basename(raw), source: raw, url: raw }
   }
 
-  let path = raw
+  const { fragment, target: targetPath } = splitPreviewFragment(raw)
+  let path = targetPath
 
-  if (/^file:\/\//i.test(raw)) {
+  if (/^file:\/\//i.test(targetPath)) {
     try {
-      path = decodeURIComponent(new URL(raw).pathname)
+      path = decodeURIComponent(new URL(targetPath).pathname)
     } catch {
-      path = raw.replace(/^file:\/\//i, '')
+      path = targetPath.replace(/^file:\/\//i, '')
     }
-  } else if (!raw.startsWith('/') && !isWindowsAbsolutePath(raw) && cwd) {
-    path = joinPath(cwd, raw)
+  } else if (!targetPath.startsWith('/') && !isWindowsAbsolutePath(targetPath) && cwd) {
+    path = joinPath(cwd, targetPath)
   }
 
   const ext = extension(path)
@@ -261,6 +287,7 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
     // binary/large files when readFileText/readFileDataUrl returns metadata.
     previewKind: isHtml ? 'html' : isImage ? 'image' : isPdf ? 'pdf' : 'text',
     source: raw,
+    ...(fragment ? { fragment } : {}),
     url: pathToFileUrl(path)
   }
 }
@@ -306,8 +333,22 @@ export async function normalizeOrLocalPreviewTarget(
   rawTarget: string,
   cwd?: string | null
 ): Promise<PreviewTarget | null> {
+  // The fragment names a position inside the file, so main-process resolution
+  // gets the path alone — it would otherwise look for `1.pdf#page=8` on disk
+  // (#141766) — and the reply carries it back to the viewer.
+  const { fragment, target } = splitPreviewFragment(rawTarget.trim())
+  const resolved = await resolvePreviewTarget(target, rawTarget, cwd)
+
+  return fragment && resolved ? { ...resolved, fragment } : resolved
+}
+
+async function resolvePreviewTarget(
+  target: string,
+  rawTarget: string,
+  cwd?: string | null
+): Promise<PreviewTarget | null> {
   try {
-    const normalized = await window.hermesDesktop?.normalizePreviewTarget?.(rawTarget, cwd || undefined)
+    const normalized = await window.hermesDesktop?.normalizePreviewTarget?.(target, cwd || undefined)
 
     if (normalized) {
       // Directories and dead links arrive as typed non-previewable results

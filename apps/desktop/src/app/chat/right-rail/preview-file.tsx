@@ -932,7 +932,10 @@ export function LocalFilePreview({
 
     try {
       objectUrl = URL.createObjectURL(dataUrlToBlob(state.dataUrl))
-      setPdfUrl(objectUrl)
+      // The link may name a page inside the document (`…/1.pdf#page=8`).
+      // Chromium's PDF viewer reads the fragment off the blob URL, so the
+      // target's fragment travels with the bytes (#141766).
+      setPdfUrl(target.fragment ? `${objectUrl}#${target.fragment}` : objectUrl)
     } catch (error) {
       setPdfError(error instanceof Error ? error.message : String(error))
 
@@ -940,7 +943,7 @@ export function LocalFilePreview({
     }
 
     return () => URL.revokeObjectURL(objectUrl)
-  }, [isPdf, state.dataUrl])
+  }, [isPdf, state.dataUrl, target.fragment])
 
   // Editing is only offered for whole, readable text — never images, binaries,
   // or files we only loaded the first 512 KB of (saving would drop the tail).

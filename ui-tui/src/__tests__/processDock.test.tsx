@@ -62,6 +62,28 @@ const paint = (element: React.ReactElement, rows = 30): string => {
   return stripAnsi(frames.join(''))
 }
 
+it('reads the shared gateway row: runtime from started_epoch, detail from output_tail', () => {
+  const rows = buildProcessRows(
+    [
+      { session_id: 'gw_run', command: 'make', status: 'running', started_epoch: NOW - 300, output_tail: 'step 3\n' },
+      {
+        session_id: 'gw_done',
+        command: 'make',
+        status: 'exited',
+        exit_code: 0,
+        started_epoch: NOW - 50,
+        exited_at: NOW - 10,
+        output_tail: 'ok\n'
+      }
+    ],
+    NOW * 1000
+  )
+
+  expect(rows.map(r => r.id)).toEqual(['gw_run', 'gw_done'])
+  expect(rows[0]).toMatchObject({ status: 'running', detail: 'last: step 3', elapsedSeconds: 300 })
+  expect(rows[1]).toMatchObject({ status: 'done', detail: 'exit 0 · 10s ago', elapsedSeconds: 40 })
+})
+
 it('keeps running processes, ages finished ones out after the retention window, and carries the exit verdict', () => {
   const rows = buildProcessRows(
     [exited('old', PROCESS_RETAIN_SECONDS + 1), exited('fresh', 5, 1), running, exited('killed', 2)],

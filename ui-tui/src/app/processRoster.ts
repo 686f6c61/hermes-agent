@@ -12,10 +12,14 @@ export interface ProcessEntry {
   command?: string
   status?: string
   uptime_seconds?: number | null
+  /** Epoch seconds of the spawn: the shared gateway's `process.list` row. */
+  started_epoch?: number | null
   exit_code?: number | null
   exited_at?: number | null
   completion_reason?: string | null
   output_preview?: string
+  /** The shared gateway sends the tail it kept instead of a preview string. */
+  output_tail?: string | null
 }
 
 export interface ProcessRow {
@@ -92,8 +96,14 @@ export const buildProcessRows = (processes: readonly ProcessEntry[], nowMs: numb
 
     const row: ProcessRow = {
       command: (entry.command ?? '').replace(/\s+/g, ' ').trim() || 'background process',
-      detail: lastOutputLine(entry.output_preview),
-      elapsedSeconds: Math.max(0, entry.uptime_seconds ?? 0) - sinceExitSeconds,
+      // The gateway's own row carries `output_tail`; a session-local registry row
+      // carries `output_preview`. Read whichever one is present.
+      detail: lastOutputLine(entry.output_tail ?? entry.output_preview),
+      // `started_epoch` is what the shared gateway sends; `uptime_seconds` is the
+      // session-local row. Reading only the latter left every gateway process at 0s.
+      elapsedSeconds: entry.started_epoch
+        ? Math.max(0, Math.floor((exitedAt || nowS) - entry.started_epoch))
+        : Math.max(0, entry.uptime_seconds ?? 0) - sinceExitSeconds,
       id: entry.session_id,
       sinceExitSeconds,
       status

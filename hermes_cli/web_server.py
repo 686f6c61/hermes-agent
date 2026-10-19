@@ -1021,8 +1021,19 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         ping_interval, ping_timeout = TUNNEL_WS_PING_INTERVAL_S, TUNNEL_WS_PING_TIMEOUT_S
 
     _uvicorn_console_logging()  # log_config=None: uvicorn's dictConfig would close every live handler
+    # uvicorn's default ("auto") resolves to the `websockets` implementation, which is built on the
+    # deprecated websockets.legacy protocol. Its close path awaits `asyncio.shield(close_connection_task)`,
+    # and Python 3.14 reports the shielded future's unretrieved inner exception through the loop exception
+    # handler, so every peer that goes away without a close frame (tab closed, proxy recycling an idle
+    # socket) writes `ERROR asyncio: ConnectionClosedOK exception in shielded future` to errors.log —
+    # indistinguishable from a real failure for anyone alerting on it (#141687). The sansio implementation
+    # has no shielded close task. Guarded by membership because the pyproject floor still allows a uvicorn
+    # that predates it (0.31), where "auto" stays the only honest choice.
+    from uvicorn.config import WS_PROTOCOLS
+
+    _ws_impl = "websockets-sansio" if "websockets-sansio" in WS_PROTOCOLS else "auto"
     config = uvicorn.Config(
-        served_app, host=host, port=port, log_level="warning", log_config=None,
+        served_app, host=host, port=port, ws=_ws_impl, log_level="warning", log_config=None,
         # Off by default so _ws_client_is_allowed sees the real peer, not
         # X-Forwarded-For. Gated mode runs behind a TLS terminator and needs
         # X-Forwarded-Proto for cookie Secure flags.

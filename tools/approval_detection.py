@@ -1561,7 +1561,17 @@ _OSASCRIPT_CLOSE_VERB_RE = re.compile(r"\b(?:close|quit|shut\s+down)\b", re.IGNO
 _OSASCRIPT_NO_SAVE_RE = re.compile(r"\bwithout\s+saving\b|\bsaving\s*(?::\s*)?(?:no|false)\b", re.IGNORECASE)
 # AppleScript string literals: an operation verb and the "without saving" text inside a quoted
 # string is prose (a dialog asking the question), not the operation.
-_SCRIPT_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+#
+# Only double quotes delimit an AppleScript literal. A single quote is an apostrophe in prose
+# (`(first document whose name is front document's name)`), and reading it as a literal delimiter
+# paired the possessive with the apostrophe of a later `-- don't` comment, swallowing the
+# `saving no` between them and letting the destructive statement read as inert. JavaScript (JXA)
+# does use both, so the single-quoted form is stripped only for a source that looks like JXA.
+_SCRIPT_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+_SCRIPT_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_JS_SCRIPT_HINT_RE = re.compile(r"Application\s*\(|ObjC\.|\.close\s*\(|\b(?:var|let|const)\s")
+# AppleScript's line-continuation character; the statement continues after it.
+_APPLESCRIPT_CONTINUATION_RE = re.compile(r"¬\s*\n\s*")
 # JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
 # wild); only the two that discard the document count — `saving: "ask"` prompts by itself.
 _JXA_NO_SAVE_RE = re.compile(r"\.(?:close|quit)\s*\(\s*\{[^}]*\bsaving\s*:\s*(?:[\"'](?:no|false)[\"']|false)", re.IGNORECASE)
@@ -1610,6 +1620,14 @@ def _carrier_payloads(command: str):
             if payload:
                 yield payload
             continue
+        if name == "eval":
+            # Shell `eval` concatenates every remaining word with spaces and parses the result as
+            # a command, so the payload is the whole tail. Yielding only the first word dropped
+            # everything after the executable name (`eval osascript -e '…'`).
+            payload = " ".join(tokens[1:])
+            if payload:
+                yield payload
+            continue
         for token in tokens[1:]:
             if token.startswith("-"):
                 continue
@@ -1621,13 +1639,68 @@ def _script_closes_without_saving(source: str) -> bool:
     """Whether *source*, as script text, closes or quits a document without saving it."""
     if _JXA_NO_SAVE_RE.search(source):
         return True
+    javascript = bool(_JS_SCRIPT_HINT_RE.search(source))
+    # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
+    # same operation as `saving no`; splitting first would strand each half on its own line.
+    source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
     for statement in source.splitlines() or (source,):
         # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
         # must not read as the operation, while `close document "Untitled" saving no` still does.
         literal_free = _SCRIPT_STRING_LITERAL_RE.sub('""', statement)
+        if javascript:
+            literal_free = _SCRIPT_SINGLE_QUOTED_LITERAL_RE.sub('""', literal_free)
+        # A continuation character that survived on one line (`saving ¬ no`) is whitespace here.
+        literal_free = literal_free.replace("¬", " ")
         if _OSASCRIPT_CLOSE_VERB_RE.search(literal_free) and _OSASCRIPT_NO_SAVE_RE.search(literal_free):
             return True
     return False
+
+
+def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], bool]:
+    """Script payloads in an `osascript` argv, and whether a source is named but unreadable.
+
+    `index` is the executable's own position, so ``tokens[index + 1:]`` is its argv. A source
+    named as a file path is reported through the flag (`carries_source`) rather than read: the
+    program is not in the command line, and reading it here would be IO on an arbitrary path.
+    """
+    payloads: list[str] = []
+    carries_source, position = False, index + 1
+    while position < len(tokens):
+        token = tokens[position]
+        lowered = token.lower()
+        if token == "--":
+            return payloads, carries_source or position + 1 < len(tokens)
+        if lowered in ("-l", "--language"):
+            position += 2
+            continue
+        if lowered.startswith("--language=") or (lowered.startswith("-l") and len(token) > 2):
+            position += 1
+            continue
+        if lowered in ("-e", "--exec"):
+            if position + 1 < len(tokens):
+                payloads.append(tokens[position + 1])
+                carries_source = True
+            position += 2
+            continue
+        if lowered == "-s":
+            # `-s <style>` is osascript's output-style switch and owns its next token; reading
+            # that token as a script filename made the piped program look unreachable.
+            position += 2
+            continue
+        if token.startswith("<<<"):
+            # A here-string IS the program on stdin (`osascript <<< 'tell …'`).
+            if position + 1 < len(tokens):
+                payloads.append(tokens[position + 1])
+                carries_source = True
+            position += 2
+            continue
+        if token.startswith("-"):
+            # osascript's own switches (`-i`, `-ss`); none of them is the script.
+            position += 1
+            continue
+        carries_source = True  # a script file path: source we cannot read from here
+        position += 1
+    return payloads, carries_source
 
 
 def _osascript_script_sources(command: str):
@@ -1644,31 +1717,7 @@ def _osascript_script_sources(command: str):
                      None)
         if index is None:
             continue
-        payloads, carries_source, position = [], False, index + 1
-        while position < len(tokens):
-            token = tokens[position]
-            lowered = token.lower()
-            if token == "--":
-                carries_source = carries_source or position + 1 < len(tokens)
-                break
-            if lowered in ("-l", "--language"):
-                position += 2
-                continue
-            if lowered.startswith("--language=") or (lowered.startswith("-l") and len(token) > 2):
-                position += 1
-                continue
-            if lowered in ("-e", "--exec"):
-                if position + 1 < len(tokens):
-                    payloads.append(tokens[position + 1])
-                    carries_source = True
-                position += 2
-                continue
-            if token.startswith("-"):
-                # osascript's own switches (`-i`, `-s <flags>`, `-ss`); none of them is the script.
-                position += 1
-                continue
-            carries_source = True  # a script file path: source we cannot read from here
-            position += 1
+        payloads, carries_source = _osascript_argv_sources(tokens, index)
         marker = _HEREDOC_MARKER_RE.search(segment)
         if marker:
             marker_at = command.find(marker.group(0), start)
@@ -1682,7 +1731,7 @@ def _osascript_script_sources(command: str):
         elif not carries_source:
             # No `-e`, no script file, no heredoc: the program arrives on stdin (`printf … |
             # osascript`), so the producer's arguments are the only place the spelling exists.
-            piped = _piped_script_source(command, start)
+            piped = _piped_script_source(command, _enclosing_command_start(command, start))
             if piped is not None:
                 yield piped
 
@@ -1700,15 +1749,40 @@ def _heredoc_body(command: str, marker_end: int, delimiter: str) -> str | None:
     return None
 
 
-def _piped_script_source(command: str, osascript_start: int) -> str | None:
-    """Argument text of the pipeline stage that feeds *osascript* on stdin."""
-    prefix = command[:osascript_start].rstrip()
+def _enclosing_command_start(command: str, word_start: int) -> int:
+    """Start of the command that owns the word at *word_start* (wrapper words included)."""
+    start = 0
+    for position in _iter_shell_command_starts(command):
+        if position > word_start:
+            break
+        start = position
+    return start
+
+
+def _piped_script_source(command: str, executable_start: int) -> str | None:
+    """Script text of the pipeline stage that feeds *osascript* on stdin.
+
+    *executable_start* is the start of the command that owns the executable — a wrapper
+    (`printf … | nice osascript`) starts the command, not the binary — so the stage behind the
+    pipe is found through the wrapper instead of requiring `|` immediately before `osascript`.
+    The producer is either the program's own arguments (`printf '%s' 'tell …'`) or a heredoc
+    body it reads (`cat <<'EOF' …`), which is the source the pipe hands to stdin.
+    """
+    prefix = command[:executable_start].rstrip()
     if not prefix.endswith("|"):
         return None
-    stages = list(_iter_top_level_shell_segments(prefix[:-1]))
+    stages = [stage for stage in _iter_top_level_shell_segments(prefix[:-1]) if stage.strip()]
     if not stages:
         return None
-    tokens = _shell_segment_tokens(stages[-1].strip(), 0)
+    producer = stages[-1].strip()
+    marker = _HEREDOC_MARKER_RE.search(producer)
+    if marker:
+        marker_at = command.rfind(marker.group(0), 0, executable_start)
+        if marker_at >= 0:
+            body = _heredoc_body(command, marker_at + len(marker.group(0)), marker.group(2))
+            if body is not None:
+                return body
+    tokens = _shell_segment_tokens(producer, 0)
     if not tokens or len(tokens) < 2:
         return None
     return "\n".join(tokens[1:])

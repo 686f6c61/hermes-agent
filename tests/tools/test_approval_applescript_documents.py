@@ -48,6 +48,20 @@ class TestDetection:
         'printf \'%s\' \'tell application "Keynote" to quit without saving\' | osascript',
         # JXA spells "do not save" as the string enum, not a boolean.
         'osascript -l JavaScript -e \'Application("Keynote").documents[0].close({saving: "no"})\'',
+        # Source shapes the same payload arrives in when it is not a bare `-e` argument: an
+        # apostrophe in the document expression beside a `-- don't` comment, `-s` consuming the
+        # output-style token, a wrapper after the pipe, a heredoc on the producer side of the pipe,
+        # a here-string, and `eval`'s whole tail.
+        'osascript <<\'EOF\'\n'
+        'tell application "Keynote" to close (first document whose name is front document\'s name) '
+        'saving no -- don\'t keep\nEOF',
+        'printf \'%s\' \'tell application "Keynote" to quit without saving\' | osascript -s o',
+        'printf \'%s\' \'tell application "Keynote" to quit without saving\' | nice osascript',
+        'cat <<\'EOF\' | osascript\ntell application "Keynote" to quit without saving\nEOF',
+        'osascript <<< \'tell application "Keynote" to quit without saving\'',
+        'eval osascript -e "\'tell application \\"Keynote\\" to close front document saving no\'"',
+        # `¬` continues the statement: `saving ¬` and `no` are one operation.
+        'osascript -e \'tell application "Keynote" to close front document saving ¬\nno\'',
     ])
     def test_every_carrier_of_the_same_payload_requires_approval(self, command):
         """The first fix matched only a bare `osascript … saving no` at command position."""
@@ -63,6 +77,10 @@ class TestDetection:
         'osascript -e \'tell application "Keynote" to get name of front document\'; '
         'echo "closed without saving"',
         'echo "closed without saving"',
+        # JXA prose inside a single-quoted JS string is data too, while AppleScript's apostrophes
+        # (`front document's name`) are punctuation and must not shield the operation.
+        'osascript -l JavaScript -e "var m = \'Quit without saving?\'; '
+        'Application(\'Keynote\').documents.length"',
     ])
     def test_inert_text_is_not_flagged(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command

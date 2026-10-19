@@ -680,6 +680,50 @@ class TestInvalidateTokensOnClientChange:
         info = json.loads((d / "chg-server.client.json").read_text())
         assert info["client_id"] == "client-b"
 
+    def test_preregister_accepts_numeric_credentials_from_config(self, tmp_path, monkeypatch):
+        """`hermes config set mcp_servers.<name>.oauth.client_id 289113` writes a
+        YAML int, and OAuth client credentials are text (RFC 6749 §2.2/§2.3.1), so
+        preregistration has to spell them as strings instead of dying on the SDK's
+        type validation."""
+        pytest.importorskip("mcp")
+        from tools.mcp_oauth import (
+            _build_client_metadata, _maybe_preregister_client,
+        )
+        storage, d = self._seed(tmp_path, monkeypatch)
+        cfg = {"client_id": 289113, "client_secret": 4567, "_resolved_port": 1455}
+        meta = _build_client_metadata(dict(cfg))
+        _maybe_preregister_client(storage, cfg, meta)
+        info = json.loads((d / "chg-server.client.json").read_text())
+        assert info["client_id"] == "289113"
+        assert info["client_secret"] == "4567"
+
+
+def test_device_register_accepts_numeric_client_id_from_config():
+    """The device flow builds its own client info from the same config dict, so an
+    int written by `hermes config set` has to survive there too."""
+    pytest.importorskip("mcp")
+    from types import SimpleNamespace
+
+    from tools.mcp_oauth import _build_client_metadata
+    from tools.mcp_oauth_device import DeviceOAuthMetadata, _register
+
+    cfg = {"client_id": 289113, "client_secret": 4567, "_resolved_port": 8420}
+    provider = SimpleNamespace(
+        context=SimpleNamespace(
+            client_metadata=_build_client_metadata(dict(cfg)),
+            oauth_metadata=DeviceOAuthMetadata.model_validate({
+                "issuer": "https://as.example",
+                "token_endpoint": "https://as.example/token",
+                "device_authorization_endpoint": "https://as.example/device",
+            }),
+            auth_server_url=None,
+            client_info=None,
+        ),
+        _coerce_client_secret_post=lambda: None,
+    )
+    asyncio.run(_register(None, provider, cfg))
+    assert provider.context.client_info.client_id == "289113"
+    assert provider.context.client_info.client_secret == "4567"
 
 
 # ---------------------------------------------------------------------------

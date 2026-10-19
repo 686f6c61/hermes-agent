@@ -107,14 +107,15 @@ def _payload(response, label):
 async def _register(client, provider, cfg):
     from mcp.shared.auth import OAuthClientInformationFull
     from mcp.client.auth.oauth2 import OAuthRegistrationError, check_registration_usable
+    from tools.mcp_oauth import _config_credential_text
 
     context = provider.context
     metadata = context.client_metadata.model_dump(mode="json", exclude_none=True)
     metadata.update(grant_types=[DEVICE_GRANT, "refresh_token"], response_types=[])
     if cfg.get("client_id"):
-        data = {**metadata, "client_id": cfg["client_id"]}
+        data = {**metadata, "client_id": _config_credential_text(cfg["client_id"])}
         if cfg.get("client_secret"):
-            data["client_secret"] = cfg["client_secret"]
+            data["client_secret"] = _config_credential_text(cfg["client_secret"])
     else:
         endpoint = context.oauth_metadata.registration_endpoint
         if not endpoint:

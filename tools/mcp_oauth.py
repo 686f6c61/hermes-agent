@@ -1157,6 +1157,22 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         return metadata_cls.model_validate(metadata_kwargs)
 
 
+def _config_credential_text(value: Any) -> Any:
+    """Spell a config-supplied OAuth client credential as text.
+
+    ``hermes config set mcp_servers.<name>.oauth.client_id 289113`` writes a YAML
+    integer, and RFC 6749 §2.2/§2.3.1 makes both ``client_id`` and ``client_secret``
+    strings, so the SDK models must not be handed a number. Values that are already
+    textual, or that are a bool/None (invalid either way, and better off with the
+    model's own message), pass through untouched.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value
+
+
 def _invalidate_tokens_on_client_change(
     storage: HermesTokenStorage, new_client_id: str, new_client_secret: str | None) -> None:
     """Drop cached tokens when the configured client identity changes: tokens minted under the old
@@ -1189,18 +1205,22 @@ def _invalidate_tokens_on_client_change(
 
 def _maybe_preregister_client(storage: HermesTokenStorage, cfg: dict, client_metadata: "OAuthClientMetadata") -> None:
     """If cfg has a pre-registered client_id, persist it to storage."""
-    client_id = cfg.get("client_id")
+    client_id = _config_credential_text(cfg.get("client_id"))
     if not client_id:
         return
+    client_secret = _config_credential_text(cfg.get("client_secret"))
     info_cls = _sdk_class("OAuthClientInformationFull")
-    _invalidate_tokens_on_client_change(storage, client_id, cfg.get("client_secret"))
+    _invalidate_tokens_on_client_change(storage, client_id, client_secret)
     info_dict: dict[str, Any] = {
         "client_id": client_id,
         "redirect_uris": [_resolve_redirect_uri(cfg, cfg["_resolved_port"])],
         "grant_types": client_metadata.grant_types,
         "response_types": client_metadata.response_types,
         "token_endpoint_auth_method": client_metadata.token_endpoint_auth_method,
-        **{key: cfg[key] for key in ("client_secret", "client_name", "scope") if cfg.get(key)}}
+        **{key: cfg[key] for key in ("client_name", "scope") if cfg.get(key)}
+    }
+    if client_secret:
+        info_dict["client_secret"] = client_secret
     _write_json(storage._client_info_path(), _model_json(info_cls.model_validate(info_dict)))
     logger.debug("Pre-registered client_id=%s for '%s'", client_id, storage._server_name)
 

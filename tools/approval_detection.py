@@ -284,13 +284,9 @@ DANGEROUS_PATTERNS = [
     (r'\busers[\\/][^\\/\s]+[\\/]\.ssh\b', "access to SSH keys (Windows path)"),
     (r'\bappdata[\\/](?:local|roaming)[\\/]hermes[^\n]*\.env\b', "access to Hermes secrets (Windows path)"),
     # ── end of Windows tier
-    # macOS GUI automation: `osascript` can drive an application the agent never opened, and the
-    # document it names (`active presentation`, `front document`) belongs to the operator. Closing
-    # or quitting with "do not save" discards that unsaved work and takes the app's AutoRecovery
-    # with it, so there is no recovery path (#141346). One alternation for the spellings AppleScript
-    # and JXA accept for "close without saving"; `saving yes` and plain `save` stay unflagged.
-    (_CMDPOS + r'osascript\b[^\n]*(?:saving\s+no\b|without\s+saving\b|saving\s*:\s*false\b)',
-     "AppleScript closes or quits a document without saving"),
+    # macOS GUI automation (`osascript`) is decided by identity + script source, not here: the
+    # spelling that matters lives inside the AppleScript/JXA program, and wrappers, `sh -c`/`eval`
+    # payloads, stdin pipes and heredocs all carry it. See _applescript_unsaved_close_description.
     (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
     (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
     (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
@@ -501,8 +497,9 @@ _QUOTE_MASKED_DANGEROUS_DESCRIPTIONS = frozenset({
 # owns, so an auxiliary-LLM APPROVE is not consent for them: smart mode asks the human instead of
 # consulting the guardian. Keep this list to actions that destroy state the agent did not create
 # and cannot recreate — every entry is a guaranteed prompt, not a smarter classifier.
+_APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION = "AppleScript closes or quits a document without saving"
 SMART_MANUAL_ONLY_DESCRIPTIONS = frozenset({
-    "AppleScript closes or quits a document without saving",
+    _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION,
 })
 
 # Preserve approvals stored under the removed interpreter regex rules.
@@ -1560,13 +1557,179 @@ def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
     return contains_gateway_lifecycle_command(command)
 
 
+_OSASCRIPT_CLOSE_VERB_RE = re.compile(r"\b(?:close|quit|shut\s+down)\b", re.IGNORECASE)
+_OSASCRIPT_NO_SAVE_RE = re.compile(r"\bwithout\s+saving\b|\bsaving\s*(?::\s*)?(?:no|false)\b", re.IGNORECASE)
+# AppleScript string literals: an operation verb and the "without saving" text inside a quoted
+# string is prose (a dialog asking the question), not the operation.
+_SCRIPT_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+# JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
+# wild); only the two that discard the document count — `saving: "ask"` prompts by itself.
+_JXA_NO_SAVE_RE = re.compile(r"\.(?:close|quit)\s*\(\s*\{[^}]*\bsaving\s*:\s*(?:[\"'](?:no|false)[\"']|false)", re.IGNORECASE)
+_HEREDOC_MARKER_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
+    """Return the manual-only description when AppleScript/JXA closes a document unsaved.
+
+    `osascript` reaches an application the agent never opened, and the document it names
+    (`active presentation`, `front document`) belongs to the operator: closing or quitting with
+    "do not save" discards that unsaved work and the app's AutoRecovery with it, so there is no
+    recovery path (#141346). A command-position regex cannot decide this class — the spelling that
+    matters is in the SCRIPT, not in the argv — so the executable is located by identity and the
+    script source is extracted from whichever carrier holds it: `-e` payloads, a heredoc body, a
+    pipe into stdin, or a wrapper/payload projection of the command line (`command osascript`,
+    `nice -n 5 /usr/bin/osascript`, `sh -c`, `eval`, `env -S`).
+    """
+    if "osascript" not in command.lower():
+        return None
+    for source in _osascript_script_sources(command):
+        if _script_closes_without_saving(source):
+            return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
+    if _depth < 3:
+        # Shell carriers the flat pattern projections do not fold in (`eval`, `env -S`) hand their
+        # payload to a second layer of shell; follow it, bounded so a self-referential command
+        # cannot recurse.
+        for payload in _carrier_payloads(command):
+            if _applescript_unsaved_close_description(payload, _depth + 1) is not None:
+                return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
+    return None
+
+
+def _carrier_payloads(command: str):
+    """Code payloads a shell carrier or `env -S` hands onward."""
+    for start, _end, word in _iter_shell_command_word_spans(command):
+        name = os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower()
+        if name not in _SHELL_CARRIER_NAMES and name != "env":
+            continue
+        segment = _shell_command_segment(command, start)
+        tokens = _shell_segment_tokens(segment, 0)
+        if not tokens:
+            continue
+        if name == "env":
+            payload = _env_split_payload(tokens)
+            if payload:
+                yield payload
+            continue
+        for token in tokens[1:]:
+            if token.startswith("-"):
+                continue
+            yield token
+            break
+
+
+def _script_closes_without_saving(source: str) -> bool:
+    """Whether *source*, as script text, closes or quits a document without saving it."""
+    if _JXA_NO_SAVE_RE.search(source):
+        return True
+    for statement in source.splitlines() or (source,):
+        # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
+        # must not read as the operation, while `close document "Untitled" saving no` still does.
+        literal_free = _SCRIPT_STRING_LITERAL_RE.sub('""', statement)
+        if _OSASCRIPT_CLOSE_VERB_RE.search(literal_free) and _OSASCRIPT_NO_SAVE_RE.search(literal_free):
+            return True
+    return False
+
+
+def _osascript_script_sources(command: str):
+    """Yield the script text of every `osascript` invocation in *command*."""
+    for start, _end, word in _iter_shell_command_word_spans(command):
+        if os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower() != "osascript":
+            continue
+        segment = _shell_command_segment(command, start)
+        tokens = _shell_segment_tokens(segment, 0)
+        if not tokens:
+            continue
+        index = next((i for i, token in enumerate(tokens)
+                      if os.path.basename(_deobfuscate_shell_word_for_detection(token)).lower() == "osascript"),
+                     None)
+        if index is None:
+            continue
+        payloads, carries_source, position = [], False, index + 1
+        while position < len(tokens):
+            token = tokens[position]
+            lowered = token.lower()
+            if token == "--":
+                carries_source = carries_source or position + 1 < len(tokens)
+                break
+            if lowered in ("-l", "--language"):
+                position += 2
+                continue
+            if lowered.startswith("--language=") or (lowered.startswith("-l") and len(token) > 2):
+                position += 1
+                continue
+            if lowered in ("-e", "--exec"):
+                if position + 1 < len(tokens):
+                    payloads.append(tokens[position + 1])
+                    carries_source = True
+                position += 2
+                continue
+            if token.startswith("-"):
+                # osascript's own switches (`-i`, `-s <flags>`, `-ss`); none of them is the script.
+                position += 1
+                continue
+            carries_source = True  # a script file path: source we cannot read from here
+            position += 1
+        marker = _HEREDOC_MARKER_RE.search(segment)
+        if marker:
+            marker_at = command.find(marker.group(0), start)
+            if marker_at >= 0:
+                body = _heredoc_body(command, marker_at + len(marker.group(0)), marker.group(2))
+                if body is not None:
+                    payloads.append(body)
+                    carries_source = True
+        if payloads:
+            yield from payloads
+        elif not carries_source:
+            # No `-e`, no script file, no heredoc: the program arrives on stdin (`printf … |
+            # osascript`), so the producer's arguments are the only place the spelling exists.
+            piped = _piped_script_source(command, start)
+            if piped is not None:
+                yield piped
+
+
+def _heredoc_body(command: str, marker_end: int, delimiter: str) -> str | None:
+    """Body of the heredoc whose delimiter starts after *marker_end*."""
+    newline = command.find("\n", marker_end)
+    if newline < 0:
+        return None
+    body: list[str] = []
+    for line in command[newline + 1:].splitlines():
+        if line.strip() == delimiter:
+            return "\n".join(body)
+        body.append(line)
+    return None
+
+
+def _piped_script_source(command: str, osascript_start: int) -> str | None:
+    """Argument text of the pipeline stage that feeds *osascript* on stdin."""
+    prefix = command[:osascript_start].rstrip()
+    if not prefix.endswith("|"):
+        return None
+    stages = list(_iter_top_level_shell_segments(prefix[:-1]))
+    if not stages:
+        return None
+    tokens = _shell_segment_tokens(stages[-1].strip(), 0)
+    if not tokens or len(tokens) < 2:
+        return None
+    return "\n".join(tokens[1:])
+
+
 def detect_dangerous_command(command: str) -> tuple:
     """Check dangerous patterns -> (is_dangerous, pattern_key, description)."""
     if _command_parser_limit_exceeded(command):
         return (True, _PARSER_LIMIT_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION)
     if _is_verification_artifact_cleanup(command):
         return (False, None, None)
-    for command_variant in _command_detection_variants(command):
+    variants = list(_command_detection_variants(command))
+    # Identity-based checks run over every projection BEFORE the flat patterns, so a carrier's
+    # generic description (`sh -c`, `env -S`) cannot shadow the specific, manual-only reason.
+    for command_variant in variants:
+        if not command_variant:
+            continue
+        description = _applescript_unsaved_close_description(command_variant)
+        if description is not None:
+            return (True, description, description)
+    for command_variant in variants:
         command_lower = _lower_preserving_flags(command_variant)
         masked_lower: str | None = None
         for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:

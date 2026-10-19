@@ -35,6 +35,39 @@ class TestDetection:
         assert desc == DESCRIPTION
 
     @pytest.mark.parametrize("command", [
+        # Executable identity: the absolute path and the wrappers that hide the command name.
+        '/usr/bin/osascript -e \'tell application "Keynote" to close front document saving no\'',
+        'command osascript -e \'tell application "Keynote" to quit without saving\'',
+        'nice -n 5 /usr/bin/osascript -e \'tell application "Keynote" to close front document saving: false\'',
+        # A carrier hands the same payload to a second layer of shell.
+        'sh -c "/usr/bin/osascript -e \'tell application \\"Keynote\\" to quit without saving\'"',
+        'eval "osascript -e \'tell application \\"Keynote\\" to quit without saving\'"',
+        'env -S "/usr/bin/osascript -e \'tell application \\"Keynote\\" to quit without saving\'"',
+        # Script source that is not an -e argument: a heredoc body and a pipe into stdin.
+        'osascript <<\'EOF\'\ntell application "Keynote"\n  close front document saving no\nend tell\nEOF',
+        'printf \'%s\' \'tell application "Keynote" to quit without saving\' | osascript',
+        # JXA spells "do not save" as the string enum, not a boolean.
+        'osascript -l JavaScript -e \'Application("Keynote").documents[0].close({saving: "no"})\'',
+    ])
+    def test_every_carrier_of_the_same_payload_requires_approval(self, command):
+        """The first fix matched only a bare `osascript … saving no` at command position."""
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    @pytest.mark.parametrize("command", [
+        # The question, not the operation: the phrase lives inside a dialog's string literal.
+        'osascript -e \'display dialog "Quit without saving?" buttons {"Cancel", "Quit"}\'',
+        # The phrase as another command's argument, beside a read-only script.
+        'osascript -e \'tell application "Keynote" to get name of front document\'; '
+        'echo "closed without saving"',
+        'echo "closed without saving"',
+    ])
+    def test_inert_text_is_not_flagged(self, command):
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    @pytest.mark.parametrize("command", [
         # Reading state, and the reported command's saving half: both leave the document alone.
         'osascript -e \'tell application "Finder" to get the name of every disk\'',
         'osascript -e \'tell application "Microsoft PowerPoint" to save active presentation '

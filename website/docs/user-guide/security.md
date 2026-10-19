@@ -234,7 +234,7 @@ The following patterns trigger approval prompts (defined in `tools/approval.py`)
 | `docker -H`/`--host`/`--context`, `DOCKER_HOST=`/`DOCKER_CONTEXT=` | Docker daemon redirect — the command targets a different (often remote) daemon |
 | `docker context use` | Switches the default daemon for all future docker commands |
 | `podman --remote`/`-r`/`--url`/`--connection`/`--identity`, `CONTAINER_HOST=` | Podman remote daemon redirect |
-| `osascript` with `saving no` / `without saving` | AppleScript closes or quits the operator's open document without saving — always a manual prompt, even in `smart` mode |
+| `osascript` closing or quitting a document with `saving no` / `without saving` / `saving: "no"`, through any carrier (`command`/`nice`/`env -S` wrappers, `sh -c`/`eval`, a heredoc or a pipe into stdin) | AppleScript or JXA closes or quits the operator's open document without saving — always a manual prompt, even in `smart` mode |
 
 :::info
 **Container bypass**: When running in `docker`, `singularity`, `modal`, `daytona`, or `vercel_sandbox` backends, dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.

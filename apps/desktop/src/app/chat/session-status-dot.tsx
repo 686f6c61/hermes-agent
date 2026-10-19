@@ -1,5 +1,3 @@
-import { useStore } from '@nanostores/react'
-
 import { type Translations, useI18n } from '@/i18n'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -126,10 +124,13 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   const { t } = useI18n()
   const r = t.sidebar.row
 
-  // Subscribe to the shared color map for reactivity; sessionColorFor falls
-  // back to the resolver for a session outside the recents page.
-  useStore($sessionColorById)
-  const color = sessionColorFor(session) ?? null
+  // Subscribe THROUGH the selector rather than beside it: `sessionColorFor` reads
+  // store state, so a plain call the compiler can key on `session` alone served
+  // the previous colour until the row remounted (#141434). The selector re-derives
+  // on every write to the map and returns the primitive, so the render has a real
+  // dependency, and the helper's fallback still resolves a session outside the
+  // recents page.
+  const color = useStoreSelector($sessionColorById, () => sessionColorFor(session) ?? null)
 
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.

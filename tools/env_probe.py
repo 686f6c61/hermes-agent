@@ -7,6 +7,7 @@ its own probe in agent/prompt_builder). Toggle: ``agent.environment_probe`` in c
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +31,9 @@ _PROBE_THREAD: Optional[threading.Thread] = None
 _PROBE_GEN = 0  # bumped on reset so a stale worker can't publish into the fresh generation
 _PROBE_WAIT_TIMEOUT = 10.0  # healthy runtime ~0.5s
 _WAIT_ALREADY_TIMED_OUT = False  # after one full wait, later callers only peek
+# PATH the terminal tool's commands run with (resolved once, lazily); None = inherited.
+_PROBE_PATH: Optional[str] = None
+_PROBE_PATH_RESOLVED = False
 
 # Keep in sync with agent/prompt_builder.py:_REMOTE_TERMINAL_BACKENDS.
 # Duplicated rather than imported to avoid a circular import.
@@ -51,7 +55,8 @@ def _plugin_backend_is_remote(backend: str) -> bool:
         return False
 
 
-def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
+def _run(cmd: list[str], timeout: float = 3.0,
+         env: Optional[dict] = None) -> tuple[int, str, str]:
     """Run a short subprocess -> (returncode, stdout, stderr); failures (binary
     missing, timeout, OSError) return (-1, "", "<reason>"). Output goes through temp
     files, not pipes, so ``timeout`` bounds the *whole* call even on native Windows: a
@@ -65,7 +70,7 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
                 result = subprocess.run(
                     cmd, stdout=out_f, stderr=err_f, timeout=timeout, check=False,
                     # CREATE_NO_WINDOW (0 on POSIX): pythonw hosts would flash a console
-                    stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+                    stdin=subprocess.DEVNULL, env=env, creationflags=windows_hide_flags())
             except subprocess.TimeoutExpired:
                 return -1, "", "timeout"
             out_f.seek(0)
@@ -78,11 +83,55 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
         return -1, "", f"oserror: {exc}"
 
 
-def _py_out(binary: str, *args: str) -> Optional[str]:
-    """stdout of ``<binary> *args`` when the binary is on PATH and exits 0, else None."""
-    if not shutil.which(binary):
+def _terminal_path() -> Optional[str]:
+    """PATH the terminal tool's commands run with, resolved once; None when it cannot
+    be built (the lookups then keep the inherited PATH).
+
+    The terminal resolves ``python3``/``pip``/``uv`` through its login shell — the
+    ``init_session`` snapshot of ``bash -l`` plus ``terminal.shell_init_files`` — with
+    the user's tools ahead of Hermes's store dirs (#138006). This process's PATH is the
+    store-first one, so a bare ``which()`` here describes an interpreter the model never
+    runs, and can report "no pip module" about a Python the terminal never touches.
+    """
+    global _PROBE_PATH, _PROBE_PATH_RESOLVED
+    with _CACHE_LOCK:
+        if not _PROBE_PATH_RESOLVED:
+            try:
+                from tools.environments.local import terminal_tool_path
+
+                _PROBE_PATH = terminal_tool_path() or None
+            except Exception:  # never let PATH resolution break the probe line
+                logger.debug("terminal PATH resolution failed", exc_info=True)
+                _PROBE_PATH = None
+            _PROBE_PATH_RESOLVED = True
+        return _PROBE_PATH
+
+
+def _which(binary: str) -> Optional[str]:
+    """Absolute path of ``binary`` as the terminal would resolve it, else None."""
+    return shutil.which(binary, path=_terminal_path())
+
+
+def _child_env() -> Optional[dict]:
+    """Environment for a probe subprocess: the inherited one with PATH swapped for the
+    terminal's, so the interpreter's own children resolve like the terminal's would.
+    None (inherit) when no terminal PATH could be built."""
+    path = _terminal_path()
+    if path is None:
         return None
-    rc, out, _err = _run([binary, *args])
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PATH"}
+    env["PATH"] = path
+    return env
+
+
+def _py_out(binary: str, *args: str) -> Optional[str]:
+    """stdout of ``<binary> *args`` when the terminal resolves the binary and it exits 0,
+    else None. Resolved to an absolute path first: reporting one interpreter and running
+    another is the failure this probe exists to avoid."""
+    resolved = _which(binary)
+    if not resolved:
+        return None
+    rc, out, _err = _run([resolved, *args], env=_child_env())
     return out if rc == 0 else None
 
 
@@ -133,10 +182,10 @@ def _build_probe_line() -> str:
     py3_has_pip = _has_pip_module("python3") if py3_ver else False
     pip_bound_to = _pip_python_version()
     py3_pep668 = _detect_pep668("python3") if py3_ver else False
-    # Bare which() is correct here (unlike Hermes's own uv call sites): this reports
-    # the environment *the model will see* in the terminal tool, whose PATH includes
-    # the Hermes-managed $HERMES_HOME/bin via local.py.
-    has_uv = shutil.which("uv") is not None
+    # Resolved against the terminal's PATH (login shell + shell_init_files), not this
+    # process's store-first one: the line describes the environment the model's
+    # `terminal` calls get, which is what #138006 changed.
+    has_uv = _which("uv") is not None
 
     mismatch = bool(pip_bound_to and py3_ver and not py3_ver.startswith(pip_bound_to))
     if py3_ver is not None and py3_has_pip and not mismatch and (not py3_pep668 or has_uv):
@@ -239,9 +288,12 @@ def warm_environment_probe_async() -> None:
 def _reset_cache_for_tests() -> None:
     """Test helper — clear the cache between probe scenarios."""
     global _CACHED_LINE, _PROBE_THREAD, _PROBE_GEN, _WAIT_ALREADY_TIMED_OUT
+    global _PROBE_PATH, _PROBE_PATH_RESOLVED
     with _CACHE_LOCK:
         _CACHED_LINE = None
         _PROBE_DONE.clear()
         _PROBE_THREAD = None
         _PROBE_GEN += 1
         _WAIT_ALREADY_TIMED_OUT = False
+        _PROBE_PATH = None
+        _PROBE_PATH_RESOLVED = False

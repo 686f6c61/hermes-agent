@@ -5,12 +5,17 @@ import sys
 import pytest
 
 from tools import env_probe
+from tools.environments import local as local_mod
 
 
 @pytest.fixture(autouse=True)
-def reset_probe_cache():
-    """Each test starts with a clean cache."""
+def reset_probe_cache(monkeypatch):
+    """Each test starts with a clean cache, and with the terminal-PATH lookup pinned to
+    "inherit the process PATH" so a test never spawns a login shell. Tests that care
+    about the PATH set ``env_probe._PROBE_PATH`` themselves."""
     env_probe._reset_cache_for_tests()
+    monkeypatch.setattr(env_probe, "_PROBE_PATH", None)
+    monkeypatch.setattr(env_probe, "_PROBE_PATH_RESOLVED", True)
     yield
     env_probe._reset_cache_for_tests()
 
@@ -26,7 +31,7 @@ class TestSilentWhenHealthy:
         monkeypatch.setattr(env_probe, "_has_pip_module", lambda b: True)
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: False)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.13")
-        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None)
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name, path=None: None)
         assert env_probe.get_environment_probe_line() == ""
 
     def test_pep668_with_uv_returns_empty(self, monkeypatch):
@@ -38,7 +43,7 @@ class TestSilentWhenHealthy:
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: True)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
         monkeypatch.setattr(env_probe.shutil, "which",
-                            lambda name: "/usr/local/bin/uv" if name == "uv" else None)
+                            lambda name, path=None: "/usr/local/bin/uv" if name == "uv" else None)
         assert env_probe.get_environment_probe_line() == ""
 
 
@@ -55,7 +60,7 @@ class TestEmitsOnRealProblems:
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: True)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
         monkeypatch.setattr(env_probe.shutil, "which",
-                            lambda name: None if name == "uv" else "/usr/bin/" + name)
+                            lambda name, path=None: None if name == "uv" else "/usr/bin/" + name)
 
         line = env_probe.get_environment_probe_line()
         assert line  # not silent
@@ -277,3 +282,79 @@ class TestRunBoundedByTimeout:
         assert elapsed < 3.0, f"_run blocked on grandchild for {elapsed:.1f}s"
         assert rc == 0, f"expected clean exit, got rc={rc} err={err!r}"
         assert out == "ok"
+
+
+class TestResolvesAgainstTheTerminalPath:
+    """#141700: since #138006 the terminal runs the user's Python, while this process
+    keeps the store-first PATH. The probe has to report the interpreter the model will
+    actually run — a bare ``which()`` described the store Python and could say "no pip
+    module" about a Python the terminal never touches."""
+
+    def _fake_python(self, directory, *, version="3.14.7", pip: bool):
+        """A ``python3`` stub answering the probe's three questions: version, PEP 668,
+        and ``-m pip --version`` (the "pip module" signal)."""
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "python3"
+        body = "echo pip-24.0" if pip else "exit 1"
+        path.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            f"  *version_info*) echo {version} ;;\n"
+            "  *EXTERNALLY-MANAGED*) echo no ;;\n"
+            f"  *'-m pip --version'*) {body} ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        path.chmod(0o755)
+        return str(directory)
+
+    def test_version_comes_from_the_terminal_path(self, monkeypatch, tmp_path):
+        terminal = self._fake_python(tmp_path / "terminal", version="3.99.0", pip=True)
+        # The process PATH holds nothing: a lookup that leans on it finds no python3.
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        monkeypatch.setattr(env_probe, "_PROBE_PATH", terminal)
+
+        assert env_probe._python_version_of("python3") == "3.99.0"
+
+    def test_store_python_without_pip_is_silent_when_the_terminal_python_has_it(
+            self, monkeypatch, tmp_path):
+        """The reported false positive: store python3 has no pip, the terminal's has it."""
+        store = self._fake_python(tmp_path / "store", pip=False)
+        terminal = self._fake_python(tmp_path / "terminal", pip=True)
+        monkeypatch.setenv("PATH", store)
+        monkeypatch.setattr(env_probe, "_PROBE_PATH", terminal)
+
+        assert env_probe._build_probe_line() == ""
+
+        # Red without the fix: with the process PATH alone the same tree says "no pip
+        # module" about a Python the terminal never runs.
+        monkeypatch.setattr(env_probe, "_PROBE_PATH", None)
+        assert "no pip module" in env_probe._build_probe_line()
+
+    def test_child_env_swaps_only_the_path(self, monkeypatch, tmp_path):
+        terminal = self._fake_python(tmp_path / "terminal", pip=True)
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        monkeypatch.setenv("HERMES_PROBE_SENTINEL", "kept")
+        monkeypatch.setattr(env_probe, "_PROBE_PATH", terminal)
+
+        env = env_probe._child_env()
+
+        assert env["PATH"] == terminal
+        assert env["HERMES_PROBE_SENTINEL"] == "kept"
+        # No leftover case-variant of PATH (Windows ships ``Path``).
+        assert [k for k in env if k.upper() == "PATH"] == ["PATH"]
+
+    def test_failed_path_resolution_falls_back_to_the_inherited_path(
+            self, monkeypatch, tmp_path):
+        """A terminal PATH that cannot be built must not silence (or crash) the probe."""
+        store = self._fake_python(tmp_path / "store", version="3.11.15", pip=False)
+        monkeypatch.setenv("PATH", store)
+        monkeypatch.setattr(env_probe, "_PROBE_PATH_RESOLVED", False)
+
+        def boom(*a, **kw):
+            raise RuntimeError("no shell here")
+
+        monkeypatch.setattr(local_mod, "terminal_tool_path", boom)
+
+        assert env_probe._terminal_path() is None
+        assert "3.11.15" in env_probe._build_probe_line()

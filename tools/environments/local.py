@@ -603,6 +603,57 @@ def _user_tools_first(existing_path: str) -> str:
     return os.pathsep.join([*bash_dirs, *rest]) if bash_dirs else path
 
 
+def terminal_path(base_path: str) -> str:
+    """*base_path* as a terminal command gets it: empty/duplicate entries dropped, the
+    sane entries completed, the user's tools ahead of Hermes's store dirs (#138006).
+    Anything that has to resolve a binary the way the model's terminal resolves it
+    (the system-prompt probe) asks this instead of a bare ``which``."""
+    return _user_tools_first(_append_missing_sane_path_entries(base_path))
+
+
+_LOGIN_PATH_MARKER = "__HERMES_LOGIN_PATH__"
+
+
+def login_shell_path(timeout: float = 8.0) -> str | None:
+    """PATH a terminal command runs with, as its login shell reports it: ``bash -l``
+    plus the ``terminal.shell_init_files`` prelude ``init_session`` sources, which is
+    where nvm/pyenv/conda and a user's own prefixes land. ``None`` when the shell
+    cannot be run (no bash, timeout, non-zero exit) and on Windows, where the shell's
+    PATH is POSIX-shaped and not what ``shutil.which`` consumes."""
+    if _IS_WINDOWS:
+        return None
+    try:
+        script = _prepend_shell_init(f'printf "%s%s" {_LOGIN_PATH_MARKER} "$PATH"',
+                                     _resolve_shell_init_files())
+        proc = subprocess.run(
+            [_find_bash(), "-l", "-c", script], env=_make_run_env({}),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, stdin=subprocess.DEVNULL, check=False)
+        if proc.returncode != 0:
+            return None
+        out = proc.stdout or ""
+        index = out.rfind(_LOGIN_PATH_MARKER)
+        if index < 0:
+            return None
+        return out[index + len(_LOGIN_PATH_MARKER):].strip() or None
+    except Exception:  # a PATH probe must never be the thing that breaks
+        logger.debug("login shell PATH probe failed", exc_info=True)
+        return None
+
+
+def terminal_tool_path(timeout: float = 8.0) -> str:
+    """The PATH the terminal tool's commands run with: the login shell's when it can be
+    read, else the composed process PATH. The counterpart of :func:`terminal_path` for
+    callers outside the spawn path."""
+    path = login_shell_path(timeout)
+    if path:
+        return path
+    from agent.session_client_env import toolchain_environ
+
+    raw = toolchain_environ(os.environ.copy()).get("PATH") or os.environ.get("PATH") or ""
+    return terminal_path(raw)
+
+
 # POSIX-sh-family shells that understand spawn_local's ``[shell, "-lic", "set +m; …"]``
 # invocation; fish, csh/tcsh, nushell, elvish, xonsh would error, so _find_shell
 # falls back to bash for them.
@@ -777,7 +828,7 @@ def _make_run_env(env: dict) -> dict:
     run_env = _scrubbed_env(
         [(dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env), True)],
         frozenset(),
-        lambda p: _user_tools_first(_append_missing_sane_path_entries(p)),
+        terminal_path,
     )
     # While this profile's Bot Desktop is running, its DISPLAY/XAUTHORITY/DBUS ride along so GUI
     # apps the agent launches from the terminal open on the Bot Screen the user is watching, not

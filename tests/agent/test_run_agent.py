@@ -1186,7 +1186,7 @@ class TestEnvironmentProbeIntegration:
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: True)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
         monkeypatch.setattr(env_probe.shutil, "which",
-                            lambda name: None if name == "uv" else "/usr/bin/" + name)
+                            lambda name, path=None: None if name == "uv" else "/usr/bin/" + name)
 
         agent = self._make_agent(environment_probe=True)
         prompt = agent._build_system_prompt()
@@ -1202,7 +1202,7 @@ class TestEnvironmentProbeIntegration:
         monkeypatch.setattr(env_probe, "_has_pip_module", lambda b: True)
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: False)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.13")
-        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None)
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name, path=None: None)
 
         agent = self._make_agent(environment_probe=True)
         prompt = agent._build_system_prompt()
@@ -1217,7 +1217,7 @@ class TestEnvironmentProbeIntegration:
         monkeypatch.setattr(env_probe, "_has_pip_module", lambda b: False)
         monkeypatch.setattr(env_probe, "_detect_pep668", lambda b: True)
         monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
-        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None)
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name, path=None: None)
 
         agent = self._make_agent(environment_probe=False)
         prompt = agent._build_system_prompt()

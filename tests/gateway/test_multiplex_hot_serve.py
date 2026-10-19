@@ -12,6 +12,7 @@ back as "what exists" can never see a new profile (the regression these tests us
 """
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -575,3 +576,43 @@ async def test_hot_added_profile_cannot_double_claim_a_live_secondary_token(tmp_
         await runner.reconcile_served_profiles()
     fp = GatewayRunner._adapter_credential_fingerprint(_Adapter("shared"))
     assert seen_claims["dupe"].get((Platform.DISCORD, fp)) == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_rescan_that_rebuilds_nothing_names_the_restart_instead_of_success(
+    tmp_path, monkeypatch, caplog
+):
+    """#141595: a config/.env edit on a served secondary re-reads the file, then skips every platform
+    that is already live (never a second poller on the same bot), so nothing binds. Reporting that as
+    "0 adapter(s) connected" leaves the operator with `hermes config get` answering the new value
+    while the live adapter keeps the old settings, and no hint that the restart is the remedy."""
+    logging.getLogger("gateway.run_profile_reconcile").setLevel(logging.INFO)
+    caplog.set_level(logging.INFO, logger="gateway.run_profile_reconcile")
+    runner, home = _runner(tmp_path, monkeypatch)
+    work = _mkprofile(home, "work", "DISCORD_BOT_TOKEN=work-token\n")
+    with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
+        _boot(runner, home)
+        await runner._start_secondary_profile_adapters()
+    adapter = runner._profile_adapters["work"][Platform.DISCORD]
+    (work / "config.yaml").write_text("model: {default: m}\nreactions: false\n", encoding="utf-8")
+
+    # What the real builder does on a rescan: the platform is already live, so it builds none.
+    built = []
+
+    async def _rebuild_nothing(profile_name, profile_home, claimed):
+        built.append(profile_name)
+        return 0
+
+    runner._start_one_profile_adapters = _rebuild_nothing
+    caplog.clear()
+    result = await runner.reconcile_served_profiles()
+
+    assert result["rescanned"] == ["work"]
+    assert built == ["work"]
+    assert runner._profile_adapters["work"][Platform.DISCORD] is adapter  # the old settings survive
+    messages = [(r.levelname, r.getMessage()) for r in caplog.records]
+    warnings = [m for level, m in messages
+                if level == "WARNING" and "Re-scanned profile 'work'" in m]
+    assert warnings, messages
+    assert "restart the gateway" in warnings[0]
+    assert not [m for level, m in messages if level == "INFO" and "Re-scanned profile 'work'" in m]

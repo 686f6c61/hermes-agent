@@ -278,7 +278,18 @@ class GatewayProfileReconcileMixin:
                 logger.info("[MULTIPLEX] Now serving profile '%s' (%s adapter(s) connected; %s)", name, connected, reason)
                 result["added"].append(name)
             else:
-                logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
+                # A rescan re-reads the file, but every platform already live is skipped (never a second
+                # poller on the same bot), so a config/.env edit binds nothing: the adapter keeps the
+                # settings it was built with while the host answers with the new config. Report that as
+                # what it is instead of letting "0 adapter(s) connected" read as a successful re-scan.
+                live_count = len((getattr(self, "_profile_adapters", None) or {}).get(name) or {})
+                if connected or not live_count or name in transient_failed:
+                    logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
+                else:
+                    logger.warning(
+                        "[MULTIPLEX] Re-scanned profile '%s' after config/.env change (0 adapter(s) connected): "
+                        "its %s live adapter(s) keep the settings they were built with; re-serve the profile or "
+                        "restart the gateway for the new config to take effect", name, live_count)
                 result["rescanned"].append(name)
         if config_parked:
             added = [name for name in added if name not in config_parked]

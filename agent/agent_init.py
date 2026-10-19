@@ -34,6 +34,7 @@ from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH, fetch_model_metadata, is_local_endpoint
 )
 from agent.agent_init_ollama import _clamp_compressor_to_ollama_num_ctx, _configure_ollama_num_ctx
+from agent.agent_init_bedrock import _init_bedrock_client
 from agent.primary_runtime_snapshot import _snapshot_primary_runtime
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
@@ -807,15 +808,6 @@ def _init_moa_client(agent, api_key):
         print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
 
 
-def _init_bedrock_client(agent, base_url):
-    """bedrock_converse: boto3 directly, no OpenAI client."""
-    from agent.bedrock_adapter import bind_bedrock_runtime
-    bind_bedrock_runtime(agent, base_url, "bedrock_converse")
-    if not agent.quiet_mode:
-        _gr_label = " + Guardrails" if agent._bedrock_guardrail_config else ""
-        print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
-
-
 def _explicit_client_kwargs(agent, api_key, base_url, _provider_timeout) -> dict[str, Any]:
     """OpenAI-client kwargs from explicit CLI/gateway credentials (auth already resolved)."""
     _parsed_url = urlparse(base_url)
@@ -1041,6 +1033,13 @@ def _build_client(agent, api_key, base_url, fallback_model):
         _init_bedrock_client(agent, base_url)
     else:
         _init_openai_client(agent, api_key, base_url, fallback_model, _provider_timeout)
+        # An unreachable primary can walk the fallback chain from inside that call and land on an
+        # Anthropic-wire rung (``_routed_client_kwargs`` → ``recompute_init_fallback_api_mode``),
+        # which moves ``api_mode`` after this dispatch already chose the OpenAI wire. The Anthropic
+        # engine state belongs to the route that now serves the turn: the init snapshot
+        # (``_snapshot_primary_runtime``) and the per-request client key read it unconditionally.
+        if agent.api_mode == "anthropic_messages" and not hasattr(agent, "_anthropic_api_key"):
+            _init_anthropic_client(agent, agent.api_key, agent.base_url, _provider_timeout)
 
 
 def _lazy_headers(module: str, name: str, pass_key: bool = False, pass_base: bool = False):

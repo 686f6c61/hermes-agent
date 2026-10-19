@@ -13,6 +13,7 @@ import nodePty from 'node-pty'
 import { resolveTerminalConnectionForSender } from './connection-apply'
 import { ensureSpawnHelperExecutable } from './spawn-helper-perms'
 import { buildInteractiveSshArgs } from './ssh-connection'
+import { type TerminalCwdProbe, terminalSpawnCwd } from './terminal-cwd'
 import { createTerminalOutputGate } from './terminal-output-gate'
 import { applyWindowsMsysBashEnvDefaults } from './windows-msys-bash-env'
 import { buildWindowsInteractiveCommand } from './windows-remote-lifecycle'
@@ -143,16 +144,20 @@ export function registerTerminalIpc({
     return posixShellSpec(shellPath || '/bin/sh')
   }
 
-  function safeTerminalCwd(cwd) {
-    const candidate = path.resolve(String(cwd || app.getPath('home')))
+  // A remote session's cwd is not this host's cwd: see terminal-cwd.ts for why an unenterable directory
+  // must not reach node-pty. Entering needs X; reading the listing needs R, and a pane the user cannot
+  // read is a dead end for anything they would type next.
+  const terminalCwdProbe: TerminalCwdProbe = {
+    isDirectory: candidate => fs.statSync(candidate).isDirectory(),
+    isEnterable: candidate => {
+      fs.accessSync(candidate, fs.constants.X_OK | fs.constants.R_OK)
 
-    try {
-      const stat = fs.statSync(candidate)
-
-      return stat.isDirectory() ? candidate : path.dirname(candidate)
-    } catch {
-      return app.getPath('home')
+      return true
     }
+  }
+
+  function safeTerminalCwd(cwd) {
+    return terminalSpawnCwd(cwd, app.getPath('home'), terminalCwdProbe)
   }
 
   function terminalShellEnv() {

@@ -23,6 +23,18 @@ from agent.i18n import t
 from hermes_cli.cli_agent_setup_mixin import _retire_agent
 
 
+def _needs_batch_tts(voice_tts: bool, response: str, turn) -> bool:
+    """Whether the whole response still has to be spoken by the batch path.
+
+    Streaming TTS speaks only what the provider streams. A provider that sends no
+    text deltas (external-process providers) never calls ``stream_callback``, so an
+    armed turn drains the speaker with the end-of-text sentinel and stays silent
+    unless the batch path picks the response up afterwards.
+    """
+    return bool(voice_tts and response
+                and (not turn.use_streaming_tts or not getattr(turn, "tts_fed", False)))
+
+
 class CLIChatTurnMixin:
     """chat() and its per-turn phase helpers."""
 
@@ -267,6 +279,10 @@ class CLIChatTurnMixin:
 
             def stream_callback(delta: str):
                 turn.text_queue.put(delta)
+                # Mark the speaker as fed: a provider that never streams text
+                # leaves this False and the batch path speaks the whole reply.
+                if delta:
+                    turn.tts_fed = True
                 # Track what is being spoken so a playback-phase barge capture can be
                 # checked against it (echo guard).
                 self._voice_last_tts_text = (self._voice_last_tts_text or "") + delta
@@ -539,7 +555,7 @@ class CLIChatTurnMixin:
                     platform="cli", user_config=getattr(self.agent, "_notification_config", None))
 
         # Batch TTS unless streaming TTS already spoke the response.
-        if self._voice_tts and response and not turn.use_streaming_tts:
+        if _needs_batch_tts(self._voice_tts, response, turn):
             self._voice_speak_response_async(response)
 
         # Re-queue the interrupt message (plus any that arrived meanwhile) as the next

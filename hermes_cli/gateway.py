@@ -3174,6 +3174,15 @@ def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None =
         owner = (uid, username)
     token = set_hermes_home_override(home)
     try:
+        # A Nix-owned tree is immutable, so there is no launcher to publish in
+        # it. The store gate below only asks whether a managed Python exists,
+        # and one left in $HERMES_HOME/tools by an earlier install answers yes
+        # on a Nix host too: .hermes/bin then lands on the read-only store and
+        # `gateway restart` dies before it reaches systemd (#141442).
+        from hermes_cli.config import detect_install_method, is_nix_install_method
+
+        if is_nix_install_method(detect_install_method(root)):
+            return
         # Publication gate: ask what stage_launcher will bind, so an inherited
         # HERMES_RUNTIME_DIR cannot stand in for this install's store (#131745).
         if resolve_store_python(root, publication=True) is None:

@@ -433,6 +433,20 @@ def _install_single_query_signal_handlers(cli):
     def _signal_handler_q(signum, frame):
         logger.debug("Received signal %s in single-query mode", signum)
         _arm_exit_watchdog_on_shutdown_signal()  # covers wedges in the unwind below
+        # A repeat Ctrl+C once teardown has begun unwinds _tui_shutdown mid-way: session
+        # finalize, the memory-provider shutdown and _release_active_session are skipped and
+        # the shell gets a raw traceback (#140890). The watchdog armed above already covers a
+        # teardown that wedges, so a repeat signal has nothing left to do.
+        #
+        # It has to return BEFORE the agent interrupt below: that helper sleeps
+        # HERMES_SIGTERM_GRACE (1.5 s) whenever ``cli.agent`` exists — set from the first chat
+        # turn on, idle or not — and overlapping signals nest, so every repeat press during the
+        # teardown would add another grace sleep to it (measured: 1.55 s for one press, 3.59 s
+        # for a 2 s burst). Kanban workers are exempt: they never run _tui_shutdown's unwind and
+        # still have to reach the hard exit below.
+        if not os.environ.get("HERMES_KANBAN_TASK") and _teardown_in_progress():
+            logger.debug("Ignoring signal %s: shutdown teardown already in progress", signum)
+            return
         _interrupt_agent_for_signal(getattr(cli, "agent", None), signum)
         # Kanban: a non-daemon worker blocked in _wait_for_process survives KeyboardInterrupt
         # and the dispatcher sees 'running' forever, so os._exit(0) (SIGALRM deadman guards
@@ -463,10 +477,8 @@ def _install_single_query_signal_handlers(cli):
         # A repeat Ctrl+C once teardown has begun unwinds _tui_shutdown mid-way: session
         # finalize, the memory-provider shutdown and _release_active_session are skipped and
         # the shell gets a raw traceback (#140890). The watchdog armed above already covers a
-        # teardown that wedges, so a repeat signal has nothing left to do.
-        if _teardown_in_progress():
-            logger.debug("Ignoring signal %s: shutdown teardown already in progress", signum)
-            return
+        # teardown that wedges, so a repeat signal has nothing left to do. Handled before the
+        # agent interrupt, not here: that helper's grace sleep would hold the teardown open.
         raise KeyboardInterrupt()
     with suppress(Exception):  # restricted environments
         for _name in ("SIGINT", "SIGTERM", "SIGHUP"):

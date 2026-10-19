@@ -20,7 +20,38 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# A base-14 font has no glyphs past WinAnsi, so a PDF built with the sample
+# stylesheet draws every ``ő``, ``ű``, Cyrillic or CJK character as a black box.
+# Register a TrueType face that covers those code points instead, and keep
+# Helvetica only as the fallback for hosts that ship no such font.
+_UNICODE_FONT_PAIRS = (
+    (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ),
+    ("/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"),
+    ("/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"),
+    (
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+    (
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    ),
+    # macOS ships this one; it is the only default face with wide coverage.
+    (
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ),
+    ("/Library/Fonts/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf"),
+    ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+)
+_UNICODE_FONT_NAME = "SkillUnicodeSans"
 
 
 def _reconfigure_stdio() -> None:
@@ -29,6 +60,42 @@ def _reconfigure_stdio() -> None:
             stream.reconfigure(encoding="utf-8")
         except Exception:
             pass
+
+
+def _register_unicode_font() -> tuple[str, str] | None:
+    """Register the first available wide-coverage TTF pair.
+
+    Returns ``(regular, bold)`` font names, or ``None`` when the host has no
+    such font and the caller should stay on the base-14 faces.
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    for regular_path, bold_path in _UNICODE_FONT_PAIRS:
+        if not (os.path.exists(regular_path) and os.path.exists(bold_path)):
+            continue
+        regular, bold = _UNICODE_FONT_NAME, _UNICODE_FONT_NAME + "-Bold"
+        try:
+            pdfmetrics.registerFont(TTFont(regular, regular_path))
+            pdfmetrics.registerFont(TTFont(bold, bold_path))
+        except Exception:
+            continue
+        return regular, bold
+    return None
+
+
+def _warn_on_unencodable_text(spec: dict, fonts: tuple[str, str] | None) -> None:
+    """Name the characters a fallback run cannot draw, instead of hiding them."""
+    if fonts is not None:
+        return
+    text = json.dumps(spec, ensure_ascii=False)
+    lost = sorted({ch for ch in text if ord(ch) > 0xFF})
+    if lost:
+        print(
+            "Warning: no Unicode TrueType font found; "
+            f"{''.join(lost)!r} will render as empty boxes",
+            file=sys.stderr,
+        )
 
 
 def build_pdf(spec: dict, out_path: str) -> int:
@@ -52,6 +119,17 @@ def build_pdf(spec: dict, out_path: str) -> int:
 
     page_size = letter if str(spec.get("page_size", "A4")).lower() == "letter" else A4
     styles = getSampleStyleSheet()
+    fonts = _register_unicode_font()
+    body_font, bold_font = fonts if fonts else ("Helvetica", "Helvetica-Bold")
+    if fonts:
+        for style in styles.byName.values():
+            # ListStyle has no fontName; only the paragraph styles carry one.
+            font_name = getattr(style, "fontName", "")
+            if font_name == "Helvetica-Bold":
+                style.fontName = bold_font
+            elif font_name == "Helvetica":
+                style.fontName = body_font
+    _warn_on_unencodable_text(spec, fonts)
     story = []
     for el in spec.get("elements", []):
         etype = el.get("type")
@@ -70,10 +148,14 @@ def build_pdf(spec: dict, out_path: str) -> int:
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
+            if fonts:
+                # Plain-string cells are drawn with the table's own font, which
+                # defaults to Helvetica.
+                style.append(("FONTNAME", (0, 0), (-1, -1), body_font))
             if el.get("header", True):
                 style += [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), bold_font),
                 ]
             table.setStyle(TableStyle(style))
             story.append(table)
@@ -100,7 +182,7 @@ def build_pdf(spec: dict, out_path: str) -> int:
     def draw_page_number(canvas, doc):
         if spec.get("page_numbers", True):
             canvas.saveState()
-            canvas.setFont("Helvetica", 9)
+            canvas.setFont(body_font, 9)
             canvas.drawCentredString(page_size[0] / 2.0, 0.5 * inch, f"Page {doc.page}")
             canvas.restoreState()
 

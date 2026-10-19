@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import json
+import re
 import threading
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -725,6 +726,61 @@ def build_session_key(
     thread_part = [thread_id] if thread_id else []
     parts += user_part + thread_part if is_dm else thread_part + user_part
     return ":".join(str(part) for part in parts)
+
+
+# Named-profile ids never contain ``:`` (``hermes_state_keys``), so the namespace slot is unambiguous.
+_PROFILE_ID_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Slack types its ids by first letter: workspace ``T`` (``E`` for an Enterprise org), channel/DM
+# ``C``/``G``/``D``, user ``U``/``W``. Only Slack carries the workspace slot, and a relay
+# connector's tenant id need not follow that convention — hence the two-way test below.
+_SLACK_WORKSPACE_ID_RE = re.compile(r"^[TE][A-Z0-9]{2,}$")
+_SLACK_CHAT_ID_RE = re.compile(r"^[CDG][A-Z0-9]{2,}$")
+
+
+def _slack_chat_slot(parts: list[str]) -> int:
+    """Index of the chat id in a Slack key: ``5`` when ``parts[4]`` is the workspace slot, else ``4``.
+
+    ``build_session_key`` puts the workspace id between the chat_type and the chat id for Slack
+    alone, so the two layouts cannot be told apart by position. ``parts[4]`` is the workspace when
+    it is workspace-shaped, or when the slot after it is a channel/DM id while it is not (a relay
+    connector's tenant id); a key with nothing after ``parts[4]`` carries no workspace slot.
+    """
+    if len(parts) <= 5:
+        return 4
+    if _SLACK_WORKSPACE_ID_RE.match(parts[4]):
+        return 5
+    if _SLACK_CHAT_ID_RE.match(parts[5]) and not _SLACK_CHAT_ID_RE.match(parts[4]):
+        return 5
+    return 4
+
+
+def parse_session_key(session_key: str) -> Optional[dict]:
+    """Parse a key written by ``build_session_key`` — its exact inverse — or ``None``.
+
+    Shape: ``agent:{ns}:{platform}:{chat_type}[:{slack workspace}][:{chat_id}][:{thread_id}][:{user}]``.
+    Slack's workspace slot shifts the chat id and the thread slot by one, so a parser that assumed
+    ``parts[4]`` was the chat id reported the WORKSPACE as the chat and every Slack completion
+    targeted a chat that does not exist (#141356). For group/channel sessions the suffix after the
+    chat id may be a user_id, not a thread_id, so ``thread_id`` is reported only for ``dm`` and
+    ``thread`` chat types. Named profiles are reported as ``profile``; ``main`` keys keep their
+    historical shape exactly (no ``profile`` key) so equality assertions on parsed dicts stay stable.
+    """
+    parts = session_key.split(":")
+    if not (
+        len(parts) >= 5
+        and parts[0] == "agent"
+        and (parts[1] in ("main", "main~") or _PROFILE_ID_KEY_RE.match(parts[1]))
+    ):
+        return None
+    chat_at = _slack_chat_slot(parts) if parts[2] == Platform.SLACK.value else 4
+    result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[chat_at]}
+    if chat_at == 5:
+        result["scope_id"] = parts[4]
+    if parts[1] != "main":
+        result["profile"] = profile_from_session_key_namespace(parts[1])
+    if len(parts) > chat_at + 1 and parts[3] in {"dm", "thread"}:
+        result["thread_id"] = parts[chat_at + 1]
+    return result
 
 
 class _SessionFlight:

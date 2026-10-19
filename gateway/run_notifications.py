@@ -1396,8 +1396,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         evt["platform"] = parsed.get("platform", "")
         evt["chat_type"] = parsed.get("chat_type", "")
         evt["chat_id"] = parsed.get("chat_id", "")
-        if parsed.get("thread_id"):
-            evt["thread_id"] = parsed["thread_id"]
+        for slot in ("scope_id", "thread_id"):
+            if parsed.get(slot):
+                evt[slot] = parsed[slot]
 
     async def _deliver_async_delegation_group(self, group: list[dict]) -> Optional[bool]:
         """Deliver a same-session batch of async completions as ONE turn: the primary carries the

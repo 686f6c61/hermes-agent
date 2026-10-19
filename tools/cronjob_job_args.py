@@ -99,6 +99,11 @@ def _origin_from_env(
     return {
         "platform": origin_platform, "chat_id": origin_chat_id,
         "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None, "thread_id": thread_id,
+        # DM shape of the source chat. A continuable cron thread needs it to seed the slot the
+        # user's in-thread reply resolves to; without it scheduler_delivery falls back to Slack's
+        # "D..." chat-id convention, which never matches a Matrix room id ("!...") — so a DM
+        # thread seeded `group` and every reply landed in an empty transcript (#141429).
+        "chat_type": get_session_env("HERMES_SESSION_CHAT_TYPE") or None,
         # Lets a delivery mirror resolve the participant's session in per-user-isolated groups.
         "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,
         # Workspace/server scope (Slack team, Discord guild...): Slack session keys embed it,

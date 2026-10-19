@@ -1570,12 +1570,34 @@ _OSASCRIPT_NO_SAVE_RE = re.compile(r"\bwithout\s+saving\b|\bsaving\s*(?::\s*)?(?
 _SCRIPT_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 _SCRIPT_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
 _JS_SCRIPT_HINT_RE = re.compile(r"Application\s*\(|ObjC\.|\.close\s*\(|\b(?:var|let|const)\s")
-# AppleScript's line-continuation character; the statement continues after it.
-_APPLESCRIPT_CONTINUATION_RE = re.compile(r"¬\s*\n\s*")
+# AppleScript's line-continuation character; the statement continues after it, and CR is a line
+# ending the language accepts as well as LF.
+_APPLESCRIPT_CONTINUATION_RE = re.compile(r"¬[ \t]*(?:\r\n|\r|\n)[ \t]*")
+# Comments are prose in both languages, and an operation that only appears inside one is not the
+# operation: `get name of front document -- quit without saving` reads the document, and
+# `documents.length // .close({saving: "no"})` is commented-out JXA.
+_APPLESCRIPT_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_APPLESCRIPT_BLOCK_COMMENT_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
+_JS_LINE_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
+_JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 # JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
-# wild); only the two that discard the document count — `saving: "ask"` prompts by itself.
-_JXA_NO_SAVE_RE = re.compile(r"\.(?:close|quit)\s*\(\s*\{[^}]*\bsaving\s*:\s*(?:[\"'](?:no|false)[\"']|false)", re.IGNORECASE)
-_HEREDOC_MARKER_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# wild); only the two that discard the document count — `saving: "ask"` prompts by itself. The key
+# is a JS property name, so it may be quoted.
+_JXA_NO_SAVE_RE = re.compile(
+    r"\.(?:close|quit)\s*\(\s*\{[^}]*[\"']?saving[\"']?\s*:\s*(?:[\"'](?:no|false)[\"']|false)",
+    re.IGNORECASE,
+)
+# AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
+# `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
+_APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
+_APPLESCRIPT_RAW_CODE_NAMES = {"coreclos": "close", "savo": "saving"}
+# A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, and `<<-`
+# (tabs stripped) is not the same body rule as a plain `<<` (delimiter alone on the line).
+_HEREDOC_MARKER_RE = re.compile(
+    r"<<(?P<dash>-?)[ \t]*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z0-9_][A-Za-z0-9_.-]*)(?P=quote)"
+)
+# A stage that copies stdin to stdout untouched; the payload behind the pipe is the stage before it.
+_STDIN_PASS_THROUGH = frozenset({"cat"})
 
 
 def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
@@ -1592,8 +1614,8 @@ def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str
     """
     if "osascript" not in command.lower():
         return None
-    for source in _osascript_script_sources(command):
-        if _script_closes_without_saving(source):
+    for source, language in _osascript_script_sources(command):
+        if _script_closes_without_saving(source, language):
             return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
     if _depth < 3:
         # Shell carriers the flat pattern projections do not fold in (`eval`, `env -S`) hand their
@@ -1635,20 +1657,43 @@ def _carrier_payloads(command: str):
             break
 
 
-def _script_closes_without_saving(source: str) -> bool:
-    """Whether *source*, as script text, closes or quits a document without saving it."""
-    if _JXA_NO_SAVE_RE.search(source):
-        return True
-    javascript = bool(_JS_SCRIPT_HINT_RE.search(source))
+def _script_closes_without_saving(source: str, language: str | None = None) -> bool:
+    """Whether *source*, as script text in *language*, closes or quits a document without saving.
+
+    *language* is the `-l` value when the invocation names one. Guessing it from the text is the
+    fallback, not the rule: an AppleScript comment holding the word `let` flipped a document close
+    into the JXA reading, where the apostrophe of `front document's name` pairs with the one in
+    `-- don't`, swallowing the `saving no` between them.
+    """
+    # Four-character codes are the same command and parameter spelled raw.
+    source = _APPLESCRIPT_RAW_CODE_RE.sub(
+        lambda match: _APPLESCRIPT_RAW_CODE_NAMES.get(match.group(1).lower(), match.group(0)),
+        source,
+    )
+    if language:
+        javascript = language == "javascript"
+    else:
+        # The hint is read on comment-free text, because a comment is prose in either language.
+        javascript = bool(_JS_SCRIPT_HINT_RE.search(_APPLESCRIPT_LINE_COMMENT_RE.sub("", source)))
     # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
     # same operation as `saving no`; splitting first would strand each half on its own line.
     source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
     for statement in source.splitlines() or (source,):
+        if javascript:
+            # A commented-out call is not the call: `documents.length // .close({saving: "no"})`.
+            statement = _JS_LINE_COMMENT_RE.sub("", _JS_BLOCK_COMMENT_RE.sub("", statement))
+        if _JXA_NO_SAVE_RE.search(statement):
+            return True
         # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
         # must not read as the operation, while `close document "Untitled" saving no` still does.
         literal_free = _SCRIPT_STRING_LITERAL_RE.sub('""', statement)
         if javascript:
             literal_free = _SCRIPT_SINGLE_QUOTED_LITERAL_RE.sub('""', literal_free)
+        else:
+            # An AppleScript comment is prose too: `get name of front document -- quit without saving`.
+            literal_free = _APPLESCRIPT_LINE_COMMENT_RE.sub(
+                "", _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", literal_free)
+            )
         # A continuation character that survived on one line (`saving ¬ no`) is whitespace here.
         literal_free = literal_free.replace("¬", " ")
         if _OSASCRIPT_CLOSE_VERB_RE.search(literal_free) and _OSASCRIPT_NO_SAVE_RE.search(literal_free):
@@ -1656,24 +1701,42 @@ def _script_closes_without_saving(source: str) -> bool:
     return False
 
 
-def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], bool]:
-    """Script payloads in an `osascript` argv, and whether a source is named but unreadable.
+def _osascript_language(value: str) -> str | None:
+    """Canonical script language named by an `osascript -l` value."""
+    lowered = value.strip().lower()
+    if lowered in ("javascript", "jxa"):
+        return "javascript"
+    if lowered in ("applescript", "osa"):
+        return "applescript"
+    return None
+
+
+def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], str | None, bool]:
+    """Script payloads in an `osascript` argv, their language, and whether a source is unreadable.
 
     `index` is the executable's own position, so ``tokens[index + 1:]`` is its argv. A source
     named as a file path is reported through the flag (`carries_source`) rather than read: the
     program is not in the command line, and reading it here would be IO on an arbitrary path.
     """
     payloads: list[str] = []
+    language: str | None = None
     carries_source, position = False, index + 1
     while position < len(tokens):
         token = tokens[position]
         lowered = token.lower()
         if token == "--":
-            return payloads, carries_source or position + 1 < len(tokens)
+            return payloads, language, carries_source or position + 1 < len(tokens)
         if lowered in ("-l", "--language"):
+            if position + 1 < len(tokens):
+                language = _osascript_language(tokens[position + 1])
             position += 2
             continue
-        if lowered.startswith("--language=") or (lowered.startswith("-l") and len(token) > 2):
+        if lowered.startswith("--language="):
+            language = _osascript_language(token.split("=", 1)[1])
+            position += 1
+            continue
+        if lowered.startswith("-l") and len(token) > 2:
+            language = _osascript_language(token[2:])
             position += 1
             continue
         if lowered in ("-e", "--exec"):
@@ -1700,11 +1763,11 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], b
             continue
         carries_source = True  # a script file path: source we cannot read from here
         position += 1
-    return payloads, carries_source
+    return payloads, language, carries_source
 
 
 def _osascript_script_sources(command: str):
-    """Yield the script text of every `osascript` invocation in *command*."""
+    """Yield ``(source, language)`` for every `osascript` invocation in *command*."""
     for start, _end, word in _iter_shell_command_word_spans(command):
         if os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower() != "osascript":
             continue
@@ -1717,33 +1780,44 @@ def _osascript_script_sources(command: str):
                      None)
         if index is None:
             continue
-        payloads, carries_source = _osascript_argv_sources(tokens, index)
+        payloads, language, carries_source = _osascript_argv_sources(tokens, index)
         marker = _HEREDOC_MARKER_RE.search(segment)
         if marker:
             marker_at = command.find(marker.group(0), start)
             if marker_at >= 0:
-                body = _heredoc_body(command, marker_at + len(marker.group(0)), marker.group(2))
+                body = _heredoc_body(
+                    command,
+                    marker_at + len(marker.group(0)),
+                    marker.group("delimiter"),
+                    bool(marker.group("dash")),
+                )
                 if body is not None:
                     payloads.append(body)
                     carries_source = True
         if payloads:
-            yield from payloads
+            for payload in payloads:
+                yield payload, language
         elif not carries_source:
             # No `-e`, no script file, no heredoc: the program arrives on stdin (`printf … |
             # osascript`), so the producer's arguments are the only place the spelling exists.
             piped = _piped_script_source(command, _enclosing_command_start(command, start))
             if piped is not None:
-                yield piped
+                yield piped, language
 
 
-def _heredoc_body(command: str, marker_end: int, delimiter: str) -> str | None:
-    """Body of the heredoc whose delimiter starts after *marker_end*."""
+def _heredoc_body(command: str, marker_end: int, delimiter: str, strip_tabs: bool = False) -> str | None:
+    """Body of the heredoc whose delimiter starts after *marker_end*.
+
+    A plain `<<` body ends only on the delimiter alone on its line, so an indented ` EOF` is part
+    of the program; `<<-` strips leading tabs from each line before the comparison (and only tabs).
+    """
     newline = command.find("\n", marker_end)
     if newline < 0:
         return None
     body: list[str] = []
     for line in command[newline + 1:].splitlines():
-        if line.strip() == delimiter:
+        candidate = line.lstrip("\t") if strip_tabs else line
+        if candidate == delimiter:
             return "\n".join(body)
         body.append(line)
     return None
@@ -1774,18 +1848,32 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
     stages = [stage for stage in _iter_top_level_shell_segments(prefix[:-1]) if stage.strip()]
     if not stages:
         return None
-    producer = stages[-1].strip()
-    marker = _HEREDOC_MARKER_RE.search(producer)
-    if marker:
-        marker_at = command.rfind(marker.group(0), 0, executable_start)
-        if marker_at >= 0:
-            body = _heredoc_body(command, marker_at + len(marker.group(0)), marker.group(2))
-            if body is not None:
-                return body
-    tokens = _shell_segment_tokens(producer, 0)
-    if not tokens or len(tokens) < 2:
-        return None
-    return "\n".join(tokens[1:])
+    for raw_stage in reversed(stages):
+        producer = raw_stage.strip()
+        marker = _HEREDOC_MARKER_RE.search(producer)
+        if marker:
+            marker_at = command.rfind(marker.group(0), 0, executable_start)
+            if marker_at >= 0:
+                body = _heredoc_body(
+                    command,
+                    marker_at + len(marker.group(0)),
+                    marker.group("delimiter"),
+                    bool(marker.group("dash")),
+                )
+                if body is not None:
+                    return body
+        tokens = _shell_segment_tokens(producer, 0)
+        if not tokens:
+            continue
+        name = os.path.basename(_deobfuscate_shell_word_for_detection(tokens[0])).lower()
+        if name in _STDIN_PASS_THROUGH and len(tokens) == 1:
+            # `printf … | cat | osascript`: `cat` copies stdin to stdout, so the payload behind the
+            # pipe is the stage before it, not `cat`'s empty argv.
+            continue
+        if len(tokens) < 2:
+            return None
+        return "\n".join(tokens[1:])
+    return None
 
 
 def detect_dangerous_command(command: str) -> tuple:

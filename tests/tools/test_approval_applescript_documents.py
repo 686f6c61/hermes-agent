@@ -62,6 +62,23 @@ class TestDetection:
         'eval osascript -e "\'tell application \\"Keynote\\" to close front document saving no\'"',
         # `¬` continues the statement: `saving ¬` and `no` are one operation.
         'osascript -e \'tell application "Keynote" to close front document saving ¬\nno\'',
+        # `¬` also continues across a CR line ending, and CR alone ends an AppleScript statement.
+        'osascript -e \'tell application "Keynote" to close front document saving ¬\rno\'',
+        # A pass-through stage (`cat` with no arguments) does not consume the pipe's payload.
+        'printf \'%s\' \'tell application "Keynote" to quit without saving\' | cat | osascript',
+        # An AppleScript comment containing `let` is not JXA, so its apostrophes stay punctuation.
+        'osascript <<\'EOF\'\ntell application "Keynote" to close (first document whose name is '
+        'front document\'s name) saving no -- don\'t let it keep\nEOF',
+        # A quoted JS property key is the same option; raw four-character codes compile to the
+        # same Standard Suite command and parameter.
+        'osascript -l JavaScript -e \'Application("Keynote").documents[0].close({"saving": "no"})\'',
+        'osascript -e \'tell application "Keynote" to «event coreclos» front document '
+        'given «class savo»:no\'',
+        # A heredoc delimiter is a shell word (`APPLESCRIPT-END`), and a plain `<<` body ends only
+        # on the delimiter itself, so an indented ` EOF` line is still part of the program.
+        'osascript <<\'APPLESCRIPT-END\'\ntell application "Keynote" to quit without saving\n'
+        'APPLESCRIPT-END',
+        'osascript <<\'EOF\'\nset x to 1\n EOF\ntell application "Keynote" to quit without saving\nEOF',
     ])
     def test_every_carrier_of_the_same_payload_requires_approval(self, command):
         """The first fix matched only a bare `osascript … saving no` at command position."""
@@ -81,6 +98,11 @@ class TestDetection:
         # (`front document's name`) are punctuation and must not shield the operation.
         'osascript -l JavaScript -e "var m = \'Quit without saving?\'; '
         'Application(\'Keynote\').documents.length"',
+        # `-l JavaScript` on a script with no operation at all: the phrase is a JS string, and a
+        # commented-out JXA call is a comment.
+        'osascript -l JavaScript -e "console.log(\'quit without saving\')"',
+        'osascript -e \'tell application "Keynote" to get name of front document -- quit without saving\'',
+        'osascript -l JavaScript -e \'Application("Keynote").documents.length // .close({saving: "no"})\'',
     ])
     def test_inert_text_is_not_flagged(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command

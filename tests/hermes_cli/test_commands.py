@@ -29,6 +29,27 @@ class TestCommandRegistry:
         names = [cmd.name for cmd in COMMAND_REGISTRY]
         assert len(names) == len(set(names)), f"Duplicate names: {[n for n in names if names.count(n) > 1]}"
 
+    def test_gateway_only_commands_do_not_claim_a_terminal_desktop_surface(self):
+        """A gateway-only command has no terminal surface to send the user to.
+
+        The desktop renders ``desktop="terminal"`` as "only available in the
+        terminal interface", but gateway-only commands are hidden from the TUI
+        catalog and unknown to the classic CLI, so that hint leads nowhere.
+        """
+        mislabelled = [
+            cmd.name
+            for cmd in COMMAND_REGISTRY
+            if cmd.gateway_only and cmd.desktop == "terminal"
+        ]
+        assert mislabelled == []
+
+    def test_messaging_only_commands_name_the_messaging_surface(self):
+        """The desktop refusal for a messaging-only command must say so."""
+        for name in ("restart", "sethome"):
+            cmd = next(c for c in COMMAND_REGISTRY if c.name == name)
+            assert cmd.gateway_only is True
+            assert cmd.desktop == "messaging"
+
     def test_no_alias_collides_with_canonical_name(self):
         """An alias must not shadow another command's canonical name."""
         canonical_names = {cmd.name for cmd in COMMAND_REGISTRY}

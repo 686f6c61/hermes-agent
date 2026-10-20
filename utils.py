@@ -136,7 +136,12 @@ _WINDOWS_CONTENDED_REPLACE_ERRORS = frozenset({5, 32, 33})
 _REPLACE_RETRY_ATTEMPTS = 4
 _REPLACE_RETRY_BASE_DELAY_S = 0.02
 _REPLACE_RETRY_MAX_DELAY_S = 0.1
-_CROSS_DEVICE_ERRNOS = (errno.EXDEV, errno.EBUSY)
+# Rename failures that never clear on retry, so the write has to give up the atomic swap and take
+# the copy fallback: a cross-device or bind-mounted target (EXDEV/EBUSY), and a target whose dentry
+# went stale underneath the mount — overlayfs and NFS answer those renames with ESTALE ("Stale file
+# handle") while still letting the file be written through its own path, which is what the fallback
+# re-opens. Guarded: not every platform's errno module carries ESTALE.
+_RENAME_FALLBACK_ERRNOS = (errno.EXDEV, errno.EBUSY) + ((errno.ESTALE,) if hasattr(errno, "ESTALE") else ())
 
 
 def _is_contended_windows_replace_error(exc: OSError) -> bool:
@@ -180,10 +185,10 @@ def atomic_replace(tmp_path: str | Path, target: str | Path) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
     Resolves a symlink first so ``os.replace`` writes the real file in place and the symlink
-    survives. Otherwise identical to ``os.replace`` unless the rename fails with EXDEV/EBUSY
-    (cross-device, bind-mount, busy file: copy/fsync/unlink immediately — these never clear on
-    retry) or a Windows rename contended by another open handle (winerror 5/32/33: bounded retry,
-    then in-place rewrite).
+    survives. Otherwise identical to ``os.replace`` unless the rename fails with EXDEV/EBUSY/ESTALE
+    (cross-device, bind-mount, busy file, stale overlayfs/NFS dentry: copy/fsync/unlink immediately —
+    these never clear on retry) or a Windows rename contended by another open handle (winerror
+    5/32/33: bounded retry, then in-place rewrite).
     """
     target_str = str(target)
     real_path = _publish_path(target_str)
@@ -193,7 +198,7 @@ def atomic_replace(tmp_path: str | Path, target: str | Path) -> str:
         return real_path
     except OSError as exc:
         contended = _is_contended_windows_replace_error(exc)
-        if exc.errno not in _CROSS_DEVICE_ERRNOS and not contended:
+        if exc.errno not in _RENAME_FALLBACK_ERRNOS and not contended:
             raise
         if contended:
             # Lazy: keeps ``utils`` free of a package-level dependency on ``agent``.
@@ -205,7 +210,7 @@ def atomic_replace(tmp_path: str | Path, target: str | Path) -> str:
                     return real_path
                 except OSError as retry_exc:
                     exc = retry_exc
-                    if retry_exc.errno in _CROSS_DEVICE_ERRNOS:
+                    if retry_exc.errno in _RENAME_FALLBACK_ERRNOS:
                         contended = False  # not contention after all — stop burning the budget
                         break
                     if not _is_contended_windows_replace_error(retry_exc):

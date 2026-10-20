@@ -44,6 +44,37 @@ SANDBOX_ALLOWED_TOOLS = frozenset([
     "web_search", "web_extract", "read_file", "write_file", "search_files", "patch", "terminal",
 ])
 
+# Sandbox tools whose active backend may live in the model transport instead of in this
+# process. `web.search_backend: openai-native` declares the Responses built-in
+# `{"type": "web_search"}`, so the transport drops the client tool before the request goes
+# out and the provider's `search()` always fails — advertising the Python helper then sends
+# the model into a call that cannot work, and it retries it in a loop.
+_TRANSPORT_OWNED_SANDBOX_TOOLS = frozenset(["web_search"])
+
+
+def _runs_client_side(tool: str) -> bool:
+    """False when *tool*'s active backend executes that call in the model transport, not here."""
+    if tool not in _TRANSPORT_OWNED_SANDBOX_TOOLS:
+        return True
+    try:
+        from agent.web_search_registry import get_active_search_provider
+
+        provider = get_active_search_provider()
+        if provider is None:
+            return True
+        return bool(getattr(provider, "supports_client_search", lambda: True)())
+    except Exception:
+        # Fail open: an unresolvable backend keeps today's advertisement, but a silent
+        # swallow would hide a broken registry behind a schema that looks deliberate.
+        logger.debug("could not resolve the active search backend", exc_info=True)
+        return True
+
+
+def _client_side_sandbox_tools(tools) -> frozenset:
+    """The subset of *tools* that can actually answer from inside the sandbox."""
+    return frozenset(t for t in tools if _runs_client_side(t))
+
+
 # Resource limit defaults (overridable via config.yaml → code_execution.*)
 DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
@@ -151,6 +182,11 @@ def _missing_hermes_tools_import_hint(m, enabled_tools) -> str:
                 "If that import failed, the generated module may be stale or another "
                 "hermes_tools may be first on sys.path. Check hermes_tools.__file__ "
                 "and retry with reset=true.")
+    if not _runs_client_side(missing):
+        return (f"'{missing}' cannot run inside the execute_code sandbox on this backend: the "
+                "active web search backend declares search as a server-side tool, so the call "
+                f"runs in the model turn instead. Call `{missing}` as a normal tool call — do "
+                "not import it here.")
     available = sorted(SANDBOX_ALLOWED_TOOLS & set(enabled_tools or SANDBOX_ALLOWED_TOOLS))
     return (f"'{missing}' is not available inside the execute_code sandbox. "
             f"Importable tools here: {', '.join(available)}. For anything "
@@ -588,8 +624,12 @@ def _finish_remote_kernel_result(kernel_result: dict[str, Any], *,
 
 
 def _sandbox_tools_for(enabled_tools: Optional[list[str]]) -> frozenset:
-    """Enabled ∩ SANDBOX_ALLOWED_TOOLS, or every sandbox tool when the intersection is empty."""
-    return frozenset(SANDBOX_ALLOWED_TOOLS & set(enabled_tools or ())) or SANDBOX_ALLOWED_TOOLS
+    """Enabled ∩ SANDBOX_ALLOWED_TOOLS, or every sandbox tool when the intersection is empty.
+
+    Transport-owned helpers are dropped: the kernel's ``hermes_tools`` stub, the RPC allow-list
+    and the call budget all key off this set, so one filter covers all three."""
+    enabled = frozenset(SANDBOX_ALLOWED_TOOLS & set(enabled_tools or ())) or SANDBOX_ALLOWED_TOOLS
+    return _client_side_sandbox_tools(enabled)
 
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
@@ -875,12 +915,17 @@ _TOOL_DOC_LINES = [
 ]
 
 
-def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
+def build_execute_code_schema(enabled_sandbox_tools: "set | frozenset | None" = None,
                               mode: str | None = None) -> dict:
     """execute_code schema listing only *enabled_sandbox_tools* — a disabled tool (e.g. web off)
     must not appear or the model keeps trying it. ``mode`` (None → config) picks the cwd sentence."""
     if enabled_sandbox_tools is None:
+        # Registration-time default (`EXECUTE_CODE_SCHEMA`): keep the full list. Resolving the
+        # search backend here would import the plugin registry from a tool being registered; the
+        # per-session rewrite below is what gates the model, and it always runs.
         enabled_sandbox_tools = SANDBOX_ALLOWED_TOOLS
+    else:
+        enabled_sandbox_tools = _client_side_sandbox_tools(enabled_sandbox_tools)
     if mode is None:
         mode = _get_execution_mode()
     tool_lines = "\n".join(doc for name, doc in _TOOL_DOC_LINES if name in enabled_sandbox_tools)

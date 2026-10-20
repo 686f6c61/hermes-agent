@@ -71,6 +71,10 @@ class OpenAINativeWebSearchProvider(BaseWebSearchProvider):
     def is_available(self) -> bool:
         return has_codex_credentials()
 
+    def supports_client_search(self) -> bool:
+        """No: this provider never executes a search itself (see :meth:`search`)."""
+        return False
+
     def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Never called on a successful native turn — the transport replaces the tool
         before the request goes out. Reached only when the active transport cannot host

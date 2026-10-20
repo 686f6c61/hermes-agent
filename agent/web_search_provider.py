@@ -74,6 +74,16 @@ class WebSearchProvider(ProviderBase):
         """True if this provider implements :meth:`search`."""
         return True
 
+    def supports_client_search(self) -> bool:
+        """True when :meth:`search` can answer in-process on this host.
+
+        False for a backend whose search exists only as a model-transport built-in
+        (the Responses API ``web_search`` tool): the transport swaps the client tool
+        before the request leaves, so nothing here can serve a caller that reaches
+        :meth:`search` directly — e.g. the ``execute_code`` ``from hermes_tools import
+        web_search`` helper must not be advertised then."""
+        return True
+
     def is_keyless_available(self) -> bool:
         """True when this provider can serve calls WITHOUT credentials (public anonymous
         free tiers such as Exa / Parallel MCP); used only when NO provider is configured or

@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import types
@@ -286,3 +287,36 @@ class TestDDGSSearchOnlyErrors:
         assert result["success"] is False
         assert "search-only" in result["error"].lower()
         assert "duckduckgo" in result["error"].lower() or "ddgs" in result["error"].lower()
+
+
+def test_windows_spawn_takes_its_flags_from_the_host_helper(monkeypatch):
+    """The worker's Windows flags come from the host helper, not a bare group constant (#142001).
+
+    ``CREATE_NEW_PROCESS_GROUP`` on its own gives the child a console, so every search flashed a
+    window on Windows. The spawn has to route through ``windows_detach_flags_without_breakaway()``,
+    which pairs the group with ``CREATE_NO_WINDOW``; this pins the wiring, the contract test below
+    pins the bundle.
+    """
+    from plugins.web.ddgs import provider
+
+    captured: dict = {}
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(provider, "windows_detach_flags_without_breakaway", lambda: 0xD00D)
+    monkeypatch.setattr(provider.subprocess, "Popen", lambda *_a, **kw: captured.update(kw))
+
+    provider._spawn_worker({"PATH": os.environ.get("PATH", "")})
+
+    assert captured["creationflags"] == 0xD00D
+    assert "start_new_session" not in captured
+
+
+def test_windows_hidden_console_flag_is_in_the_detach_bundle(monkeypatch):
+    """The bundle the spawn uses hides the console and keeps the group (no breakaway) (#142001)."""
+    from hermes_cli import _subprocess_compat
+
+    monkeypatch.setattr(_subprocess_compat, "IS_WINDOWS", True)
+    flags = _subprocess_compat.windows_detach_flags_without_breakaway()
+
+    assert flags & _subprocess_compat._CREATE_NEW_PROCESS_GROUP
+    assert flags & _subprocess_compat._CREATE_NO_WINDOW
+    assert not flags & getattr(_subprocess_compat, "_CREATE_BREAKAWAY_FROM_JOB", 0)

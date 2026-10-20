@@ -17,6 +17,7 @@ import time
 from typing import Any, Dict, Optional
 
 from plugins.web._common import BaseWebSearchProvider, search_fail, search_ok, setup_schema, title_hit
+from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,11 @@ def _spawn_worker(env: dict[str, str]) -> subprocess.Popen:
     if path_entry and path_entry not in child_pythonpath.split(os.pathsep):
         env["PYTHONPATH"] = path_entry + os.pathsep + child_pythonpath if child_pythonpath else path_entry
     worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_search_worker.py")
-    # Own process group/session so terminate/kill also reach a hung primp grandchild.
-    extra_kwargs: dict[str, Any] = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
+    # Own process group/session so terminate/kill also reach a hung primp grandchild. On Windows the
+    # group flag alone allocates a console that flashes on every search, so the group comes from the
+    # host helper that pins CREATE_NO_WINDOW beside it (no breakaway: this child is disposable and
+    # stays in the parent's job).
+    extra_kwargs: dict[str, Any] = {"creationflags": windows_detach_flags_without_breakaway()} if sys.platform == "win32" else {"start_new_session": True}
     # stdin/stdout/stderr stay explicit keyword args so scripts/check_subprocess_stdin.py sees them
     # (TUI gateway inherits stdin). stderr=DEVNULL: a chatty child would deadlock a stdout-only drain.
     return subprocess.Popen(

@@ -138,6 +138,46 @@ class TestDetection:
     def test_benign_osascript_is_not_flagged(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command
 
+    @pytest.mark.parametrize("command", [
+        # JXA's direct parameter comes first and the named-parameter object second (Apple's JXA
+        # release notes), so the options object is not the first argument.
+        'osascript -l JavaScript -e \'const k = Application("Keynote"); '
+        'k.close(k.documents[0], {saving: "no"})\'',
+        # The same object one binding away: a local literal handed to the call.
+        'osascript -l JavaScript -e \'var o = {saving: "no"}; '
+        'Application("Keynote").documents[0].close(o)\'',
+        # zsh's `echo` decodes backslash escapes with no flag, so the binary reads two physical
+        # lines; judging the spelling left `\nclose` with no word boundary before the verb.
+        'echo \'tell application "Keynote"\\nclose front document saving no\\nend tell\' | osascript',
+        # `$'…'` is ANSI-C quoting: the shell decodes it before the word becomes the `-e` argument.
+        'osascript -e $\'tell application "Keynote"\\nclose front document saving no\\nend tell\'',
+        # A heredoc body ends on an LF-terminated line, so a CR inside one is data: `splitlines()`
+        # read the text before the CR as the delimiter and dropped the statement after it.
+        'cat <<beep | osascript\nbeep\rtell application "Keynote" to quit without saving\nbeep\n',
+        # A vertical tab is data the same way (`splitlines()` splits on it too).
+        'cat <<EOF | osascript\n\x0bEOF\ntell application "Keynote" to quit without saving\nEOF\n',
+    ])
+    def test_the_live_matrix_rows_require_approval(self, command):
+        """Six rows a verifier's executable matrix drove through the head of this branch."""
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    @pytest.mark.parametrize("command", [
+        # The same two JXA shapes with a saving option that keeps the document.
+        'osascript -l JavaScript -e \'const k = Application("Keynote"); '
+        'k.close(k.documents[0], {saving: "yes"})\'',
+        'osascript -l JavaScript -e \'var o = {saving: "yes"}; '
+        'Application("Keynote").documents[0].close(o)\'',
+        # A decoded echo of a read-only program stays inert.
+        'echo \'tell application "Keynote"\\nget name of front document\\nend tell\' | osascript',
+        # JXA's `ask` prompts by itself; a heredoc whose CR line is not the delimiter still closes.
+        'cat <<beep | osascript\nbeep\rquit\nbeep\n',
+    ])
+    def test_the_matrix_controls_stay_inert(self, command):
+        assert detect_dangerous_command(command) == (False, None, None), command
+
 
 class TestSmartModeAsksTheOperator:
     def test_smart_mode_never_consults_the_guardian(self, monkeypatch):

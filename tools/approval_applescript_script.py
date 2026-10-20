@@ -36,11 +36,16 @@ _JS_LINE_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
 _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 # JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
 # wild); only the two that discard the document count — `saving: "ask"` prompts by itself. The key
-# is a JS property name, so it may be quoted.
-_JXA_NO_SAVE_RE = re.compile(
-    r"\.(?:close|quit)\s*\(\s*\{[^}]*[\"']?saving[\"']?\s*:\s*(?:[\"'](?:no|false)[\"']|false)",
+# is a JS property name, so it may be quoted. The object is any ARGUMENT of the call, not just the
+# first: `close(k.documents[0], {saving: "no"})` names the document as the direct parameter and the
+# options second (Apple's JXA release notes), and a local `var o = {saving: "no"}` handed to
+# `close(o)` is the same object one binding away.
+_JXA_CALL_RE = re.compile(r"\.(?:close|quit)\s*\(", re.IGNORECASE)
+_JXA_NO_SAVE_OBJECT_RE = re.compile(
+    r"\{[^{}]*[\"']?saving[\"']?\s*:\s*(?:[\"'](?:no|false)[\"']|false)[^{}]*\}",
     re.IGNORECASE,
 )
+_JXA_OBJECT_BINDING_RE = re.compile(r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(\{[^{}]*\})")
 # AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
 # `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
 _APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
@@ -118,6 +123,56 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
     return any(_reading_closes_without_saving(source, reading == "javascript") for reading in readings)
 
 
+def _call_arguments(source: str, open_paren: int) -> str | None:
+    """Text between the `(` that ends at *open_paren* and its matching `)`, string literals intact.
+
+    Balanced rather than greedy: `close(k.documents[0], {saving: "no"})` has a nested call and an
+    index, and a regex that stopped at the first `)` would read `{saving: …}` as outside the call.
+    """
+    depth, index, quote, start = 0, open_paren - 1, "", open_paren
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return source[start:index]
+        index += 1
+    return None
+
+
+def _jxa_closes_without_saving(source: str) -> bool:
+    """Whether a JXA close/quit call carries a no-save options object.
+
+    The object may be any argument (JXA's direct parameter comes first, the named-parameter object
+    second) or a local binding handed to the call (`var o = {saving: "no"}; …close(o)`).
+    """
+    bindings = {
+        match.group(1)
+        for match in _JXA_OBJECT_BINDING_RE.finditer(source)
+        if _JXA_NO_SAVE_OBJECT_RE.search(match.group(2))
+    }
+    for match in _JXA_CALL_RE.finditer(source):
+        arguments = _call_arguments(source, match.end())
+        if arguments is None:
+            continue
+        if _JXA_NO_SAVE_OBJECT_RE.search(arguments):
+            return True
+        for name in bindings:
+            if re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", arguments):
+                return True
+    return False
+
+
 def _reading_closes_without_saving(source: str, javascript: bool) -> bool:
     """One language's reading of *source*: does it close or quit a document without saving?"""
     if javascript:
@@ -125,15 +180,13 @@ def _reading_closes_without_saving(source: str, javascript: bool) -> bool:
         # lines, so the joined program is read as well. Comments are dropped per line first, which
         # keeps `//` inside a string literal as data.
         joined = " ".join(strip_js_comments(line) for line in source.splitlines() or (source,))
-        if _JXA_NO_SAVE_RE.search(joined):
+        if _jxa_closes_without_saving(joined):
             return True
     for statement in source.splitlines() or (source,):
         if javascript:
             # A commented-out call is not the call: `documents.length // .close({saving: "no"})`,
             # while `//` inside a string is data and keeps the call beside it.
             statement = strip_js_comments(statement)
-        if _JXA_NO_SAVE_RE.search(statement):
-            return True
         # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
         # must not read as the operation, while `close document "Untitled" saving no` still does.
         literal_free = _SCRIPT_STRING_LITERAL_RE.sub('""', statement)

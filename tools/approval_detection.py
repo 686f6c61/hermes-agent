@@ -1652,6 +1652,21 @@ def _osascript_language(value: str) -> str | None:
     return None
 
 
+def _argv_script_payload(token: str) -> str:
+    """The script text the shell hands `osascript` for one argv word.
+
+    `$'…'` is ANSI-C quoting: the shell decodes those escapes before the word becomes an argument,
+    so `-e $'tell …\\nclose …'` passes two physical lines and not their spelling. Judging the
+    escapes left `\\nclose` with no word boundary before the verb (reported on #141346). The
+    tokenizer drops the quotes and keeps the `$`, which is the marker read here.
+    """
+    if token.startswith("$'") or token.startswith('$"'):
+        return _decode_shell_escapes(token[2:])
+    if token.startswith("$") and "\\" in token and not token.startswith("${"):
+        return _decode_shell_escapes(token[1:])
+    return token
+
+
 def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], str | None, bool]:
     """Script payloads in an `osascript` argv, their language, and whether a source is unreadable.
 
@@ -1686,7 +1701,7 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             if position + 1 < len(tokens):
                 # Repeated `-e` options build ONE program, a line each: `-e '… saving ¬' -e 'no'`
                 # is the continued statement, not two scripts that each read as incomplete.
-                exec_payloads.append(tokens[position + 1])
+                exec_payloads.append(_argv_script_payload(tokens[position + 1]))
                 carries_source = True
             position += 2
             continue
@@ -1694,7 +1709,7 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             # The payload may ride on the switch with no space between them: `osascript -e'tell …'`
             # is accepted by the binary and executes the attached argument (measured on macOS), so
             # the text after the two characters is the script, not an unknown `-e…` switch.
-            exec_payloads.append(token[2:])
+            exec_payloads.append(_argv_script_payload(token[2:]))
             carries_source = True
             position += 1
             continue
@@ -1770,7 +1785,11 @@ def _heredoc_body(command: str, marker_end: int, delimiter: str, strip_tabs: boo
     if newline < 0:
         return None
     body: list[str] = []
-    for line in command[newline + 1:].splitlines():
+    # Physical lines only: the shell ends a heredoc on an LF-terminated line, so a CR or a vertical
+    # tab inside a body line is data. `splitlines()` splits on those too, which turned
+    # `beep<CR>tell … to quit without saving` into a `beep` delimiter line and dropped the
+    # destructive statement that the shell keeps in the body (reported on #141346).
+    for line in command[newline + 1:].split("\n"):
         candidate = line.lstrip("\t") if strip_tabs else line
         if candidate == delimiter:
             return "\n".join(body)
@@ -1831,9 +1850,12 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         # reaches stdin as a single line; joining with newlines left `quit` and `without saving`
         # on separate lines and the operation never met its parameter.
         payload = " ".join(tokens[1:])
-        if name == "printf" or (name == "echo" and any(t in ("-e", "-E", "-en", "-ne") for t in tokens[1:])):
+        if name == "printf" or name == "echo":
             # The program arrives with the line breaks still spelled as escapes; decode them the
-            # way the producer does before judging the script's lines.
+            # way the producer does before judging the script's lines. `echo` decodes them with no
+            # flag under zsh (the login shell on macOS): `echo 'tell …\nclose …' | osascript`
+            # reaches the binary as two physical lines, and judging the escapes left `\nclose` with
+            # no word boundary before the verb (reported on #141346).
             payload = _decode_shell_escapes(payload)
         if tokens[1].startswith("$'"):
             # ANSI-C quoting (`printf $'tell …\nclose …'`): the shell decodes the escapes itself.

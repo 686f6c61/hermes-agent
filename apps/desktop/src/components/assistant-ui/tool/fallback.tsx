@@ -296,7 +296,12 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
 }
 
 function LinkifiedText({ className, text }: { className?: string; text: string }) {
-  return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
+  // Tool error summaries are full of filename-shaped tokens (`README.md`,
+  // `SKILL.md`, `config.yaml`) whose extension can be a real TLD. The bare-domain
+  // branch of URL_RE links them, and `pretty` then replaces the visible text with
+  // a third party's page title — so the path the user needs to copy is rewritten
+  // by whoever owns the domain. Same switch the system message already passes.
+  return <SharedLinkifiedText className={className} explicitOnly pretty text={cleanVisibleText(text)} />
 }
 
 function ToolTitle({

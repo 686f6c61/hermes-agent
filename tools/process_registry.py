@@ -40,6 +40,9 @@ from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import log_delta_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
+from tools.process_registry_paging import (
+    COMPLETION_OUTPUT_CHARS, completion_output as _completion_output, int_arg as _int_arg,
+    output_tail as _output_tail, page_bounds)
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +59,6 @@ def _checkpoint_path() -> Path:
     return CHECKPOINT_PATH if CHECKPOINT_PATH != _CHECKPOINT_PATH_AT_IMPORT else get_hermes_home() / "processes.json"
 
 MAX_OUTPUT_CHARS = 200_000      # rolling output buffer
-# Tail of the output a completion notification carries. Right for a build log; a spawner whose
-# output IS the payload (a bot DM's reply) asks for more per process (completion_output_chars).
-COMPLETION_OUTPUT_CHARS = 2000
 FINISHED_TTL_SECONDS = 1800     # keep finished processes 30 minutes
 MAX_PROCESSES = 64              # max tracked processes (LRU pruning)
 
@@ -518,43 +518,6 @@ def format_uptime_short(seconds: int) -> str:
 
 def _not_found(session_id: str) -> dict:
     return {"status": "not_found", "error": f"No process with ID {session_id}"}
-
-
-def _int_arg(value: Any, name: str, default: int | None) -> int | None:
-    """Coerce a numeric tool argument that arrived as JSON (str, float) to an int.
-
-    The schema declares these as integers, but a model that emits
-    ``{"action": "log", "limit": "50"}`` reaches the handler unchanged, and a
-    string bound then dies in a slice or a comparison with
-    ``TypeError: slice indices must be integers or None or have an
-    __index__ method`` — a tool-input mistake surfaced as an internal crash
-    (#141988). Raises ``ValueError`` naming the argument for a value that is
-    not a whole number, so the caller can answer with a tool error.
-    """
-    if value is None or value == "" or isinstance(value, bool):
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{name} must be an integer (got {value!r})") from None
-
-
-def _output_tail(session: "ProcessSession", n: int) -> str:
-    """Last *n* chars of the session output with ANSI sequences stripped."""
-    from tools.ansi_strip import strip_ansi
-
-    return strip_ansi(session.output_buffer[-n:])
-
-
-def _completion_output(session: "ProcessSession") -> dict:
-    """``output`` sized by the session's ``completion_output_chars`` plus ``output_cut`` when trimmed.
-
-    Shared by the completion notification AND the wait/poll/kill snapshots: a bot in an api_server
-    or one-shot session cannot receive notifications and polls instead, so the polled result must
-    carry the same whole reply and the same cut marker (#115334)."""
-    limit = session.completion_output_chars or COMPLETION_OUTPUT_CHARS
-    cut = len(session.output_buffer) - limit
-    return {"output": _output_tail(session, limit), **({"output_cut": cut} if cut > 0 else {})}
 
 
 @dataclass
@@ -2058,13 +2021,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
-        try:
-            page_offset = _int_arg(offset, "offset", None)
-            page_limit = _int_arg(limit, "limit", 200)
-        except ValueError as exc:
-            return {**self._status_head(session), "status": "error", "error": str(exc)}
-        if page_limit is None:  # unreachable with the default above; keeps the slice int-typed
-            page_limit = 200
+        page_offset, page_limit, page_error = page_bounds(offset, limit)
+        if page_error:
+            return {**self._status_head(session), "status": "error", "error": page_error}
         with session._lock:
             full_output = strip_ansi(session.output_buffer)
             exited, finalizing = session.exited, self._reader_finalizing(session)

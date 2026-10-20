@@ -707,6 +707,17 @@ class RefusalVerdict:
     active_system_prompt: Any
 
 
+def _structured_refusal_reason(stop_details: Any) -> str:
+    """The provider's own refusal reason from ``stop_details``, or ``""`` when it carries none."""
+    if not isinstance(stop_details, dict):
+        return ""
+    explanation = str(stop_details.get("explanation") or "").strip()
+    if explanation:
+        return explanation
+    category = stop_details.get("category")
+    return f"provider refusal category: {category}" if category else ""
+
+
 def handle_content_policy_refusal(
     agent: Any, response: Any, _retry: TurnRetryState, *, thinking_spinner: Any,
     messages: list[dict[str, Any]], api_messages: Any, api_kwargs: Any, active_system_prompt: Any,
@@ -720,15 +731,15 @@ def handle_content_policy_refusal(
 
     _refusal_result = normalize_response_for_agent(agent, response)
     _refusal_text = (getattr(_refusal_result, "content", None) or "").strip()
-    if not _refusal_text:
-        _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
     # Anthropic stop_reason=refusal carries its reason on stop_details (category + optional explanation),
     # not in a content block — without it a classifier halt reads as "(no text)" (#113689).
     _stop_details = (getattr(_refusal_result, "provider_data", None) or {}).get("stop_details")
-    if not _refusal_text and isinstance(_stop_details, dict):
-        _refusal_text = str(_stop_details.get("explanation") or "").strip() or (
-            f"provider refusal category: {_stop_details['category']}" if _stop_details.get("category") else ""
-        )
+    if not _refusal_text:
+        # The provider's own reason outranks the reasoning channel: a halted stream can carry the
+        # model's summarized thinking, which is a plan for the next step, not a refusal reason (#142213).
+        _refusal_text = _structured_refusal_reason(_stop_details) or (
+            agent._extract_reasoning(_refusal_result) or ""
+        ).strip()
 
     agent._invoke_api_request_error_hook(
         task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,

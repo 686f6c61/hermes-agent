@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Awaitable, Callable, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,36 @@ _lock = threading.RLock()
 # Older pending confirms are discarded when the session's next message arrives (buttons live
 # as long as the adapter keeps callback_data).
 DEFAULT_TIMEOUT_SECONDS = 300
+
+
+def active_config_home() -> Optional[str]:
+    """The ``HERMES_HOME`` the prompt is being raised under, or None when no profile scope is active.
+
+    ``set_hermes_home_override`` is a contextvar scoped to the turn that asks, while the handler
+    runs from the adapter's button/text resolver — another task, with no override set. A handler
+    that persists a preference through ``save_config_value`` therefore writes the process-level
+    ``config.yaml``, which a gateway-routed profile never reads, so its "Always Approve" is saved
+    where the next gate will not look for it (#142157). Capture the home here, at prompt time, and
+    re-enter it with :func:`config_home_scope` around the write.
+    """
+    from hermes_constants import get_hermes_home_override
+
+    return get_hermes_home_override()
+
+
+@contextmanager
+def config_home_scope(home: Optional[str]) -> Iterator[None]:
+    """Run the block with *home* as the Hermes home; a no-op when *home* is None."""
+    if not home:
+        yield
+        return
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
 
 
 def register(session_key: str, confirm_id: str, command: str,

@@ -1090,6 +1090,12 @@ class GatewaySlashCommandsMixin(
         # Route through slash-confirm. The primitive sends the prompt and stores the resume handler;
         # the button/text response triggers ``_resolve_slash_confirm`` which invokes the handler
         # with the chosen outcome.
+        # That resolver runs outside the routed profile's scope, so carry the home this gate just
+        # read into the "always" write; otherwise the opt-out lands in the root config.yaml and the
+        # profile keeps prompting (#142157).
+        from tools import slash_confirm as _slash_confirm_mod
+        config_home = _slash_confirm_mod.active_config_home()
+
         async def _on_confirm(choice: str) -> Optional[str]:
             if choice == "cancel":
                 return t("gateway.reload_mcp.cancelled")
@@ -1097,7 +1103,8 @@ class GatewaySlashCommandsMixin(
                 # Persist the opt-out and run the reload.
                 try:
                     from cli import save_config_value
-                    save_config_value("approvals.mcp_reload_confirm", False)
+                    with _slash_confirm_mod.config_home_scope(config_home):
+                        save_config_value("approvals.mcp_reload_confirm", False)
                     logger.info("User opted out of /reload-mcp confirmation (session=%s)", session_key)
                 except Exception as exc:
                     logger.warning("Failed to persist mcp_reload_confirm=false: %s", exc)

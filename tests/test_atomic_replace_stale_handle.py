@@ -53,7 +53,7 @@ def test_stale_handle_rename_takes_the_copy_fallback(tmp_path: Path, monkeypatch
     assert Path(returned) == target
     # The rename is attempted once on the real target, then the fallback writes through the path.
     assert calls == [(str(tmp), str(target))]
-    assert target.read_text(encoding="utf-8") == "NEW=1\n"
+    assert target.read_text(encoding="utf-8-sig") == "NEW=1\n"
     assert not tmp.exists(), "the staged temp file must not survive a successful fallback"
 
 
@@ -82,7 +82,7 @@ def test_stale_handle_on_a_symlinked_target_writes_the_real_file(
 
     assert link.is_symlink(), "the fallback must not detach a managed symlink"
     assert Path(returned) == real
-    assert real.read_text(encoding="utf-8") == "NEW=1\n"
+    assert real.read_text(encoding="utf-8-sig") == "NEW=1\n"
     assert not tmp.exists()
 
 
@@ -102,5 +102,5 @@ def test_an_errno_outside_the_fallback_set_still_raises(
         utils.atomic_replace(tmp, target)
 
     assert excinfo.value.errno == errno.EACCES
-    assert target.read_text(encoding="utf-8") == "OLD=1\n"
+    assert target.read_text(encoding="utf-8-sig") == "OLD=1\n"
     assert tmp.exists(), "a failed write must leave the staged temp file for the caller"

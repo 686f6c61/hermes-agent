@@ -1718,8 +1718,24 @@ def _enable_multiplex_log_routing(config: object) -> bool:
     try:
         from hermes_logging import enable_profile_log_routing
         return enable_profile_log_routing([home for _name, home in _multiplex_profile_homes(config)])
-    except Exception:
-        logger.debug("could not enable per-profile log routing", exc_info=True)
+    except Exception as exc:
+        # The swap is all-or-nothing, so a failure here means every profile's records keep landing in
+        # the launch profile's logs. Staying silent about that left the operator with a gateway that
+        # looked healthy and wrote nothing they could diagnose with (#141958): gateway mode has no
+        # stderr handler below -v, so the journal never sees a `logger` record either.
+        logger.error(
+            "could not enable per-profile log routing; every profile's records stay in the launch "
+            "profile's logs: %s", exc, exc_info=True,
+        )
+        try:
+            from hermes_logging import _safe_stderr
+            print(
+                f"hermes gateway: per-profile log routing is off ({exc}); every profile's records "
+                "stay in the launch profile's logs/",
+                file=_safe_stderr(), flush=True,
+            )
+        except Exception:
+            pass
         return False
 
 

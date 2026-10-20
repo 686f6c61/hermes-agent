@@ -945,20 +945,46 @@ def enable_profile_log_routing(profile_homes: Sequence[str | Path]) -> bool:
                 with handler._profile_handlers_lock:
                     handler._profile_homes = handler._profile_homes.union(homes)
             return True
+        # Build every router before the listener is touched. ``_ProfileRoutingFileHandler`` resolves
+        # the base path and the profile homes in its constructor, so it can raise; doing the swap
+        # first (stop the listener, close the static handlers) left the process with no file sink at
+        # all when it did, and the caller's report of the failure went through the handlers that had
+        # just been closed (#141958). A raise here leaves routing exactly as it was.
+        replacement: list[logging.Handler] = []
+        try:
+            for existing in _queued_file_handlers:
+                if isinstance(existing, RotatingFileHandler):
+                    replacement.append(_ProfileRoutingFileHandler(existing, homes))
+                else:
+                    replacement.append(existing)
+        except BaseException:
+            for built in replacement:
+                if isinstance(built, _ProfileRoutingFileHandler):
+                    _quietly(built.close)
+            raise
+        previous = list(_queued_file_handlers)
+        retired = [handler for handler in previous if isinstance(handler, RotatingFileHandler)]
         listener = _queue_listener
         if listener is not None:
             listener.stop()
             _queue_listener = None
-        replacement = []
-        for existing in _queued_file_handlers:
-            if isinstance(existing, RotatingFileHandler):
-                replacement.append(_ProfileRoutingFileHandler(existing, homes))
-                _quietly(existing.close)
-            else:
-                replacement.append(existing)
         _queued_file_handlers[:] = replacement
-        if listener is not None:
-            _start_queue_listener_locked()
+        try:
+            if listener is not None:
+                _start_queue_listener_locked()
+        except BaseException:
+            # No listener means no sink. Put the static handlers back and hand the failure up
+            # rather than leaving the queue attached to nothing.
+            _queued_file_handlers[:] = previous
+            if listener is not None:
+                _quietly(_start_queue_listener_locked)
+            for built in replacement:
+                if isinstance(built, _ProfileRoutingFileHandler):
+                    _quietly(built.close)
+            raise
+        # Only now, with the routers live behind the listener, are the static writers released.
+        for handler in retired:
+            _quietly(handler.close)
         return True
 
 

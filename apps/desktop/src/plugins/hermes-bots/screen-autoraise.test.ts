@@ -8,9 +8,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RosterRow } from './types'
 
 const opened: string[] = []
+const probed: string[] = []
 let meta: Record<string, { screenAutoOpen?: boolean }> = {}
+let screenStates: Record<string, { status: { supported: boolean } | null; unavailable?: boolean }> = {}
+/** What a cold-cache probe of `display.status` settles on; null = leave the cache unknown. */
+let probeSettlesOn: boolean | null = null
+let handlers: Record<string, (event: unknown) => void> = {}
 
-vi.mock('@hermes/plugin-sdk', () => ({ host: { onEvent: () => () => undefined } }))
+vi.mock('@hermes/plugin-sdk', () => ({
+  host: {
+    onEvent: (name: string, handler: (event: unknown) => void) => {
+      handlers[name] = handler
+
+      return () => undefined
+    }
+  }
+}))
+vi.mock('./screen-state', () => ({
+  $screenState: { get: () => screenStates },
+  screenStateFor: (all: Record<string, unknown>, bot: RosterRow) => all[bot.name] ?? null,
+  ensureScreenStatus: async (bot: RosterRow) => {
+    probed.push(bot.name)
+
+    if (probeSettlesOn !== null) {
+      screenStates[bot.name] = { status: { supported: probeSettlesOn } }
+    }
+  }
+}))
 vi.mock('./data', () => ({
   $botMeta: { get: () => meta },
   $lastRoster: { get: () => roster },
@@ -41,6 +65,10 @@ const toolStart = (profile: string, name: string, connectionId?: string) =>
 describe('screen auto-raise', () => {
   beforeEach(async () => {
     opened.length = 0
+    probed.length = 0
+    screenStates = {}
+    probeSettlesOn = null
+    handlers = {}
     meta = { parker: { screenAutoOpen: true }, alfred: {} }
     const mod = await import('./screen-autoraise')
     mod.resetScreenAutoRaise()
@@ -80,5 +108,40 @@ describe('screen auto-raise', () => {
     // Same profile name on a different source is a different bot.
     expect(handleScreenToolStart(toolStart('parker', 'computer_use', 'ssh-box'), 5)).toBe(false)
     expect(opened).toEqual([])
+  })
+
+  it('never raises on a host that cannot serve a screen, and settles the capability first', async () => {
+    const { handleScreenToolStart, startScreenAutoRaise } = await import('./screen-autoraise')
+
+    screenStates = { parker: { status: { supported: false } } }
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 10)).toBe(false)
+    expect(opened).toEqual([])
+
+    // A backend with no `display.*` at all can never paint the pane either.
+    screenStates = { parker: { status: null, unavailable: true } }
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 20)).toBe(false)
+
+    // Cold cache: the listener reads `display.status` once and then decides, so the
+    // first screen-tool call of a session on an unsupported host opens nothing.
+    screenStates = {}
+    probeSettlesOn = false
+    startScreenAutoRaise()
+    handlers['tool.start'](toolStart('parker', 'browser_navigate'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(probed).toEqual(['parker'])
+    expect(opened).toEqual([])
+  })
+
+  it('still raises on a host that does serve a screen', async () => {
+    const { startScreenAutoRaise } = await import('./screen-autoraise')
+
+    probeSettlesOn = true
+    startScreenAutoRaise()
+    handlers['tool.start'](toolStart('parker', 'computer_use'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(probed).toEqual(['parker'])
+    expect(opened).toEqual(['parker'])
   })
 })

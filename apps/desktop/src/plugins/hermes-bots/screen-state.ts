@@ -7,6 +7,7 @@
 import { atom } from 'nanostores'
 
 import { botSelectionKey } from './data'
+import { displayRequest, isDisplayUnavailable } from './screen-connection'
 import type { DisplayLease, DisplayStatus, ScreenViewer } from './screen-connection'
 import type { RosterRow } from './types'
 
@@ -111,4 +112,47 @@ export function setScreenViewer(bot: RosterRow, viewer: ScreenViewer | null): vo
   }
 
   $screenState.set({ ...current, [key]: { status: prev?.status ?? null, lease: prev?.lease ?? null, viewer } })
+}
+
+/** In-flight capability reads, one per bot: a burst of screen-tool starts must not
+ *  ask `display.status` once per frame. */
+const statusProbes = new Map<string, Promise<void>>()
+
+/**
+ * Settle `bot`'s host capability before a surface decides on it. No-op when the
+ * cache already knows (`status` or `unavailable`). A transient failure leaves the
+ * cache unknown on purpose: an offline bot is not an unsupported host.
+ */
+export function ensureScreenStatus(bot: RosterRow): Promise<void> {
+  const key = botSelectionKey(bot)
+  const cached = $screenState.get()[key]
+
+  if (cached?.status || cached?.unavailable) {
+    return Promise.resolve()
+  }
+
+  const inFlight = statusProbes.get(key)
+
+  if (inFlight) {
+    return inFlight
+  }
+
+  // Same rule as the portal: a network reply hands its generation token back, so a
+  // snapshot a newer request superseded while in flight never lands as authoritative.
+  const request = beginScreenStatusRequest(bot)
+
+  const probe = displayRequest<DisplayStatus>(bot, 'display.status')
+    .then(status => setScreenStatus(bot, status, request))
+    .catch((error: unknown) => {
+      if (isDisplayUnavailable(error)) {
+        setScreenUnavailable(bot)
+      }
+    })
+    .finally(() => {
+      statusProbes.delete(key)
+    })
+
+  statusProbes.set(key, probe)
+
+  return probe
 }

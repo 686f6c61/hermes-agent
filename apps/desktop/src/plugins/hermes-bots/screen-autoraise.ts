@@ -27,6 +27,8 @@ import type { RpcEvent } from '@hermes/plugin-sdk'
 import { $botMeta, $lastRoster, botSelectionKey } from './data'
 import { botRosterMeta, resolveBotConnectionRoute } from './routing'
 import { openBotScreen, screenPaneId } from './screen-open'
+import { $screenState, ensureScreenStatus, screenStateFor } from './screen-state'
+import type { BotScreenState } from './screen-state'
 import type { RosterRow } from './types'
 
 /** Tools whose first call means the bot is now using its screen. Browser tools count:
@@ -88,9 +90,10 @@ export function shouldAutoRaise(
   now: number,
   state: RaiseState | undefined,
   tabOpen: boolean,
-  meta = $botMeta.get()
+  meta = $botMeta.get(),
+  screen: BotScreenState | null = screenStateFor($screenState.get(), bot)
 ): boolean {
-  if (!botRosterMeta(bot, meta)?.screenAutoOpen || tabOpen) {
+  if (!botRosterMeta(bot, meta)?.screenAutoOpen || tabOpen || !canRaiseScreen(screen)) {
     return false
   }
 
@@ -104,6 +107,20 @@ export function shouldAutoRaise(
   }
 
   return now - state.lastRaisedAt >= AUTO_RAISE_COOLDOWN_MS
+}
+
+/**
+ * A bot whose host cannot serve a screen (the Desktop's own macOS/Windows display) —
+ * or whose backend has no `display.*` at all — only ever paints the empty state, so
+ * raising its tab is a dead tab the user has to close on every screen-tool start.
+ * Unknown stays permissive: a cold cache or an offline bot keeps the raise.
+ */
+export function canRaiseScreen(screen: BotScreenState | null | undefined): boolean {
+  if (screen?.unavailable) {
+    return false
+  }
+
+  return !(screen?.status && !screen.status.supported)
 }
 
 export function noteScreenTabOpened(bot: RosterRow): void {
@@ -142,6 +159,27 @@ export function handleScreenToolStart(event: RpcEvent, now = Date.now()): boolea
   return true
 }
 
+/**
+ * Read the host's screen capability once per bot before deciding, so a host that
+ * cannot serve a screen never gets a dead tab. Only an opted-in bot on a screen
+ * tool pays the round trip; a warm cache resolves without one.
+ */
+async function settleScreenCapability(event: RpcEvent): Promise<void> {
+  const payload = event.payload as { name?: string } | undefined
+
+  if (!isScreenTool(payload?.name)) {
+    return
+  }
+
+  const bot = botForEvent($lastRoster.get(), event)
+
+  if (!bot || !botRosterMeta(bot, $botMeta.get())?.screenAutoOpen) {
+    return
+  }
+
+  await ensureScreenStatus(bot)
+}
+
 /** Wire the listener; returns the disposer. Feature-detected on older shells. */
 export function startScreenAutoRaise(): () => void {
   if (typeof host.onEvent !== 'function') {
@@ -149,7 +187,7 @@ export function startScreenAutoRaise(): () => void {
   }
 
   return host.onEvent('tool.start', (event: RpcEvent) => {
-    handleScreenToolStart(event)
+    void settleScreenCapability(event).then(() => handleScreenToolStart(event))
   })
 }
 

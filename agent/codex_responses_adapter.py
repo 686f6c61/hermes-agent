@@ -566,10 +566,30 @@ class _WireCallIds:
         return queue.pop(0) if queue else base
 
 
+def _thought_signature_payload(extra: Any) -> Optional[dict[str, Any]]:
+    """Plain-dict ``extra_content`` carrying a replayable Gemini thought signature, or None.
+
+    Gemini returns the signature on the ``function_call`` item itself
+    (``extra_content.google.thought_signature``), not in a ``reasoning`` item with ``encrypted_content``,
+    so a replay that drops the sidecar loses the model's reasoning continuity on every tool step. The
+    predicate and the dump are shared with the chat transport, which already replays the same field, so
+    the two carriers can never disagree on what counts as replayable.
+    """
+    from agent.transports.chat_completions import _dump_extra_content, _has_replayable_thought_signature
+    dumped = _dump_extra_content(extra)
+    return dumped if _has_replayable_thought_signature(dumped) else None
+
+
 def _replay_tool_call_items(
     msg: dict[str, Any], *, start_index: int, wire_ids: Optional[_WireCallIds] = None,
+    replay_thought_signature: bool = False,
 ) -> list[dict[str, Any]]:
-    """Convert an assistant message's ``tool_calls`` into ``function_call`` items."""
+    """Convert an assistant message's ``tool_calls`` into ``function_call`` items.
+
+    ``replay_thought_signature``: carry the call's Gemini ``thought_signature`` sidecar back on the item.
+    Gate it on the route (``_model_consumes_thought_signature``): every other Responses provider rejects
+    the unknown field, so the default is the pre-existing wire.
+    """
     replayed: list[dict[str, Any]] = []
     for tc in _as_list(msg.get("tool_calls")):
         if not isinstance(tc, dict):
@@ -580,11 +600,15 @@ def _replay_tool_call_items(
             continue
         index = start_index + len(replayed)
         call_id = _resolve_call_id(tc.get("call_id"), tc.get("id"), fn_name, str(arguments), index, canonicalize_fc=True)
-        replayed.append({
+        item: dict[str, Any] = {
             "type": "function_call",
             "call_id": wire_ids.for_call(call_id) if wire_ids else _clamp_responses_call_id(call_id),
             "name": coerce_tool_name(fn_name, fallback="fn"), "arguments": _coerce_arguments(arguments),
-        })
+        }
+        signature = _thought_signature_payload(tc.get("extra_content")) if replay_thought_signature else None
+        if signature is not None:
+            item["extra_content"] = signature
+        replayed.append(item)
     return replayed
 
 
@@ -612,12 +636,15 @@ def _chat_messages_to_responses_input(
     messages: list[dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
     current_issuer_model: Optional[str] = None, native_compaction_eligible: bool = False,
+    replay_thought_signature: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
 
     ``is_xai_responses``: signature compatibility only (xAI DOES replay encrypted reasoning).
     ``replay_encrypted_reasoning``: per-session kill switch, threaded False by
     ``AIAgent._disable_codex_reasoning_replay`` after a repeat ``invalid_encrypted_content`` 400.
+    ``replay_thought_signature``: Gemini route (``_model_consumes_thought_signature``); replays each
+    ``function_call``'s ``extra_content`` sidecar, which carries the thought signature Gemini requires.
     ``is_github_responses``: drops ``id`` from replayed message items (Copilot 401s on stale ids).
     ``current_issuer_kind`` / ``current_issuer_model``: provenance guard; items stamped by another issuer or
     model drop. Legacy items carrying only an endpoint stamp replay on a matching issuer.
@@ -700,7 +727,10 @@ def _chat_messages_to_responses_input(
         fallback = None
         if not message_items:
             fallback = content_parts or (content_text if content_text.strip() else "" if reasoning_items else None)
-        tool_items = _replay_tool_call_items(msg, start_index=len(items) + (fallback is not None), wire_ids=wire_ids)
+        tool_items = _replay_tool_call_items(
+            msg, start_index=len(items) + (fallback is not None), wire_ids=wire_ids,
+            replay_thought_signature=replay_thought_signature,
+        )
         # A function_call already follows its reasoning. Inventing an empty assistant
         # message between them changes the replayed turn (Muse can emit corrupt finals).
         # Keep a follower only for reasoning with no other following item, and make it
@@ -759,6 +789,16 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
     )
 
 
+def _route_consumes_thought_signature(model: Any, base_url: Any = None, provider: Any = None) -> bool:
+    """Whether THIS Responses route needs the call's ``extra_content`` sidecar replayed.
+
+    Single gate for the replay builder and the token estimator: the estimator must count the same wire
+    the request will carry, so both read the same predicate (the chat transport's) instead of re-deriving it.
+    """
+    from agent.transports.chat_completions import _model_consumes_thought_signature
+    return _model_consumes_thought_signature(model, base_url, provider)
+
+
 def _native_responses_replay_items(
     agent: Any, messages: list[dict[str, Any]]
 ) -> Optional[list[dict[str, Any]]]:
@@ -779,6 +819,9 @@ def _native_responses_replay_items(
             current_issuer_kind=_classify_responses_issuer(base_url=getattr(agent, "base_url", None), **route),
             current_issuer_model=_wire_model_identity(effective_model),
             native_compaction_eligible=True,
+            replay_thought_signature=_route_consumes_thought_signature(
+                effective_model, getattr(agent, "base_url", None), getattr(agent, "provider", None),
+            ),
         )
     except Exception:
         logger.debug(
@@ -832,10 +875,16 @@ def _preflight_function_call(item: dict[str, Any], idx: int, ctx: _PreflightCtx)
         raise ValueError(f"Codex Responses input[{idx}] function_call is missing call_id.")
     if not _nonblank(name):
         raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
-    return {
+    normalized: dict[str, Any] = {
         "type": "function_call", "call_id": call_id.strip(), "name": coerce_tool_name(name, fallback="fn"),
         "arguments": ctx.sanitize_text(_coerce_arguments(item.get("arguments", "{}"))),
     }
+    # Gemini's thought signature rides on the call itself; dropping it here would undo the replay the
+    # converter built for that route. Only a replayable sidecar survives validation.
+    signature = _thought_signature_payload(item.get("extra_content"))
+    if signature is not None:
+        normalized["extra_content"] = signature
+    return normalized
 
 
 def _preflight_function_call_output(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> dict[str, Any]:
@@ -1129,9 +1178,16 @@ def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespac
     raw_item_id = getattr(item, "id", None)
     call_id = _resolve_call_id(getattr(item, "call_id", None), raw_item_id, fn_name, arguments, index, canonicalize_fc=False)
     fc_id = _derive_responses_function_call_id(call_id, raw_item_id if isinstance(raw_item_id, str) else None)
+    # Gemini carries the call's thought signature on the item itself; keep the sidecar so the replay
+    # builder can send it back on a route that consumes it (see ``_replay_tool_call_items``).
+    extra = _field(item, "extra_content")
+    if extra is None:
+        model_extra = getattr(item, "model_extra", None)
+        extra = model_extra.get("extra_content") if isinstance(model_extra, dict) else None
     return SimpleNamespace(
         id=call_id, call_id=call_id, response_item_id=fc_id, type="function",
         function=SimpleNamespace(name=fn_name, arguments=arguments),
+        extra_content=_thought_signature_payload(extra),
     )
 
 

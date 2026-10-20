@@ -698,6 +698,7 @@ class ResponsesApiTransport(ProviderTransport):
         from agent.codex_responses_adapter import _chat_messages_to_responses_input, _wire_model_identity
 
         self._last_issuer_model = _wire_model_identity(kwargs.get("model"))
+        from agent.codex_responses_adapter import _route_consumes_thought_signature
         return _chat_messages_to_responses_input(
             messages, is_xai_responses=kwargs.get("is_xai_responses") is True,
             is_github_responses=kwargs.get("is_github_responses") is True,
@@ -705,6 +706,9 @@ class ResponsesApiTransport(ProviderTransport):
             current_issuer_kind=self._resolve_issuer_kind(kwargs),
             current_issuer_model=self._last_issuer_model,
             native_compaction_eligible=_native_compaction_active(kwargs.get("context_management")),
+            replay_thought_signature=_route_consumes_thought_signature(
+                kwargs.get("model"), kwargs.get("base_url"), kwargs.get("provider"),
+            ),
         )
 
     def convert_tools(self, tools: Optional[list[dict[str, Any]]]) -> Any:

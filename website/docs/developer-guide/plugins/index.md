@@ -877,7 +877,10 @@ def register(ctx):
 
 **What `register()` does:**
 - Called exactly once at startup
-- `ctx.register_tool()` puts your tool in the registry — the model sees it immediately
+- `ctx.register_tool()` puts your tool in the registry — the model sees it immediately. Pass
+  `execution_timeout=<seconds>` when the tool runs a bounded job of its own that outlives the generic
+  per-call deadline (420 s): the executor lifts the deadline to your value, and the tool is kept off
+  the parallel batch path, so declare the tool's own internal timeout rather than an unbounded one.
 - `ctx.register_hook()` subscribes to lifecycle events
 - `ctx.register_cli_command()` registers a CLI subcommand (e.g. `hermes my-plugin <subcommand>`)
 - `ctx.register_command()` registers an in-session slash command (e.g. `/myplugin <args>` inside CLI / gateway chat) — see [Register slash commands](#register-slash-commands) below

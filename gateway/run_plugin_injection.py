@@ -23,6 +23,22 @@ from gateway.session import SessionSource
 logger = logging.getLogger("gateway.run")
 
 
+async def _run_injection_with_hooks_unsuppressed(coro):
+    """Run an injected turn with the caller's post-tool suppression cleared.
+
+    ``inject_message`` called from a tool handler schedules the turn from that handler's thread, and
+    the sequential executor wraps the whole handler in ``model_tools.suppress_post_tool_call_hook()``
+    because it owns the terminal post-tool event of the *injecting* call. A new task copies the
+    scheduling context, so the injected turn's tool calls saw the flag set and ``post_tool_call``
+    never fired for them — silently, no log and no failure. The injected turn is its own turn: clear
+    the flag on entry, the same way a connector batch clears it for each of its own entries.
+    """
+    from model_tools import suppress_post_tool_call_hook
+
+    with suppress_post_tool_call_hook(False):
+        return await coro
+
+
 class GatewayPluginInjectionMixin:
     def _install_plugin_message_injector(self) -> None:
         """Publish this live gateway's plugin message scheduler process-wide."""
@@ -73,6 +89,7 @@ class GatewayPluginInjectionMixin:
             coro = self._dispatch_plugin_message_injection(
                 session_key=session_key, content=content, plugin_id=plugin_id, plugin_home=plugin_home,
             )
+        inner, coro = coro, _run_injection_with_hooks_unsuppressed(coro)
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -83,6 +100,7 @@ class GatewayPluginInjectionMixin:
                 future = loop.create_task(coro)
             except Exception:
                 coro.close()
+                inner.close()
                 logger.warning("Plugin message injection scheduling failed", exc_info=True)
                 return False
             self._background_tasks.add(future)

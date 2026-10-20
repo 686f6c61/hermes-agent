@@ -37,6 +37,12 @@ export function startHideSweepScheduler(ctx: HideSweepContext) {
   let inflight: Promise<unknown> | null = null
   let pending = false
   let disposed = false
+  // Ids the backend has answered as terminal — a 404 (gone) or a 409
+  // `session_superseded` (the chat moved on and every write is refused). The
+  // sweep walks the same rows on each reconnect, so one pass learns them here
+  // and later passes skip them instead of re-PATCHing a write that can never
+  // succeed.
+  const terminal = new Set<string>()
 
   const run = () => {
     timer = null
@@ -52,7 +58,7 @@ export function startHideSweepScheduler(ctx: HideSweepContext) {
     }
 
     inflight = Promise.resolve()
-      .then(() => hideOwnedBotSessions())
+      .then(() => hideOwnedBotSessions(terminal))
       .catch(() => undefined)
       .finally(() => {
         inflight = null
@@ -113,7 +119,7 @@ interface RoomSessionEntry {
   owner: RosterRow
 }
 
-function hideOwnedBotSessions() {
+function hideOwnedBotSessions(terminal: Set<string>) {
   // `.filter(Boolean)` doesn't narrow away the nulls the map returns, so the
   // element type is restated here rather than at every read below.
   const roomEntries = Object.entries($groupChats.get()).flatMap(([group, room]) =>
@@ -164,29 +170,43 @@ function hideOwnedBotSessions() {
   ) as RoomSessionEntry[]
 
   // The same member session can appear in several rooms (and legacy rooms can
-  // share ids) — hide each (owner, id) pair exactly once.
-  const rooms = [...new Map(roomEntries.map(entry => [entry.dedupe, entry])).values()]
+  // share ids) — hide each (owner, id) pair exactly once, and skip the pairs a
+  // previous pass already learned are terminal.
+  const rooms = [...new Map(roomEntries.map(entry => [entry.dedupe, entry])).values()].filter(
+    entry => !terminal.has(entry.id)
+  )
 
   const known = Promise.all(
     rooms.map(entry =>
       hidePersistedBotSession(entry.owner, entry.id).catch(error => {
-        if (isMissingPersistedSessionError(error)) {
+        if (isTerminalPersistedSessionError(error)) {
+          terminal.add(entry.id)
           pruneMissingRoomSession(entry)
         }
       })
     )
   )
 
-  return Promise.all([known, sweepBotProfileSessions().catch(() => undefined)])
+  return Promise.all([known, sweepBotProfileSessions(terminal).catch(() => undefined)])
 }
 
-/** A 404 from the persisted-session endpoint is an authoritative absence.
+/** A 404 from the persisted-session endpoint is an authoritative absence, and
+ *  a 409 `session_superseded` is just as terminal: the conversation moved on to
+ *  a newer session, so every hidden-write for that id is refused from then on.
  *  Other errors can be transient (or come from older Desktop hosts), so they
  *  intentionally leave the room reference intact for a later reconciliation. */
-function isMissingPersistedSessionError(error: unknown) {
+function isTerminalPersistedSessionError(error: unknown) {
   const message = typeof error === 'string' ? error : (error as { message?: unknown })?.message
 
-  return typeof message === 'string' && /\b404\b/.test(message) && /session not found/i.test(message)
+  if (typeof message !== 'string') {
+    return false
+  }
+
+  if (/\b404\b/.test(message) && /session not found/i.test(message)) {
+    return true
+  }
+
+  return /\b409\b/.test(message) && /session_superseded/i.test(message)
 }
 
 /** Remove only the exact rejected room seat. A replacement written while the
@@ -297,7 +317,7 @@ interface ProfilesListResult {
  *  Reads and writes go through the owning source's primary REST backend, which
  *  opens persisted state directly and never starts an inactive profile backend.
  *  Feature-detected + fire-and-forget: older Desktop hosts defer the sweep. */
-async function sweepBotProfileSessions(nowSeconds = Date.now() / 1000) {
+async function sweepBotProfileSessions(terminal: Set<string>, nowSeconds = Date.now() / 1000) {
   if (typeof host.listPersistedSessions !== 'function' || typeof host.setPersistedSessionHidden !== 'function') {
     return
   }
@@ -341,8 +361,14 @@ async function sweepBotProfileSessions(nowSeconds = Date.now() / 1000) {
         const rows = Array.isArray(res?.sessions) ? res.sessions : []
         await Promise.all(
           rows
-            .filter(row => isBotModeSweepCandidate(row, nowSeconds))
-            .map(row => Promise.resolve(hidePersistedBotSession(bot, row.id, profile)).catch(() => undefined))
+            .filter(row => isBotModeSweepCandidate(row, nowSeconds) && !terminal.has(row.id))
+            .map(row =>
+              Promise.resolve(hidePersistedBotSession(bot, row.id, profile)).catch(error => {
+                if (isTerminalPersistedSessionError(error)) {
+                  terminal.add(row.id)
+                }
+              })
+            )
         )
       } catch {
         /* older gateway / unreachable source — leave this profile alone */

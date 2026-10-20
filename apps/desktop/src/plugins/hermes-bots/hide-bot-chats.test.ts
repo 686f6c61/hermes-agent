@@ -31,14 +31,21 @@ interface SweepRow {
   title?: string
 }
 
-const { groupChats, hostMock, lastRoster, requestForBotMock } = vi.hoisted(() => ({
+const { gatewayListeners, groupChats, hostMock, lastRoster, requestForBotMock } = vi.hoisted(() => ({
+  gatewayListeners: [] as Array<(state: string) => void>,
   groupChats: { value: {} as Record<string, unknown> },
   hostMock: {
     listPersistedSessions: vi.fn(),
     request: vi.fn(),
     setPersistedSessionHidden: vi.fn(),
     state: {
-      gateway: { listen: vi.fn(() => () => undefined) },
+      gateway: {
+        listen: vi.fn((listener: (state: string) => void) => {
+          gatewayListeners.push(listener)
+
+          return () => undefined
+        })
+      },
       profile: { get: () => 'default' }
     }
   },
@@ -99,9 +106,23 @@ async function runSweep() {
   }
 }
 
+/** Fire the scheduler's own reconnect signal. The plugin schedules a sweep on
+ *  every gateway `open`, which is what turns one reconciliation into a
+ *  repeating pass — the shape the superseded-session report was stuck in. */
+async function reconnect() {
+  for (const listener of gatewayListeners) {
+    listener('open')
+  }
+
+  for (let turn = 0; turn < 3; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+}
+
 beforeEach(() => {
   vi.resetModules()
   vi.clearAllMocks()
+  gatewayListeners.length = 0
   // Date only: the scheduler's own setTimeout must stay real so runSweep can
   // simply wait for it. 1_000_000ms puts `Date.now() / 1000` at 1000s, which
   // is what the age fixtures below are written against.
@@ -206,6 +227,54 @@ describe('the id half: group room member sessions', () => {
     expect(hiddenCalls().map(([, options]) => options.sessionId)).toEqual(['deleted-session'])
   })
 
+  it('prunes a superseded room session and never re-PATCHes it', async () => {
+    // A 409 `session_superseded` is as terminal as a 404: the chat moved on and
+    // every hidden-write for that id is refused, so the seat goes instead of
+    // being retried on each reconnect.
+    groupChats.value = {
+      Core: {
+        sessionOwners: { alpha: { name: 'alpha' } },
+        sessions: { alpha: 'superseded-session' }
+      }
+    }
+    lastRoster.value = [{ name: 'alpha' } as RosterRow]
+    hostMock.setPersistedSessionHidden.mockRejectedValue(new Error('409: {"detail":"session_superseded"}'))
+
+    await runSweep()
+
+    expect(hiddenCalls().map(([, options]) => options.sessionId)).toEqual(['superseded-session'])
+    expect((groupChats.value.Core as { sessions: Record<string, string> }).sessions).toEqual({})
+    expect((groupChats.value.Core as { sessionOwners: Record<string, unknown> }).sessionOwners).toEqual({})
+
+    await reconnect()
+
+    expect(hiddenCalls()).toHaveLength(1)
+  })
+
+  it('keeps retrying a transient failure on the next reconnect', async () => {
+    // Only the two authoritative answers are terminal; a broken source must
+    // still be reconciled once it comes back.
+    groupChats.value = {
+      Core: {
+        sessionOwners: { alpha: { name: 'alpha' } },
+        sessions: { alpha: 'flaky-session' }
+      }
+    }
+    lastRoster.value = [{ name: 'alpha' } as RosterRow]
+    hostMock.setPersistedSessionHidden.mockRejectedValue(new Error('502: upstream unavailable'))
+
+    await runSweep()
+
+    expect(hiddenCalls()).toHaveLength(1)
+    expect((groupChats.value.Core as { sessions: Record<string, string> }).sessions).toEqual({
+      alpha: 'flaky-session'
+    })
+
+    await reconnect()
+
+    expect(hiddenCalls()).toHaveLength(2)
+  })
+
   it('fails closed on a source-qualified session whose persisted owner is malformed', async () => {
     // A source-qualified key without its immutable owner must never fall
     // through to ambient routing — that hides whichever session happens to
@@ -271,6 +340,24 @@ describe('the title half: each roster bot’s own profile listing', () => {
     expect(hiddenCalls().every(([, options]) => options.hidden)).toBe(true)
     // Remote-source rows keep their immutable source owner on the REST route.
     expect(hiddenCalls().find(([, options]) => options.sessionId === 'r-1')?.[0]?.connectionId).toBe('mini')
+  })
+
+  it('stops re-PATCHing a superseded title row on the next reconnect', async () => {
+    // The title half has no seat to prune — the row stays visible in
+    // session.list — so the retry has to stop on the learned terminal id.
+    lastRoster.value = [{ name: 'alpha' } as RosterRow]
+    hostMock.listPersistedSessions.mockResolvedValue({
+      sessions: [{ id: 'a-1', started_at: 1, title: 'Bot Chat' }]
+    })
+    hostMock.setPersistedSessionHidden.mockRejectedValue(new Error('409: {"detail":"session_superseded"}'))
+
+    await runSweep()
+
+    expect(hiddenCalls().map(([, options]) => options.sessionId)).toEqual(['a-1'])
+
+    await reconnect()
+
+    expect(hiddenCalls()).toHaveLength(1)
   })
 
   it('runs beside the id half, and a throwing title sweep never breaks it', async () => {

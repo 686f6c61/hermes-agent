@@ -846,6 +846,18 @@ def _resolve_shell_init_files() -> list[str]:
     return resolved
 
 
+def _configured_shell_init_files() -> list[str]:
+    """The files an explicit ``terminal.shell_init_files`` lists, and nothing else.
+
+    The background spawn runs the user's shell as ``-lic``, so a login+interactive
+    shell already reads ~/.profile and ~/.bashrc on its own; re-sourcing those from
+    the argv runs the user's startup twice (and macOS bash 3.2 re-execs zsh from
+    ~/.bash_profile). Only a file the shell would *not* read by itself needs the
+    prelude, and that file only exists when the list is explicit (#142264)."""
+    explicit, _auto_bashrc = _read_terminal_shell_init_config()
+    return _resolve_shell_init_files() if explicit else []
+
+
 def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
     """Prepend guarded, silent ``source <file>`` lines: ``set +e`` keeps going on
     errors, ``2>/dev/null`` hides noisy prompts, ``|| true`` neutralises the status."""

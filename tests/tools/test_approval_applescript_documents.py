@@ -168,3 +168,56 @@ class TestSmartModeAsksTheOperator:
         assert len(prompts) == 1
         assert result["approved"] is False
         assert not result.get("smart_approved")
+
+
+class TestCarriersTheReportLeft:
+    """The five carriers a live matrix still drove through head `e8810eecb7` (#141346)."""
+
+    @pytest.mark.parametrize("command", [
+        # 1. The payload rides on the switch: `-e'…'` with no space is accepted by the binary.
+        'osascript -e\'tell application "Keynote" to close front document saving no\'',
+        # 2. No `-l` means AppleScript, whatever identifiers the prose holds: `set var to 1`
+        #    used to flip this into the JXA reading, whose apostrophe pairing ate `saving no`.
+        'osascript <<\'EOF\'\n'
+        'set var to 1\n'
+        'tell application "Keynote" to close (first document whose name is front document\'s name) '
+        'saving no -- don\'t\n'
+        'EOF',
+        # 3. JXA is not line-structured: the options object sits on its own lines.
+        'osascript -l JavaScript <<\'EOF\'\n'
+        'const doc = Application("Keynote").documents[0];\n'
+        'doc.close({\n'
+        '  saving: "no"\n'
+        '});\n'
+        'EOF',
+        # 4. `printf` decodes `\n` before osascript reads stdin; with the escapes spelled out the
+        #    close verb lost its word boundary (`"Keynote"\nclose` → `"Keynote"nclose`).
+        'printf \'tell application "Keynote"\\nclose front document saving no\\nend tell\\n\' | osascript',
+        # 5. A quoted heredoc delimiter is a shell word and may hold spaces.
+        'osascript <<\'END SCRIPT\'\n'
+        'tell application "Keynote" to quit without saving\n'
+        'END SCRIPT',
+    ])
+    def test_the_carrier_is_judged(self, command):
+        assert detect_dangerous_command(command) == (True, DESCRIPTION, DESCRIPTION), command
+
+    @pytest.mark.parametrize("command", [
+        # The same five carriers holding a read instead of the operation.
+        'osascript -e\'tell application "Keynote" to get name of front document\'',
+        'osascript <<\'EOF\'\n'
+        'set var to 1\n'
+        'tell application "Keynote" to get name of front document\n'
+        'EOF',
+        'osascript -l JavaScript <<\'EOF\'\n'
+        'const doc = Application("Keynote").documents[0];\n'
+        'doc.close({\n'
+        '  saving: "yes"\n'
+        '});\n'
+        'EOF',
+        'printf \'tell application "Keynote"\\nactivate\\nend tell\\n\' | osascript',
+        'osascript <<\'END SCRIPT\'\n'
+        'tell application "Keynote" to get name of front document\n'
+        'END SCRIPT',
+    ])
+    def test_the_same_carrier_reading_is_inert(self, command):
+        assert detect_dangerous_command(command) == (False, None, None), command

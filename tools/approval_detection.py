@@ -12,6 +12,8 @@ import shlex
 import tempfile
 import unicodedata
 
+from tools.approval_applescript_script import script_closes_without_saving
+
 logger = logging.getLogger("tools.approval")
 
 # Sensitive write targets, matched via ~ / $HOME / $HERMES_HOME spellings. The resolved absolute
@@ -1557,47 +1559,30 @@ def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
     return contains_gateway_lifecycle_command(command)
 
 
-_OSASCRIPT_CLOSE_VERB_RE = re.compile(r"\b(?:close|quit|shut\s+down)\b", re.IGNORECASE)
-_OSASCRIPT_NO_SAVE_RE = re.compile(r"\bwithout\s+saving\b|\bsaving\s*(?::\s*)?(?:no|false)\b", re.IGNORECASE)
-# AppleScript string literals: an operation verb and the "without saving" text inside a quoted
-# string is prose (a dialog asking the question), not the operation.
-#
-# Only double quotes delimit an AppleScript literal. A single quote is an apostrophe in prose
-# (`(first document whose name is front document's name)`), and reading it as a literal delimiter
-# paired the possessive with the apostrophe of a later `-- don't` comment, swallowing the
-# `saving no` between them and letting the destructive statement read as inert. JavaScript (JXA)
-# does use both, so the single-quoted form is stripped only for a source that looks like JXA.
-_SCRIPT_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
-_SCRIPT_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
-_JS_SCRIPT_HINT_RE = re.compile(r"Application\s*\(|ObjC\.|\.close\s*\(|\b(?:var|let|const)\s")
-# AppleScript's line-continuation character; the statement continues after it, and CR is a line
-# ending the language accepts as well as LF.
-_APPLESCRIPT_CONTINUATION_RE = re.compile(r"¬[ \t]*(?:\r\n|\r|\n)[ \t]*")
-# Comments are prose in both languages, and an operation that only appears inside one is not the
-# operation: `get name of front document -- quit without saving` reads the document, and
-# `documents.length // .close({saving: "no"})` is commented-out JXA.
-_APPLESCRIPT_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
-_APPLESCRIPT_BLOCK_COMMENT_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
-_JS_LINE_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
-_JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-# JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
-# wild); only the two that discard the document count — `saving: "ask"` prompts by itself. The key
-# is a JS property name, so it may be quoted.
-_JXA_NO_SAVE_RE = re.compile(
-    r"\.(?:close|quit)\s*\(\s*\{[^}]*[\"']?saving[\"']?\s*:\s*(?:[\"'](?:no|false)[\"']|false)",
-    re.IGNORECASE,
-)
-# AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
-# `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
-_APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
-_APPLESCRIPT_RAW_CODE_NAMES = {"coreclos": "close", "aevtquit": "quit", "savo": "saving"}
-# A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, and `<<-`
-# (tabs stripped) is not the same body rule as a plain `<<` (delimiter alone on the line).
+# A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, a quoted
+# delimiter may hold spaces (`<<'END SCRIPT'`), and `<<-` (tabs stripped) is not the same body rule
+# as a plain `<<` (delimiter alone on the line).
 _HEREDOC_MARKER_RE = re.compile(
-    r"<<(?P<dash>-?)[ \t]*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z0-9_][A-Za-z0-9_.-]*)(?P=quote)"
+    r"<<(?P<dash>-?)[ \t]*(?:(?P<quote>['\"])(?P<quoted>[^'\"]+)(?P=quote)"
+    r"|(?P<delimiter>[A-Za-z0-9_][A-Za-z0-9_.-]*))"
 )
+
+
+def _heredoc_delimiter(marker) -> str:
+    """The delimiter of a heredoc marker: the quoted word when quoted, else the bare one."""
+    return marker.group("quoted") or marker.group("delimiter")
+
 # A stage that copies stdin to stdout untouched; the payload behind the pipe is the stage before it.
 _STDIN_PASS_THROUGH = frozenset({"cat"})
+# Producers that decode backslash escapes on their way to stdout: `printf 'a\nb'` hands osascript
+# two lines, not one line holding `\n` — and on that single line `\nclose` is not the word `close`.
+_ESCAPE_DECODING_PRODUCERS = frozenset({"printf", "echo"})
+_SHELL_ESCAPE_RE = re.compile(r"\\(?P<code>[nrt])")
+
+
+def _decode_shell_escapes(text: str) -> str:
+    """Spell out the `\\n`, `\\r`, `\\t` escapes a `printf` writes as real line breaks."""
+    return _SHELL_ESCAPE_RE.sub(lambda match: {"n": "\n", "r": "\r", "t": "\t"}[match.group("code")], text)
 
 
 def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
@@ -1615,7 +1600,7 @@ def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str
     if "osascript" not in command.lower():
         return None
     for source, language in _osascript_script_sources(command):
-        if _script_closes_without_saving(source, language):
+        if script_closes_without_saving(source, language):
             return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
     if _depth < 3:
         # Shell carriers the flat pattern projections do not fold in (`eval`, `env -S`) hand their
@@ -1655,91 +1640,6 @@ def _carrier_payloads(command: str):
                 continue
             yield token
             break
-
-
-def _strip_js_comments(statement: str) -> str:
-    """Drop JXA comments that sit outside a string literal.
-
-    A plain regex cannot tell `//` in `var s = "//"` from the start of a comment, and cutting there
-    deleted the `.close({saving: "no"})` that followed on the same line, so the real call read as
-    inert (reported on #141346).
-    """
-    out: list[str] = []
-    index, quote, length = 0, "", len(statement)
-    while index < length:
-        char = statement[index]
-        if quote:
-            out.append(char)
-            if char == "\\" and index + 1 < length:
-                out.append(statement[index + 1])
-                index += 2
-                continue
-            if char == quote:
-                quote = ""
-        elif char in "\"'`":
-            quote = char
-            out.append(char)
-        elif statement.startswith("//", index):
-            break
-        elif statement.startswith("/*", index):
-            end = statement.find("*/", index + 2)
-            if end < 0:
-                break
-            index = end + 2
-            continue
-        else:
-            out.append(char)
-        index += 1
-    return "".join(out)
-
-
-def _script_closes_without_saving(source: str, language: str | None = None) -> bool:
-    """Whether *source*, as script text in *language*, closes or quits a document without saving.
-
-    *language* is the `-l` value when the invocation names one. Guessing it from the text is the
-    fallback, not the rule: an AppleScript comment holding the word `let` flipped a document close
-    into the JXA reading, where the apostrophe of `front document's name` pairs with the one in
-    `-- don't`, swallowing the `saving no` between them.
-    """
-    # Four-character codes are the same command and parameter spelled raw.
-    source = _APPLESCRIPT_RAW_CODE_RE.sub(
-        lambda match: _APPLESCRIPT_RAW_CODE_NAMES.get(match.group(1).lower(), match.group(0)),
-        source,
-    )
-    if language:
-        javascript = language == "javascript"
-    else:
-        # The hint is read on code only: a comment is prose in either language, and so is a string
-        # literal (`display dialog "let it go"` is not a `let` declaration).
-        code_only = _SCRIPT_STRING_LITERAL_RE.sub(
-            '""', _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", _APPLESCRIPT_LINE_COMMENT_RE.sub("", source))
-        )
-        javascript = bool(_JS_SCRIPT_HINT_RE.search(code_only))
-    # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
-    # same operation as `saving no`; splitting first would strand each half on its own line.
-    source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
-    for statement in source.splitlines() or (source,):
-        if javascript:
-            # A commented-out call is not the call: `documents.length // .close({saving: "no"})`,
-            # while `//` inside a string is data and keeps the call beside it.
-            statement = _strip_js_comments(statement)
-        if _JXA_NO_SAVE_RE.search(statement):
-            return True
-        # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
-        # must not read as the operation, while `close document "Untitled" saving no` still does.
-        literal_free = _SCRIPT_STRING_LITERAL_RE.sub('""', statement)
-        if javascript:
-            literal_free = _SCRIPT_SINGLE_QUOTED_LITERAL_RE.sub('""', literal_free)
-        else:
-            # An AppleScript comment is prose too: `get name of front document -- quit without saving`.
-            literal_free = _APPLESCRIPT_LINE_COMMENT_RE.sub(
-                "", _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", literal_free)
-            )
-        # A continuation character that survived on one line (`saving ¬ no`) is whitespace here.
-        literal_free = literal_free.replace("¬", " ")
-        if _OSASCRIPT_CLOSE_VERB_RE.search(literal_free) and _OSASCRIPT_NO_SAVE_RE.search(literal_free):
-            return True
-    return False
 
 
 def _osascript_language(value: str) -> str | None:
@@ -1790,6 +1690,14 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
                 carries_source = True
             position += 2
             continue
+        if lowered.startswith("-e") and len(token) > 2:
+            # The payload may ride on the switch with no space between them: `osascript -e'tell …'`
+            # is accepted by the binary and executes the attached argument (measured on macOS), so
+            # the text after the two characters is the script, not an unknown `-e…` switch.
+            exec_payloads.append(token[2:])
+            carries_source = True
+            position += 1
+            continue
         if lowered == "-s":
             # `-s <style>` is osascript's output-style switch and owns its next token; reading
             # that token as a script filename made the piped program look unreachable.
@@ -1835,7 +1743,7 @@ def _osascript_script_sources(command: str):
                 body = _heredoc_body(
                     command,
                     marker_at + len(marker.group(0)),
-                    marker.group("delimiter"),
+                    _heredoc_delimiter(marker),
                     bool(marker.group("dash")),
                 )
                 if body is not None:
@@ -1904,7 +1812,7 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
                 body = _heredoc_body(
                     command,
                     marker_at + len(marker.group(0)),
-                    marker.group("delimiter"),
+                    _heredoc_delimiter(marker),
                     bool(marker.group("dash")),
                 )
                 if body is not None:
@@ -1922,7 +1830,15 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         # A shell joins a producer's argv with ONE space, so `echo tell … to quit without saving`
         # reaches stdin as a single line; joining with newlines left `quit` and `without saving`
         # on separate lines and the operation never met its parameter.
-        return " ".join(tokens[1:])
+        payload = " ".join(tokens[1:])
+        if name == "printf" or (name == "echo" and any(t in ("-e", "-E", "-en", "-ne") for t in tokens[1:])):
+            # The program arrives with the line breaks still spelled as escapes; decode them the
+            # way the producer does before judging the script's lines.
+            payload = _decode_shell_escapes(payload)
+        if tokens[1].startswith("$'"):
+            # ANSI-C quoting (`printf $'tell …\nclose …'`): the shell decodes the escapes itself.
+            payload = _decode_shell_escapes(payload)
+        return payload
     return None
 
 
@@ -1933,6 +1849,12 @@ def detect_dangerous_command(command: str) -> tuple:
     if _is_verification_artifact_cleanup(command):
         return (False, None, None)
     variants = list(_command_detection_variants(command))
+    if command not in variants:
+        # The raw line is a projection too, and it is the only one that still holds the escapes a
+        # printf-style producer decodes (`printf 'a\nb' | osascript`): the de-obfuscated variants
+        # drop the backslash, `"Keynote"\nclose` becomes `"Keynote"nclose`, and the word boundary
+        # the close verb needs is gone before the script is ever judged.
+        variants.insert(0, command)
     # Identity-based checks run over every projection BEFORE the flat patterns, so a carrier's
     # generic description (`sh -c`, `env -S`) cannot shadow the specific, manual-only reason.
     for command_variant in variants:

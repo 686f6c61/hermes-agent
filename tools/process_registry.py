@@ -520,6 +520,25 @@ def _not_found(session_id: str) -> dict:
     return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
 
+def _int_arg(value: Any, name: str, default: int | None) -> int | None:
+    """Coerce a numeric tool argument that arrived as JSON (str, float) to an int.
+
+    The schema declares these as integers, but a model that emits
+    ``{"action": "log", "limit": "50"}`` reaches the handler unchanged, and a
+    string bound then dies in a slice or a comparison with
+    ``TypeError: slice indices must be integers or None or have an
+    __index__ method`` — a tool-input mistake surfaced as an internal crash
+    (#141988). Raises ``ValueError`` naming the argument for a value that is
+    not a whole number, so the caller can answer with a tool error.
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer (got {value!r})") from None
+
+
 def _output_tail(session: "ProcessSession", n: int) -> str:
     """Last *n* chars of the session output with ANSI sequences stripped."""
     from tools.ansi_strip import strip_ansi
@@ -2026,13 +2045,26 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             result.update(detached=True, note="Process recovered after restart -- output history unavailable")
         return result
 
-    def read_log(self, session_id: str, offset: int | None = None, limit: int = 200) -> dict:
-        """Read the full output log with optional pagination by lines."""
+    def read_log(self, session_id: str, offset: int | str | None = None, limit: int | str | None = 200) -> dict:
+        """Read the full output log with optional pagination by lines.
+
+        ``offset`` and ``limit`` are declared as integers in the tool schema but
+        reach this method straight from the tool call, so a JSON string is
+        coerced here: an uncoerced string bound used to raise ``TypeError`` in
+        the slice below (#141988).
+        """
         from tools.ansi_strip import strip_ansi
 
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
+        try:
+            page_offset = _int_arg(offset, "offset", None)
+            page_limit = _int_arg(limit, "limit", 200)
+        except ValueError as exc:
+            return {**self._status_head(session), "status": "error", "error": str(exc)}
+        if page_limit is None:  # unreachable with the default above; keeps the slice int-typed
+            page_limit = 200
         with session._lock:
             full_output = strip_ansi(session.output_buffer)
             exited, finalizing = session.exited, self._reader_finalizing(session)
@@ -2041,13 +2073,13 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         # An explicit offset=0 means "start from the first line" — previously it was conflated with the
         # default and silently returned the TAIL instead of the head (same falsy-coercion class as the
         # wait() timeout guard; salvaged from PR #60004, credit @isheng-eqi).
-        if offset is None and limit > 0:
-            selected = lines[-limit:]
+        if page_offset is None and page_limit > 0:
+            selected = lines[-page_limit:]
             observed_completion_output = bool(selected) or total_lines == 0
         else:
-            offset = offset or 0
-            selected = lines[offset:offset + limit]
-            stop = slice(offset, offset + limit).indices(total_lines)[1]
+            start = page_offset or 0
+            selected = lines[start:start + page_limit]
+            stop = slice(start, start + page_limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
         result = {
             **self._status_head(session), "output": "\n".join(selected),
@@ -2056,7 +2088,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             self._completion_consumed.add(session_id)
         return result
 
-    def wait(self, session_id: str, timeout: int | None = None) -> dict:
+    def wait(self, session_id: str, timeout: int | str | None = None) -> dict:
         """Block until the process exits, the timeout elapses, the user interrupts, or a
         mid-turn user message (steer/redirect → ``request_yield``) releases the wait.
         ``timeout`` defaults to (and is clamped by) TERMINAL_TIMEOUT. Returns a dict
@@ -2067,6 +2099,10 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
         except (ValueError, TypeError):
             max_timeout = 180
+        try:
+            timeout = _int_arg(timeout, "timeout", None)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:

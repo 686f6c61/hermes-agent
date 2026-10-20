@@ -604,6 +604,26 @@ class TestReadLog:
         result = registry.read_log(s.id, offset=10, limit=5)
         assert result["output"].splitlines() == [f"line {i}" for i in range(10, 15)]
 
+    def test_paging_bounds_arriving_as_strings_page_the_log(self, registry):
+        """A JSON tool argument can be a string; the slice must not raise TypeError (#141988)."""
+        lines = "\n".join([f"line {i}" for i in range(50)])
+        s = _make_session(output=lines)
+        registry._running[s.id] = s
+        result = registry.read_log(s.id, offset="10", limit="5")
+        assert result["output"].splitlines() == [f"line {i}" for i in range(10, 15)]
+        assert result["total_lines"] == 50
+        # limit alone: the default offset is the tail, and the string must size it
+        tail = registry.read_log(s.id, limit="3")
+        assert tail["output"].splitlines() == [f"line {i}" for i in range(47, 50)]
+
+    def test_unparseable_offset_is_a_tool_error_not_a_crash(self, registry):
+        lines = "\n".join([f"line {i}" for i in range(10)])
+        s = _make_session(output=lines)
+        registry._running[s.id] = s
+        result = registry.read_log(s.id, offset="all", limit="5")
+        assert result["status"] == "error"
+        assert "offset must be an integer" in result["error"]
+
 
 # =========================================================================
 # Stdin helpers
@@ -1440,6 +1460,13 @@ class TestProcessToolHandler:
         from tools.process_registry import _handle_process
         result = json.loads(_handle_process({"action": "unknown_action"}))
         assert "error" in result
+
+    def test_wait_timeout_arriving_as_a_string_is_a_tool_error(self):
+        """Same JSON-argument class as the log bounds: compare ints, not str (#141988)."""
+        from tools.process_registry import ProcessRegistry
+        result = ProcessRegistry().wait("proc_missing", timeout="soon")
+        assert result["status"] == "error"
+        assert "timeout must be an integer" in result["error"]
 
 
 # =========================================================================

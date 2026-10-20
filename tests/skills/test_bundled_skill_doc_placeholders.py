@@ -54,3 +54,30 @@ def test_tool_error_strings_have_no_role_tag():
         partition_calls([{"name": "connectors__bad", "arguments": {}}]).errors[0]["error"]["message"],
     ]
     assert [m for m in messages if ROLE_TAG.search(m)] == []
+
+
+def test_native_mcp_doc_placeholders_survive_the_redactor():
+    """An example token our own redactor eats is lost on the next read-back.
+
+    skill_view and read_file return the text after redact_sensitive_text(...,
+    file_read=True), so a doc whose placeholder matches a prefix arm comes back
+    as the non-reusable sentinel; an agent that copies the example from that
+    read-back writes the sentinel corpse into the file (#141875).
+    """
+    from agent.redact import redact_sensitive_text
+
+    doc = REPO_ROOT / "skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md"
+    text = doc.read_text(encoding="utf-8-sig", errors="replace")
+    redacted = redact_sensitive_text(text, file_read=True)
+    mutated = [
+        f"{doc.relative_to(REPO_ROOT)}:{lineno}"
+        for lineno, (before, after) in enumerate(
+            zip(text.splitlines(), redacted.splitlines()), start=1
+        )
+        if before != after
+    ]
+    assert mutated == [], (
+        "the MCP reference ships credential-shaped examples that our own redactor"
+        " rewrites on read; keep the placeholder body under the prefix arm's floor"
+        f" (ghp_REPLACE_ME, sk-REPLACE): {mutated}"
+    )

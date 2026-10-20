@@ -195,3 +195,51 @@ class TestOpenRouterMaxTokensPreserved:
             max_tokens=None,
         )
         assert "max_tokens" not in kwargs and "max_completion_tokens" not in kwargs
+
+
+class TestAffordableCeilingWording:
+    """A credit ceiling stated in output tokens, not as "can only afford" (#142203)."""
+
+    _CEILING_402 = (
+        "Error code: 402 - {'error': {'message': 'Balance covers at most 408630 output "
+        "tokens; lower max_tokens or top up.', 'type': 'insufficient_balance', "
+        "'code': 'insufficient_balance'}}"
+    )
+
+    def test_ceiling_wording_yields_budget_minus_margin(self):
+        affordable = _affordable_max_tokens_from_error(_Payment402(self._CEILING_402))
+        assert affordable == 408630 - 64
+
+    def test_request_echo_is_not_read_as_a_balance(self):
+        """A bare "up to N tokens" is the request, not the ceiling the account covers."""
+        echo = _Payment402(
+            "Error code: 402 - insufficient funds for up to 65536 tokens"
+        )
+        assert _affordable_max_tokens_from_error(echo) is None
+
+    def test_ceiling_wording_retries_once_with_the_stated_cap(self):
+        ceiling_error = self._CEILING_402
+
+        class _Ceiling:
+            def __init__(self):
+                self.calls = []
+                self.chat = SimpleNamespace(
+                    completions=SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, **kwargs):
+                self.calls.append(kwargs)
+                raise _Payment402(ceiling_error)
+
+        client = _Ceiling()
+        with pytest.raises(_Payment402):
+            _create_with_progress(
+                client,
+                {"model": "m", "max_tokens": 416666,
+                 "messages": [{"role": "user", "content": "x"}]},
+                "compression",
+            )
+        assert len(client.calls) == 2
+        retry_cap = client.calls[1].get("max_tokens") or client.calls[1].get(
+            "max_completion_tokens")
+        assert retry_cap == 408630 - 64

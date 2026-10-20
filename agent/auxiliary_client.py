@@ -7029,7 +7029,8 @@ def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
     return False
 
 
-_AFFORDABLE_TOKENS_RE = re.compile(r"can only afford\s+([0-9][0-9,]*)", re.IGNORECASE)
+_AFFORDABLE_TOKENS_RE = re.compile(
+    r"can only afford\s+([0-9][0-9,]*)|at most\s+([0-9][0-9,]*)\s+output tokens", re.IGNORECASE)
 # Below the floor the affordable budget can't fit a useful aux output — treat as exhaustion;
 # the margin keeps provider-side token-count rounding from 402-ing the retry.
 _AFFORDABLE_RETRY_FLOOR_TOKENS = 512
@@ -7044,10 +7045,9 @@ def _affordable_max_tokens_from_error(exc: Exception) -> Optional[int]:
     if not _is_payment_error(exc):
         return None
     match = _AFFORDABLE_TOKENS_RE.search(str(exc))
-    if not match:
-        return None
+    groups = match.groups() if match else ()
     try:
-        affordable = int(match.group(1).replace(",", ""))
+        affordable = int(next((group for group in groups if group), "").replace(",", ""))
     except (TypeError, ValueError):
         return None
     capped = affordable - _AFFORDABLE_RETRY_MARGIN_TOKENS

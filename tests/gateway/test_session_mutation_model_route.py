@@ -415,3 +415,33 @@ async def test_a_model_committed_on_a_frozen_bot_chat_holds_when_an_open_adopts_
     finally:
         await owner.close()
         store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_a_following_pick_survives_the_profiles_private_config_secrets(home, endpoints):
+    """Regression for #142017: the follow branch shadowed the secrets remap, so a following session
+    whose profile keeps a private secret outside FOLLOW_SECTIONS (here a TTS key) failed every
+    ``/model`` pick with ``AttributeError: 'tuple' object has no attribute 'get'``."""
+    (_, url), _ = endpoints
+
+    def profile(model):
+        (home / 'config.yaml').write_text(json.dumps({
+            'model': {'provider': 'custom', 'default': model, 'base_url': url, 'api_key': 'key-a'},
+            # Not a FOLLOW_SECTION: it stays a private secret of the committed receipt, so
+            # ``recover_config_secrets`` hands ``prepare_model`` a non-empty dict to remap.
+            'tts': {'api_key': 'tts-secret'}}), encoding='utf-8')
+    profile('original')
+    store, runner, authority, owner = _owner(home)
+    _bind_resolver(runner)
+    try:
+        live = await _create(owner, authority, home, 'follow')
+        sid = next(sid for sid, value in authority.sessions.items() if value is live)
+        assert _route(runner, live) == ('original', url, 'key-a')
+
+        response = await _pick(owner, authority, sid, {'model': 'picked', 'provider': 'custom'})
+
+        assert 'result' in response, response
+        assert _route(runner, live) == ('picked', url, 'key-a')
+    finally:
+        await owner.close()
+        store.close_all_db_handles()

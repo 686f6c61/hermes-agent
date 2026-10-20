@@ -163,6 +163,7 @@ def main():
     p.add_argument("--session-key", required=True)
     p.add_argument("--model", default="")
     p.add_argument("--provider", default="")
+    p.add_argument("--base-url", default="")
     p.add_argument("--parent-pid", type=int, default=0)
     args = p.parse_args()
     os.environ["HERMES_SESSION_KEY"] = args.session_key
@@ -179,7 +180,10 @@ def main():
         # --provider pins the CLI to the parent agent's resolved provider (a MoA session's virtual
         # "moa" provider included). Without it HermesCLI re-resolves from config and dispatches the
         # MoA preset NAME to the configured real provider (#57283).
-        cli = HermesCLI(model=args.model or None, provider=args.provider or None,
+        # --base-url pins the resolved endpoint the same way: without it the seed comes from the config
+        # default, so a Codex session under a Claude default route ran /fast against the wrong host and
+        # refused an entitled model (#141953).
+        cli = HermesCLI(model=args.model or None, provider=args.provider or None, base_url=args.base_url or None,
                         compact=True, resume=args.session_key, verbose=False)
     cli._slash_metrics_surface = None  # the TUI/Desktop client already counted the typed command
     cli.is_slash_worker = True

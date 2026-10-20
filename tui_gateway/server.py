@@ -255,16 +255,16 @@ class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
 
     def __init__(self, session_key: str, model: str, profile_home: str | None = None,
-                 provider: str | None = None):
+                 provider: str | None = None, base_url: str | None = None):
         self._lock = threading.Lock()
         self._seq = 0
         self.stderr_tail: list[str] = []
         self.stdout_queue: queue.Queue[dict | None] = queue.Queue()
-        # ``--provider`` pins the child to the parent agent's virtual provider: without it the
-        # worker re-resolves provider from config, so a MoA session (provider=moa, model=<preset>)
-        # dispatched its preset NAME to the configured real provider and 402/503'd (#57283).
+        # ``--provider``/``--base-url`` pin the child to the parent agent's resolved route: without them
+        # the worker re-resolves from config, so a MoA session (provider=moa) dispatched its preset NAME
+        # to the real provider (#57283) and /fast gated on the default's base URL (#141953).
         argv = [sys.executable, "-m", "tui_gateway.slash_worker", "--session-key", session_key,
-                "--parent-pid", str(os.getpid())] \
+                "--parent-pid", str(os.getpid())] + (["--base-url", base_url] if base_url else []) \
             + (["--model", model] if model else []) \
             + (["--provider", provider] if provider else [])
         self._closed = False
@@ -1378,7 +1378,7 @@ def _restart_slash_worker(sid: str, session: dict):
     try:
         new_worker = _SlashWorker(session["session_key"], getattr(session.get("agent"), "model", _resolve_model()),
                                   profile_home=session.get("profile_home"),
-                                  provider=getattr(session.get("agent"), "provider", None) or None)
+                                  provider=getattr(session.get("agent"), "provider", None) or None, base_url=getattr(session.get("agent"), "base_url", None) or None)
     except Exception:
         session["slash_worker"] = None
         return

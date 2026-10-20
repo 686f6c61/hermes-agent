@@ -79,6 +79,21 @@ class TestDetection:
         'osascript <<\'APPLESCRIPT-END\'\ntell application "Keynote" to quit without saving\n'
         'APPLESCRIPT-END',
         'osascript <<\'EOF\'\nset x to 1\n EOF\ntell application "Keynote" to quit without saving\nEOF',
+        # An AppleScript string holding `let` is data, not a JXA declaration: the language hint has
+        # to be read on code only, or the apostrophe of `document's name` pairs with the one in
+        # `-- don't` and the `saving no` between them disappears.
+        'osascript <<\'EOF\'\ndisplay dialog "let it go"\n'
+        'tell application "Keynote" to close (first document whose name is front document\'s name) '
+        'saving no -- don\'t keep\nEOF',
+        # `//` inside a JS string is data: cutting the comment there deleted the call beside it.
+        'osascript -l JavaScript -e \'var s = "//"; '
+        'Application("Keynote").documents[0].close({saving: "no"})\'',
+        # A shell joins the producer\'s argv with one space, so `echo` hands stdin a single line.
+        'echo tell application \\"Keynote\\" to quit without saving | osascript',
+        # osascript builds one program from repeated `-e` options, a line each.
+        'osascript -e \'tell application "Keynote" to close front document saving ¬\' -e \'no\'',
+        # `aevtquit` is the `quit` event and `savo` the `saving` parameter of the same suite.
+        'osascript -e \'tell application "Keynote" to «event aevtquit» given «class savo»:no\'',
     ])
     def test_every_carrier_of_the_same_payload_requires_approval(self, command):
         """The first fix matched only a bare `osascript … saving no` at command position."""
@@ -103,6 +118,10 @@ class TestDetection:
         'osascript -l JavaScript -e "console.log(\'quit without saving\')"',
         'osascript -e \'tell application "Keynote" to get name of front document -- quit without saving\'',
         'osascript -l JavaScript -e \'Application("Keynote").documents.length // .close({saving: "no"})\'',
+        # The two shapes the fixes above must not overreach on: a JS string that merely contains
+        # the comment marker, and a piped read whose argv is space-joined but closes nothing.
+        'osascript -l JavaScript -e \'var s = "// close"; Application("Keynote").documents.length\'',
+        'echo tell application \\"Keynote\\" to get name of front document | osascript',
     ])
     def test_inert_text_is_not_flagged(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command

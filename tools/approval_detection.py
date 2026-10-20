@@ -1590,7 +1590,7 @@ _JXA_NO_SAVE_RE = re.compile(
 # AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
 # `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
 _APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
-_APPLESCRIPT_RAW_CODE_NAMES = {"coreclos": "close", "savo": "saving"}
+_APPLESCRIPT_RAW_CODE_NAMES = {"coreclos": "close", "aevtquit": "quit", "savo": "saving"}
 # A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, and `<<-`
 # (tabs stripped) is not the same body rule as a plain `<<` (delimiter alone on the line).
 _HEREDOC_MARKER_RE = re.compile(
@@ -1657,6 +1657,42 @@ def _carrier_payloads(command: str):
             break
 
 
+def _strip_js_comments(statement: str) -> str:
+    """Drop JXA comments that sit outside a string literal.
+
+    A plain regex cannot tell `//` in `var s = "//"` from the start of a comment, and cutting there
+    deleted the `.close({saving: "no"})` that followed on the same line, so the real call read as
+    inert (reported on #141346).
+    """
+    out: list[str] = []
+    index, quote, length = 0, "", len(statement)
+    while index < length:
+        char = statement[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(statement[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'`":
+            quote = char
+            out.append(char)
+        elif statement.startswith("//", index):
+            break
+        elif statement.startswith("/*", index):
+            end = statement.find("*/", index + 2)
+            if end < 0:
+                break
+            index = end + 2
+            continue
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _script_closes_without_saving(source: str, language: str | None = None) -> bool:
     """Whether *source*, as script text in *language*, closes or quits a document without saving.
 
@@ -1673,15 +1709,20 @@ def _script_closes_without_saving(source: str, language: str | None = None) -> b
     if language:
         javascript = language == "javascript"
     else:
-        # The hint is read on comment-free text, because a comment is prose in either language.
-        javascript = bool(_JS_SCRIPT_HINT_RE.search(_APPLESCRIPT_LINE_COMMENT_RE.sub("", source)))
+        # The hint is read on code only: a comment is prose in either language, and so is a string
+        # literal (`display dialog "let it go"` is not a `let` declaration).
+        code_only = _SCRIPT_STRING_LITERAL_RE.sub(
+            '""', _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", _APPLESCRIPT_LINE_COMMENT_RE.sub("", source))
+        )
+        javascript = bool(_JS_SCRIPT_HINT_RE.search(code_only))
     # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
     # same operation as `saving no`; splitting first would strand each half on its own line.
     source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
     for statement in source.splitlines() or (source,):
         if javascript:
-            # A commented-out call is not the call: `documents.length // .close({saving: "no"})`.
-            statement = _JS_LINE_COMMENT_RE.sub("", _JS_BLOCK_COMMENT_RE.sub("", statement))
+            # A commented-out call is not the call: `documents.length // .close({saving: "no"})`,
+            # while `//` inside a string is data and keeps the call beside it.
+            statement = _strip_js_comments(statement)
         if _JXA_NO_SAVE_RE.search(statement):
             return True
         # AppleScript string literals are DATA here: the dialog that ASKS "Quit without saving?"
@@ -1719,13 +1760,15 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
     program is not in the command line, and reading it here would be IO on an arbitrary path.
     """
     payloads: list[str] = []
+    exec_payloads: list[str] = []
     language: str | None = None
     carries_source, position = False, index + 1
     while position < len(tokens):
         token = tokens[position]
         lowered = token.lower()
         if token == "--":
-            return payloads, language, carries_source or position + 1 < len(tokens)
+            carries_source = carries_source or position + 1 < len(tokens)
+            break
         if lowered in ("-l", "--language"):
             if position + 1 < len(tokens):
                 language = _osascript_language(tokens[position + 1])
@@ -1741,7 +1784,9 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             continue
         if lowered in ("-e", "--exec"):
             if position + 1 < len(tokens):
-                payloads.append(tokens[position + 1])
+                # Repeated `-e` options build ONE program, a line each: `-e '… saving ¬' -e 'no'`
+                # is the continued statement, not two scripts that each read as incomplete.
+                exec_payloads.append(tokens[position + 1])
                 carries_source = True
             position += 2
             continue
@@ -1763,6 +1808,8 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             continue
         carries_source = True  # a script file path: source we cannot read from here
         position += 1
+    if exec_payloads:
+        payloads.insert(0, "\n".join(exec_payloads))
     return payloads, language, carries_source
 
 
@@ -1872,7 +1919,10 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
             continue
         if len(tokens) < 2:
             return None
-        return "\n".join(tokens[1:])
+        # A shell joins a producer's argv with ONE space, so `echo tell … to quit without saving`
+        # reaches stdin as a single line; joining with newlines left `quit` and `without saving`
+        # on separate lines and the operation never met its parameter.
+        return " ".join(tokens[1:])
     return None
 
 

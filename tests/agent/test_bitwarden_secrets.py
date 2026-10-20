@@ -368,6 +368,43 @@ def test_stale_disk_cache_returned_when_bws_fails(monkeypatch, tmp_path):
     assert "dns resolution failed" in warnings[0]
 
 
+@pytest.mark.parametrize("status", [
+    "[500 Internal Server Error]",
+    "[502 Bad Gateway]",
+    "[503 Service Unavailable]",
+    "[504 Gateway Timeout]",
+])
+def test_stale_disk_cache_returned_on_server_side_transient(monkeypatch, tmp_path, status):
+    """A 5xx from Bitwarden's own API is an outage, not a bad credential: bws
+    exits 1 with the server's status line inside the RuntimeError, so the
+    classification has to keep the last good keys flowing (#142049)."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    fake_binary = tmp_path / "bws"
+    fake_binary.write_text("")
+    bw._reset_cache_for_tests(home)
+
+    _seed_stale_disk_cache(home, secrets={"OPENAI_API_KEY": "sk-old"},
+                           age_seconds=3600)
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **kw: mock.Mock(
+            returncode=1, stdout="",
+            stderr=f"Error: Received error message from server: {status}",
+        ),
+    )
+
+    secrets, warnings = bw.fetch_bitwarden_secrets(
+        access_token="0.t", project_id="proj-1", binary=fake_binary,
+        cache_ttl_seconds=300, home_path=home,
+    )
+    assert secrets == {"OPENAI_API_KEY": "sk-old"}
+    assert len(warnings) == 1
+    assert "stale disk cache" in warnings[0]
+    assert status in warnings[0]
+
+
 
 
 

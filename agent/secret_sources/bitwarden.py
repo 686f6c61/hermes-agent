@@ -61,12 +61,19 @@ def _encrypted_disk_cache_path(home_path: Optional[Path] = None) -> Path:
 # First matching rule wins. The BSM identity endpoint rejects a revoked /
 # expired machine-account token with an OAuth-style
 # `[400 Bad Request] {"error":"invalid_client"}`, hence those AUTH tokens.
+# Bitwarden's own API answers an outage with `Received error message from
+# server: [503 Service Unavailable]` (also 500/502/504) — a server-side
+# transient, so it joins NETWORK and keeps the stale-cache fallback (#142049).
+# The bracketed forms are what bws prints; matching a bare status number would
+# also hit exit codes and token fragments elsewhere in the dump.
 _BWS_ERROR_RULES = (
     (ErrorKind.TIMEOUT, ("timed out",)),
     (ErrorKind.BINARY_MISSING, ("binary not available", "failed to invoke")),
     (ErrorKind.AUTH_FAILED, ("unauthorized", "invalid token", "access token", "401", "403",
                              "invalid_client", "invalid_grant", "400 bad request")),
-    (ErrorKind.NETWORK, ("network", "connection", "resolve", "download", "dns")),
+    (ErrorKind.NETWORK, ("network", "connection", "resolve", "download", "dns",
+                         "[500", "[502", "[503", "[504", "internal server error",
+                         "bad gateway", "service unavailable", "gateway timeout")),
 )
 
 
@@ -222,11 +229,12 @@ def fetch_bitwarden_secrets(
     try:
         secrets, warnings = _run_bws_list(bws, access_token, project_id, server_url)
     except RuntimeError as exc:
-        # Stale fallback ONLY for transport failures — never AUTH_FAILED / INTERNAL,
-        # where old secrets would mask a real problem (without it a fleet sharing
-        # one project all stops on a network blip). With the encrypted cache on it
-        # is the ONLY fallback (at-rest payload must never be plaintext); else the
-        # plain DiskCache is read with ttl=inf, but only when the real TTL > 0.
+        # Stale fallback ONLY for transport / server-transient failures — never
+        # AUTH_FAILED / INTERNAL, where old secrets would mask a real problem
+        # (without it a fleet sharing one project all stops on a network blip).
+        # With the encrypted cache on it is the ONLY fallback (at-rest payload
+        # must never be plaintext); else the plain DiskCache is read with
+        # ttl=inf, but only when the real TTL > 0.
         if use_cache and _classify_bws_error(str(exc)) in (ErrorKind.NETWORK, ErrorKind.TIMEOUT):
             stale = label = None
             if encrypted_cache_enabled:

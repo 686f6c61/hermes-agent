@@ -88,10 +88,18 @@ def test_a_swap_that_cannot_build_its_routers_keeps_the_launch_home_sink(
     class RouterRefused(RuntimeError):
         pass
 
-    def _refuse(*_args, **_kwargs):
-        raise RouterRefused("profile home is not readable")
+    class _RefusingRouter(hermes_logging._ProfileRoutingFileHandler):
+        """Constructs the first home's router, refuses the second one."""
 
-    monkeypatch.setattr(hermes_logging, "_ProfileRoutingFileHandler", _refuse)
+        built = 0
+
+        def __init__(self, existing, profile_homes):
+            type(self).built += 1
+            if type(self).built > 1:
+                raise RouterRefused("profile home is not readable")
+            super().__init__(existing, profile_homes)
+
+    monkeypatch.setattr(hermes_logging, "_ProfileRoutingFileHandler", _RefusingRouter)
 
     assert run._enable_multiplex_log_routing(types.SimpleNamespace(multiplex_profiles=True)) is False
 

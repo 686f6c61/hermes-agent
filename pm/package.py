@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from pm.filesystem import native
+from pm.glibc import host_version, version_text
 
 if TYPE_CHECKING:
     from pm.store import Store
@@ -69,6 +70,9 @@ class Package:
         when a platform needs a completely different url.
     gaps: targets this package does NOT exist for, with the reason
         (upstream ships no artifact). Everything else is available.
+    glibc_floor: per-target minimum glibc the pinned Linux archive needs,
+        measured from the archive itself. A host below it cannot exec the
+        engine at all, so the gate belongs before the download (floor_reason).
     """
 
     name: str = ""
@@ -79,6 +83,9 @@ class Package:
     on_path: bool = True
     url: str = ""
     gaps: dict[str, str] = {}
+    # Targets whose pinned archive needs a newer glibc than some supported
+    # hosts run; absent means "no floor measured", never "no floor".
+    glibc_floor: dict[str, tuple[int, int]] = {}
     # How the lockfile `version` field labels this package for `pm update`:
     #   "semver" — one shared version across targets (node 26.7.0, uv 0.12.3).
     #   "minor"  — the version label is major.minor; each target's exact
@@ -368,6 +375,31 @@ def _probe_reason(binary: Path, proc: subprocess.CompletedProcess) -> str:
     out = (proc.stdout or b"") + (proc.stderr or b"")
     tail = out.decode(errors="replace").strip()[-300:]
     return f"{native(binary)} --version exited {proc.returncode}" + (f": {tail}" if tail else "")
+
+
+def floor_reason(package: Package, target: str, host_target: str | None = None) -> Optional[str]:
+    """Why this package's pinned artifact for ``target`` cannot run on THIS host.
+
+    A glibc floor above the host's can only end in a verification error after
+    the download, so it is answered before it: by the resolver, which then
+    falls back to a build that does run here, and by the installer, which
+    refuses instead of fetching 400 MB that cannot exec. ``target`` uneven to
+    the host's (a cross-target stage) and hosts without glibc are never gated.
+    """
+    floor = package.glibc_floor.get(target)
+    if floor is None:
+        return None
+    if host_target is None:
+        from pm.store import current_target
+
+        host_target = current_target()
+    if target != host_target:
+        return None
+    host = host_version()
+    if host is None or host >= floor:
+        return None
+    return (f"{package.name} needs glibc {version_text(floor)} on {target}; "
+            f"this host has glibc {version_text(host)}")
 
 
 class Runner:

@@ -1126,14 +1126,22 @@ class LlamaCpp(BinaryPackage):
     backend: str = ""
     # Release-asset infix per target, or absent where upstream ships none.
     assets: dict[str, str] = {}
+    # Minimum glibc each Linux archive needs, read off the pinned artifact
+    # (`objdump -T <lib> | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1`).
+    # Only measured floors are listed: a target absent here is a target whose
+    # floor nothing has checked, never one known to run anywhere.
+    glibc_floor: dict[str, tuple[int, int]] = {}
     # Upstream's Linux builds (CPU included) link the system OpenMP runtime,
     # which minimal hosts (WSL, containers) lack, and a normal install never
     # touches the system package manager. The $ORIGIN RUNPATH loads this copy
     # ahead of the host's, so its glibc floor must stay at or below every
-    # engine's. Ubuntu 22.04's needs glibc 2.34, the floor of the x64 CPU and
-    # Vulkan builds, and provides every GOMP version the builds reference. The
-    # release-pocket file stays in the pool until 22.04's EOL; the artifact
-    # mirror serves the pinned bytes after that.
+    # engine's that loads it: Ubuntu 22.04's needs glibc 2.34, the floor of the
+    # x64 CPU and Vulkan builds, and provides every GOMP version they
+    # reference. The CUDA engine's floor is higher and comes from libc, not
+    # from this copy (2.38 at b11370, see LlamaCppCuda), and it is gated
+    # before the download instead of at verification. The release-pocket file
+    # stays in the pool until 22.04's EOL; the artifact mirror serves the
+    # pinned bytes after that.
     _LIBGOMP = {
         "linux-x64": "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/libgomp1_12-20220319-1ubuntu1_amd64.deb",
         "linux-arm64": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gcc-12/libgomp1_12-20220319-1ubuntu1_arm64.deb",
@@ -1236,10 +1244,20 @@ class LlamaCppCuda(LlamaCpp):
     upstream dropped win-cuda-13.3 at the same time.
 
     The engine archive carries no CUDA libraries (end users have no toolkit),
-    so each target pins a second cudart archive too."""
+    so each target pins a second cudart archive too.
+
+    Upstream builds these inside an `nvidia/cuda:*-devel-ubuntu24.04`
+    container (the CPU and Vulkan jobs still run on ubuntu-22.04), so the
+    Linux archives carry GLIBC_2.38 in libggml-base/libggml-cuda at b11370:
+    Ubuntu 22.04 (2.35), Debian 12 (2.36) and RHEL 9 (2.34) NVIDIA hosts
+    cannot exec them, while the Vulkan build of the same release can. The
+    floor is declared per target so `auto` falls back instead of downloading
+    an engine that dies in verify()."""
 
     name = "llamacpp-cuda"
     backend = "cuda"
+    # Measured on b11370's ubuntu-cuda-13.4 archives, x64 and arm64 alike.
+    glibc_floor = {"linux-x64": (2, 38), "linux-arm64": (2, 38)}
     assets = {
         "win32-x64": "win-cuda-13.4-x64",
         "win32-arm64": "win-cuda-13.4-arm64",
@@ -1273,6 +1291,9 @@ class LlamaCppCuda(LlamaCpp):
 class LlamaCppVulkan(LlamaCpp):
     name = "llamacpp-vulkan"
     backend = "vulkan"
+    # Measured on b11370's ubuntu-vulkan archives: the fallback for hosts
+    # below the CUDA floor, and the reason `auto` stops here at glibc 2.34.
+    glibc_floor = {"linux-x64": (2, 34)}
     assets = {
         "win32-x64": "win-vulkan-x64",
         "linux-x64": "ubuntu-vulkan-x64",

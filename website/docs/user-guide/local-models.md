@@ -189,12 +189,19 @@ Selecting a local model as your main model uses the standard
 ## Requirements and limits
 
 - **Windows:** CUDA on supported NVIDIA targets, Vulkan on x64, or CPU.
-  **Linux:** CUDA on x64 and arm64 NVIDIA (needs a CUDA 13 driver), Vulkan, or CPU.
-  **macOS:** Metal or CPU. HIP/ROCm is an explicit choice on supported x64
-  targets. Unsupported backend/target pairs fail before any download.
+  **Linux:** CUDA on x64 and arm64 NVIDIA, Vulkan, or CPU. The Linux CUDA
+  build needs a CUDA 13 driver **and glibc 2.38+** — upstream builds it in an
+  Ubuntu 24.04 container, unlike the CPU and Vulkan builds — so an Ubuntu
+  22.04 (2.35), Debian 12 (2.36) or RHEL 9 (2.34) NVIDIA host runs the Vulkan
+  build instead. **macOS:** Metal or CPU. HIP/ROCm is an explicit choice on
+  supported x64 targets. Unsupported backend/target pairs fail before any
+  download, and so does a CUDA install on a host below its glibc floor.
 - `backend: auto` prefers CUDA for NVIDIA and Vulkan for AMD and Intel GPUs,
   then falls back to the builds listed above for your platform (CPU when no
-  GPU is found). Behind a Vulkan or HIP engine, a discrete card is sized from
+  GPU is found). A host below the CUDA build's glibc floor skips CUDA the same
+  way and lands on Vulkan (glibc 2.34+) or CPU; `backend: cuda` on such a host
+  is refused before the download, naming both versions. Behind a Vulkan or HIP
+  engine, a discrete card is sized from
   its own memory (system RAM is spill space) and each launch subtracts what
   other programs hold on it; an integrated GPU shares system RAM and is sized
   from that. Quickstart installs the engine before choosing the model, so the

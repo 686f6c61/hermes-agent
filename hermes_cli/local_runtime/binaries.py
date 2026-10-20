@@ -14,6 +14,7 @@ from typing import Callable, Iterator
 
 import pm
 from pm.downloader import ProgressFn
+from pm.package import floor_reason
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +79,18 @@ def unavailable_reason(backend: str, target: str | None = None) -> str | None:
     name = BACKEND_PACKAGES.get(backend)
     if name is None:
         return f"unknown backend {backend}"
-    target = target or pm.current_target()
-    reason = pm.get_package(name).missing_reason(target)
+    resolved_target = target or pm.current_target()
+    package = pm.get_package(name)
+    reason = package.missing_reason(resolved_target)
     if reason:
         return reason
     lock = pm.Lockfile(pm.paths.lockfile_path())
-    if not lock.version(name) or not lock.artifacts(name, target):
-        return f"{name} is not pinned for {target}"
+    if not lock.version(name) or not lock.artifacts(name, resolved_target):
+        return f"{name} is not pinned for {resolved_target}"
+    blocked = floor_reason(package, resolved_target)
+    if blocked:
+        alternative = "vulkan" if backend != "vulkan" else "cpu"
+        return f"{blocked}; install llamacpp-{alternative} and set local_runtime.backend: {alternative}"
     return None
 
 

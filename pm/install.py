@@ -17,7 +17,7 @@ from pm import paths
 from pm.downloader import DownloadPaused, ProgressFn
 from pm.filesystem import native, remove_tree, retry_held
 from pm.lock import Facts, Lockfile
-from pm.package import InstallError, Package, Runner, StatePackage, compose_env
+from pm.package import InstallError, Package, Runner, StatePackage, compose_env, floor_reason
 from pm.plugin_inputs import Candidates, Members, PluginInput, Selection, StagedUpdate
 from pm.registry import get_package, walk
 from pm.store import Store, current_target, merge_tree, tree_digest
@@ -410,6 +410,13 @@ def _install(
     reason = package.missing_reason(target)
     if reason is not None:
         raise InstallError(package.name, f"unavailable on {target}: {reason}", "none")
+
+    # A glibc floor above the host's ends in a verification error at best, so
+    # it is refused here and not after the engine's download.
+    blocked = floor_reason(package, target)
+    if blocked is not None:
+        raise InstallError(package.name, f"unavailable on this host: {blocked}",
+                           "install a build this host can run, e.g. `hermes pm install llamacpp-vulkan`")
 
     entry_name = package.store_entry(version, target)
     entry = store.entry(entry_name)

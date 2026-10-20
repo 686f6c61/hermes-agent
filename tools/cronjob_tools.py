@@ -750,6 +750,43 @@ def _refreshed_job_view(job_id: str) -> dict[str, Any]:
     return _format_job(get_job(job_id) or {"id": job_id})
 
 
+_FENCED_CALLER_NOTICE = (
+    "This fire runs in a Kanban-fenced caller lineage (delegate_task / kanban-worker "
+    "context), so the job and its child scripts inherit that write fence: any Kanban "
+    "mutation they attempt is refused. The same job on its scheduled tick is not fenced.")
+
+
+def caller_lineage_is_kanban_fenced() -> bool:
+    """True when this manual fire happens in a delegate child or a descendant carrying its marker.
+
+    The marker is exactly what makes the job's own `hermes kanban` calls fail, so naming it here
+    keeps the eventual refusal from being read as a script bug (#141873).
+    """
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+    except ImportError:
+        return False  # partial install: no lineage module, so no fence to name
+    return bool(is_delegated_child_process_context())
+
+
+def _stamp_fence_provenance(payload: dict[str, Any], job_view: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Name the caller's Kanban write fence on a manual-fire response (#141873).
+
+    Fires are not refused: a fenced caller can still run a job that never touches the board, so
+    the flag is what a refusal downstream gets attributed to. The failure text carries the cause
+    so the operator does not read a lineage fence as the script's own error.
+    """
+    if not caller_lineage_is_kanban_fenced():
+        return payload
+    payload["fence_inherited"] = True
+    payload["fence_notice"] = _FENCED_CALLER_NOTICE
+    if job_view is not None:
+        error = job_view.get("execution_error")
+        if error and _FENCED_CALLER_NOTICE not in error:
+            job_view["execution_error"] = f"{error}\n\n{_FENCED_CALLER_NOTICE}"
+    return payload
+
+
 def _action_run(job: dict[str, Any], a: dict[str, Any]) -> str:
     job_id = job["id"]
     # `prompt` on run is transient per-fire context appended to the stored prompt, never
@@ -773,7 +810,7 @@ def _action_run(job: dict[str, Any], a: dict[str, Any]) -> str:
         result["executed"] = True
         result["execution_mode"] = "background"
         result["delegation_id"] = bg.get("delegation_id")
-        return _dumps({
+        return _dumps(_stamp_fence_provenance({
             "success": True,
             "job": result,
             "note": (
@@ -781,7 +818,7 @@ def _action_run(job: dict[str, Any], a: dict[str, Any]) -> str:
                 "user can keep working; its outcome re-enters the "
                 "conversation as a new message when it finishes. "
                 "Do not wait or poll — just continue."),
-        })
+        }, result))
     if bg is not None:
         exec_result = bg  # terminal result: claim lost or inline fallback
     else:
@@ -804,7 +841,7 @@ def _action_run(job: dict[str, Any], a: dict[str, Any]) -> str:
             "Already being fired by the scheduler; not run again.")
     elif exec_result.get("error"):
         result["execution_error"] = exec_result["error"]
-    return _dumps({"success": True, "job": result})
+    return _dumps(_stamp_fence_provenance({"success": True, "job": result}, result))
 
 
 def _pick(updates: dict[str, Any], job: dict[str, Any], key: str) -> Any:

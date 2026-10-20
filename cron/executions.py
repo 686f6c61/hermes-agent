@@ -92,6 +92,12 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "executions", "delivery_outcome", "delivery_outcome TEXT")
     add_column_if_missing(conn, "executions", "scheduled_instant", "scheduled_instant TEXT")
     add_column_if_missing(conn, "executions", "progress_at", "progress_at TEXT")
+    # A direct fire executes in the caller's process, so it can hand the job a Kanban write
+    # fence the operator never asked for (#141873). Recorded on the row so the refusal the
+    # job's children hit reads as lineage, not as a script bug.
+    add_column_if_missing(
+        conn, "executions", "fence_inherited", "fence_inherited INTEGER NOT NULL DEFAULT 0",
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_executions_occurrence "
         "ON executions(job_id, scheduled_instant) WHERE status='completed'"
@@ -210,6 +216,24 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
     )
 
 
+def _direct_fire_inherits_kanban_fence(source: str) -> int:
+    """Whether a fire of *source* executes in a caller that hands it a Kanban write fence.
+
+    ``hermes cron run`` and ``cronjob(action="run")`` run the job in the caller's process, and
+    the child env keeps ``HERMES_DELEGATED_CHILD_CONTEXT`` on purpose
+    (``agent.delegation_context.scrub_kanban_env``) so a fenced caller cannot launder Kanban
+    mutation rights through the cron path. A scheduled tick runs in the gateway's own lineage,
+    which is not fenced, so only ``direct`` rows carry the marker (#141873).
+    """
+    if str(source) != "direct":
+        return 0
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+    except ImportError:
+        return 0  # partial install: no lineage module, so nothing to record
+    return 1 if is_delegated_child_process_context() else 0
+
+
 def create_execution(
     job_id: str, *, source: str, scheduled_instant: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -219,14 +243,15 @@ def create_execution(
     now = _hermes_now().isoformat()
     execution_id = uuid.uuid4().hex
     pid = os.getpid()
+    fence_inherited = _direct_fire_inherits_kanban_fence(source)
     with _transaction() as conn:
         conn.execute(
             """INSERT INTO executions
                (id, job_id, source, process_id, pid, process_started_at,
-                status, claimed_at, scheduled_instant)
-               VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?)""",
+                status, claimed_at, scheduled_instant, fence_inherited)
+               VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?, ?)""",
             (execution_id, str(job_id), str(source), _PROCESS_ID, pid,
-             _process_start_time(pid), now, canonical_instant(scheduled_instant)),
+             _process_start_time(pid), now, canonical_instant(scheduled_instant), fence_inherited),
         )
         record = _fetch(conn, execution_id)
     _emit_execution_state(record)

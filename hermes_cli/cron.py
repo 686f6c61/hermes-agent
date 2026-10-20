@@ -882,6 +882,8 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
     if action in {"resume", "run"} and result.get("job", {}).get("next_run_at"):
         print(f"  Next run: {result['job']['next_run_at']}")
     if action == "run":
+        if result.get("fence_inherited"):
+            print(color(f"  {result.get('fence_notice')}", Colors.YELLOW))
         print(f"  {_run_outcome(result.get('job', {}))}")
         if (job.get('executed') and job.get('execution_success') is False
                 and not job.get('delegation_id') and job.get('execution_mode') != 'background'):

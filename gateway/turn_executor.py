@@ -21,10 +21,13 @@ class _UnboundedThreadExecutor(concurrent.futures.Executor):
         self._threads: set = set()
         self._shutdown = False
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._spawning = 0
         self._n = 0
 
     def submit(self, fn, /, *args, **kwargs):
         fut: concurrent.futures.Future = concurrent.futures.Future()
+        registered = threading.Event()
 
         def _run():
             try:
@@ -36,26 +39,46 @@ class _UnboundedThreadExecutor(concurrent.futures.Executor):
                     fut.set_exception(exc)
             finally:
                 # Blocks until submit() has registered this thread, so the discard never races the add.
+                registered.wait()
                 with self._lock:
                     self._threads.discard(threading.current_thread())
 
-        # One critical section for check + start + register (as ThreadPoolExecutor.submit does), so a
-        # concurrent shutdown() either refuses this item or sees its thread; never a live, uncounted one.
+        # Only bookkeeping runs under _lock. ``t.start()`` is the slow step and it stays out: submit()
+        # is reached from the gateway event loop (``run_in_executor``), and a finishing worker takes
+        # this same lock to discard itself, so holding it across start() stalled the whole loop --
+        # every platform's polling -- for as long as any spawn took (#142061).
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("cannot schedule new futures after shutdown")
             self._n += 1
             t = threading.Thread(target=_run, name=f"{self._prefix}_{self._n}", daemon=True)
+            # Counted from here until it is registered, so a concurrent shutdown() waits for this
+            # spawn instead of snapshotting _threads without it (a live, uncounted worker).
+            self._spawning += 1
+        try:
             # Start BEFORE registering: at the OS thread limit start() raises, and an unstarted thread
             # left in _threads would make shutdown's join() raise and skip the quiesce decision.
             t.start()
+        except BaseException:
+            with self._lock:
+                self._spawning -= 1
+                self._cond.notify_all()
+            raise
+        with self._lock:
             self._threads.add(t)
+            self._spawning -= 1
+            self._cond.notify_all()
+        registered.set()
         return fut
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False):
         # cancel_futures is accepted for API parity only: there is no queue, so nothing is pending.
-        with self._lock:
+        with self._cond:
             self._shutdown = True
+            # A submit() already past its _shutdown check is starting its thread outside the lock;
+            # wait for it to register, or the snapshot below misses a live worker.
+            while self._spawning:
+                self._cond.wait()
             threads = list(self._threads)
         if wait:
             for t in threads:

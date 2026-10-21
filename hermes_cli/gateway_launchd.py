@@ -160,11 +160,31 @@ def _launchctl_label_supervising_process(label: str) -> bool:
     return _gw()._launchctl_supervised_pid(label) is not None
 
 
+def _launchctl_kickstart_registered(domain: str, label: str, *, timeout: int = 30) -> bool:
+    """Start a job ``bootstrap`` registered without starting, and report whether it now supervises a process.
+
+    Plain ``kickstart`` (no ``-k``): the caller only gets here when nothing runs, and ``-k`` would kill a
+    replacement launchd started on its own. Errors stay non-fatal — the retry loop owns the deadline.
+    """
+    try:
+        subprocess.run(
+            ["launchctl", "kickstart", f"{domain}/{label}"], check=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return _gw()._launchctl_label_supervising_process(label)
+
+
 def _retry_launchctl_bootstrap_until_registered(
     domain: str, plist_path, label: str, *, deadline: float
 ) -> bool:
     """Retry ``_launchctl_bootstrap`` until the label supervises a process or ``deadline`` passes. Under
-    load bootstrap can fail even after bootout, during a drain (default 180s) — ~10s is too short."""
+    load bootstrap can fail even after bootout, during a drain (default 180s) — ~10s is too short.
+
+    A bootstrap that exits 0 only registers the job: an on-demand plist (no ``RunAtLoad``/``KeepAlive``)
+    and a per-user ``gui/<uid>`` domain can both leave it registered with no process, and re-bootstrapping
+    the loaded label just returns EIO. Kickstart the registered job before the attempt is counted lost.
+    """
     attempt = 0
     while True:
         attempt += 1
@@ -173,6 +193,9 @@ def _retry_launchctl_bootstrap_until_registered(
             if _gw()._launchctl_label_supervising_process(label):
                 return True
             outcome = f"exited 0 but {domain}/{label} has no supervised process (launchctl list)"
+            if _gw()._launchctl_kickstart_registered(domain, label):
+                return True
+            outcome += "; kickstart did not start it"
         except subprocess.CalledProcessError as exc:
             outcome = f"failed (rc={exc.returncode}) for {domain}/{label}"
         except subprocess.TimeoutExpired:

@@ -3940,6 +3940,7 @@ from hermes_cli.gateway_launchd import (
     _launchd_reload_budget,
     _launchctl_supervised_pid,
     _launchctl_label_supervising_process,
+    _launchctl_kickstart_registered,
     _retry_launchctl_bootstrap_until_registered,
     _launchd_unsupported_marker_path,
     _write_launchd_unsupported_marker,

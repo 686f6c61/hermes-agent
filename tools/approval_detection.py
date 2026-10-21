@@ -13,6 +13,15 @@ import tempfile
 import unicodedata
 
 from tools.approval_applescript_script import script_closes_without_saving
+from tools.approval_detection_payload import (
+    _HEREDOC_MARKER_RE,
+    _decode_shell_escapes,
+    _echo_payload,
+    _heredoc_body,
+    _heredoc_delimiter,
+    _printed_literals,
+    _strip_output_redirections,
+)
 
 logger = logging.getLogger("tools.approval")
 
@@ -1559,19 +1568,6 @@ def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
     return contains_gateway_lifecycle_command(command)
 
 
-# A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, a quoted
-# delimiter may hold spaces (`<<'END SCRIPT'`), and `<<-` (tabs stripped) is not the same body rule
-# as a plain `<<` (delimiter alone on the line).
-_HEREDOC_MARKER_RE = re.compile(
-    r"<<(?P<dash>-?)[ \t]*(?:(?P<quote>['\"])(?P<quoted>[^'\"]+)(?P=quote)"
-    r"|(?P<delimiter>[A-Za-z0-9_][A-Za-z0-9_.-]*))"
-)
-
-
-def _heredoc_delimiter(marker) -> str:
-    """The delimiter of a heredoc marker: the quoted word when quoted, else the bare one."""
-    return marker.group("quoted") or marker.group("delimiter")
-
 # A stage that copies stdin to stdout untouched; the payload behind the pipe is the stage before it.
 _STDIN_PASS_THROUGH = frozenset({"cat"})
 # Stages that only transform the stream they read: their argv is a pattern, not the program, so the
@@ -1579,67 +1575,11 @@ _STDIN_PASS_THROUGH = frozenset({"cat"})
 _PIPE_FILTER_STAGES = frozenset(
     {"grep", "egrep", "fgrep", "sed", "awk", "head", "tail", "sort", "tr", "cut", "uniq"}
 )
-# Producers that decode backslash escapes on their way to stdout: `printf 'a\nb'` hands osascript
-# two lines, not one line holding `\n` — and on that single line `\nclose` is not the word `close`.
-# `printf` decodes in every sh-family shell; `echo` only where the shell interprets them itself.
-_ESCAPE_DECODING_PRODUCERS = frozenset({"printf", "echo"})
-# The shells whose `echo` writes those escapes out as bytes rather than printing them: zsh
-# interprets them with no flag, while bash/sh/dash/ksh print the two characters. `terminal` spawns
-# the user's `$SHELL` (`tools/environments/local.py::_find_shell`), so that names the shell the
-# pipeline really reaches the binary from.
-_ECHO_LITERAL_SHELLS = frozenset({"bash", "sh", "dash", "ksh", "mksh"})
-_SHELL_ESCAPE_RE = re.compile(
-    r"\\(?:x(?P<hex>[0-9A-Fa-f]{1,2})|(?P<octal>[0-7]{1,3})|(?P<code>[nrt]))"
-)
-_SHELL_ESCAPE_CODES = {"n": "\n", "r": "\r", "t": "\t"}
-# `echo`'s own switches: `-e` forces the escape decoding, `-E` turns it off. They can be spelled
-# together (`-ne`, `-nE`) and they are not part of the text the binary reads.
-_ECHO_FLAG_RE = re.compile(r"^-[neE]+$")
-
-
-def _decode_shell_escapes(text: str) -> str:
-    """Spell out the escapes a decoding producer writes as bytes, `\\xHH` and `\\NNN` included."""
-    def replace(match) -> str:
-        if match.group("hex"):
-            return chr(int(match.group("hex"), 16))
-        if match.group("octal"):
-            return chr(int(match.group("octal"), 8))
-        return _SHELL_ESCAPE_CODES[match.group("code")]
-
-    return _SHELL_ESCAPE_RE.sub(replace, text)
-
-
-def _echo_decodes_escapes() -> bool:
-    """Whether this host's `echo` hands the escapes over as bytes (`zsh`) or prints them as text.
-
-    The detector runs in the process that spawns the command, so `$SHELL` is the shell the pipeline
-    will reach the binary from. An unset `$SHELL` keeps the decoding reading: it is the one that
-    catches the destructive program instead of printing it (reported on #141346).
-    """
-    return os.path.basename(os.environ.get("SHELL", "")).lower() not in _ECHO_LITERAL_SHELLS
-
-
-def _echo_payload(tokens) -> tuple:
-    """The text `echo` prints, and whether it decodes escapes, out of *tokens* (its own argv).
-
-    The shell decides the default — zsh decodes, bash/sh print — but `echo`'s own flags override
-    it in both directions: `-e` asks for the decoding anywhere, `-E` turns it off where the shell
-    would have decoded. A flag is not part of the text, so it leaves the payload. Reading only
-    `$SHELL` judged `SHELL=/bin/bash; echo -e '…\\nclose …'` as one literal line and the close
-    went unseen (reported on #141346).
-    """
-    decodes = _echo_decodes_escapes()
-    text: list[str] = []
-    for token in tokens:
-        if _ECHO_FLAG_RE.match(token):
-            for flag in token[1:]:
-                if flag == "e":
-                    decodes = True
-                elif flag == "E":
-                    decodes = False
-            continue
-        text.append(token)
-    return decodes, " ".join(text)
+# The filters that can also EMIT text of their own (`awk 'BEGIN{print "…"}'`), as opposed to the
+# ones that only match (`grep -v '…'`): for those the argv really is a program.
+_LITERAL_PRINT_STAGES = frozenset({"awk"})
+# A stage's leading `VAR=value` words set its environment; the program is what follows them.
+_SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
@@ -1738,6 +1678,11 @@ def _osascript_argv_sources(
     payloads: list[str] = []
     exec_payloads: list[str] = []
     language: str | None = None
+    # Output redirections are wiring, not operands: `osascript 2>&1` tokenizes as `2`, `>`, `&1`,
+    # so reading `2` as a script-file path made the piped program look unreachable and
+    # `printf '… to quit without saving' | osascript 2>&1` auto-approved (reported on #141346).
+    # Only the argv is cleaned, so `index` still points at the executable.
+    tokens = tokens[:index + 1] + _strip_output_redirections(tokens[index + 1:])
     carries_source, position = False, index + 1
     while position < len(tokens):
         token = tokens[position]
@@ -1838,28 +1783,6 @@ def _osascript_script_sources(command: str):
                 yield piped, language
 
 
-def _heredoc_body(command: str, marker_end: int, delimiter: str, strip_tabs: bool = False) -> str | None:
-    """Body of the heredoc whose delimiter starts after *marker_end*.
-
-    A plain `<<` body ends only on the delimiter alone on its line, so an indented ` EOF` is part
-    of the program; `<<-` strips leading tabs from each line before the comparison (and only tabs).
-    """
-    newline = command.find("\n", marker_end)
-    if newline < 0:
-        return None
-    body: list[str] = []
-    # Physical lines only: the shell ends a heredoc on an LF-terminated line, so a CR or a vertical
-    # tab inside a body line is data. `splitlines()` splits on those too, which turned
-    # `beep<CR>tell … to quit without saving` into a `beep` delimiter line and dropped the
-    # destructive statement that the shell keeps in the body (reported on #141346).
-    for line in command[newline + 1:].split("\n"):
-        candidate = line.lstrip("\t") if strip_tabs else line
-        if candidate == delimiter:
-            return "\n".join(body)
-        body.append(line)
-    return None
-
-
 def _enclosing_command_start(command: str, word_start: int) -> int:
     """Start of the command that owns the word at *word_start* (wrapper words included)."""
     start = 0
@@ -1902,11 +1825,27 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         tokens = _shell_segment_tokens(producer, 0)
         if not tokens:
             continue
+        # Leading `VAR=value` words are the stage's environment, not its program: reading
+        # `SHELL=/bin/dash` as the program name judged the literal word `echo` as the payload and
+        # left the escapes undecoded, so `SHELL=/bin/dash echo '…\nclose …'` read as inert
+        # (reported on #141346). A pinned SHELL names the shell whose `echo` builtin decides.
+        shell: str | None = None
+        while tokens and _SHELL_ASSIGNMENT_RE.match(tokens[0]):
+            variable, _, value = tokens[0].partition("=")
+            if variable.strip().upper() == "SHELL":
+                shell = value
+            tokens = tokens[1:]
+        if not tokens:
+            continue
         name = os.path.basename(_deobfuscate_shell_word_for_detection(tokens[0])).lower()
         if name in _PIPE_FILTER_STAGES:
             # A filter transforms the stream; its argv is the pattern, not the program. Reading it
             # as the program judged `grep -v 'quit without saving'` as the script, so a producer
             # that only activates the app was flagged on the filter's excluded text (#141346).
+            # `awk` is the filter that can ALSO emit its own text, whose literals are a program.
+            printed = _printed_literals(producer) if name in _LITERAL_PRINT_STAGES else None
+            if printed is not None:
+                return printed
             continue
         if name in _STDIN_PASS_THROUGH and len(tokens) == 1:
             # `printf … | cat | osascript`: `cat` copies stdin to stdout, so the payload behind the
@@ -1925,7 +1864,7 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
             # and with no flag the shell decides — zsh decodes, bash/sh print. Reading only
             # `$SHELL` missed `SHELL=/bin/bash; echo -e '…\nclose …'`, where the documented close
             # reaches the binary as two lines and was judged inert (reported on #141346).
-            decodes, payload = _echo_payload(tokens[1:])
+            decodes, payload = _echo_payload(tokens[1:], shell)
         if decodes:
             # The program arrives with the line breaks still spelled as escapes; decode them the
             # way the producer does before judging the script's lines. `printf` decodes them in

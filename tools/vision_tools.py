@@ -779,6 +779,7 @@ def _media_messages(user_prompt: str, part_type: str, data_url: str) -> list:
 
 # Aux-LLM error classification: first matching hint set wins (billing → capability → size/format).
 _BILLING_HINTS = ("402", "insufficient", "payment required", "credits", "billing")
+_TIMEOUT_HINTS = ("timed out", "timeout", "time out", "deadline exceeded")
 _IMAGE_ERROR_RULES = (
     (_BILLING_HINTS,
      "Insufficient credits or payment required. Please top up your "
@@ -792,6 +793,17 @@ _IMAGE_ERROR_RULES = (
      "image is in an unsupported format, corrupted, or still too "
      "large after auto-resize. Try a smaller JPEG/PNG and retry. "
      "Error: {e}"),
+    # Last, because a timeout is the one failure that is usually a routing answer and not a
+    # server answer: a local vision model behind LM Studio / Unsloth / vLLM lands on this aux
+    # call only when Hermes cannot prove the model reads images, and a reasoning model billed
+    # against the 120 s aux budget times out while the host's own chat answers in seconds.
+    (_TIMEOUT_HINTS,
+     "The vision request timed out before the model answered. On a locally hosted model "
+     "(LM Studio, Unsloth, vLLM, llama.cpp via its own server) this call only happens when "
+     "Hermes cannot prove the model reads images, so a slow high-reasoning model can exceed "
+     "the auxiliary vision timeout. If it can see images, declare it "
+     "(`model.supports_vision: true`) so the image goes into the main model instead "
+     "(docs: integrations/providers), or raise `auxiliary.vision.timeout`. Error: {e}"),
 )
 _VIDEO_ERROR_RULES = (
     (_BILLING_HINTS, _IMAGE_ERROR_RULES[0][1]),

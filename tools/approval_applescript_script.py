@@ -45,7 +45,9 @@ _JXA_NO_SAVE_OBJECT_RE = re.compile(
     r"\{[^{}]*[\"']?saving[\"']?\s*:\s*(?:[\"'](?:no|false)[\"']|false)[^{}]*\}",
     re.IGNORECASE,
 )
-_JXA_OBJECT_BINDING_RE = re.compile(r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(\{[^{}]*\})")
+_JXA_OBJECT_BINDING_RE = re.compile(
+    r"(?<![\w$.])(?:(?:var|let|const)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(\{[^{}]*\})"
+)
 # AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
 # `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
 _APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
@@ -154,21 +156,30 @@ def _jxa_closes_without_saving(source: str) -> bool:
     """Whether a JXA close/quit call carries a no-save options object.
 
     The object may be any argument (JXA's direct parameter comes first, the named-parameter object
-    second) or a local binding handed to the call (`var o = {saving: "no"}; …close(o)`).
+    second) or a local binding handed to the call (`var o = {saving: "no"}; …close(o)`). A name
+    bound more than once is read at its **latest assignment before the call**: the earlier literal
+    is dead by then, so `var o = {saving: "no"}; o = {saving: "yes"}; close(o)` keeps the document
+    (reported on #141346).
     """
-    bindings = {
-        match.group(1)
+    assignments = [
+        (match.start(), match.group(1), match.group(2))
         for match in _JXA_OBJECT_BINDING_RE.finditer(source)
-        if _JXA_NO_SAVE_OBJECT_RE.search(match.group(2))
-    }
+    ]
+    names = {name for _position, name, _literal in assignments}
     for match in _JXA_CALL_RE.finditer(source):
         arguments = _call_arguments(source, match.end())
         if arguments is None:
             continue
         if _JXA_NO_SAVE_OBJECT_RE.search(arguments):
             return True
-        for name in bindings:
-            if re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", arguments):
+        for name in names:
+            if not re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", arguments):
+                continue
+            effective = [
+                literal for position, bound, literal in assignments
+                if bound == name and position < match.start()
+            ]
+            if effective and _JXA_NO_SAVE_OBJECT_RE.search(effective[-1]):
                 return True
     return False
 

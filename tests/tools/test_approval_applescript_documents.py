@@ -157,8 +157,22 @@ class TestDetection:
         # A vertical tab is data the same way (`splitlines()` splits on it too).
         'cat <<EOF | osascript\n\x0bEOF\ntell application "Keynote" to quit without saving\nEOF\n',
     ])
-    def test_the_live_matrix_rows_require_approval(self, command):
+    def test_the_live_matrix_rows_require_approval(self, command, monkeypatch):
         """Six rows a verifier's executable matrix drove through the head of this branch."""
+        # The echo row is measured under the shell that decodes the escapes; the bash reading of
+        # the same command is pinned in `test_echo_follows_the_shell_that_will_run_the_pipeline`.
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    def test_the_ansi_c_hex_escape_reaches_the_verb(self):
+        """`osascript -e $'…\\x63lose …'`: ANSI-C quoting hands the binary the word `close`."""
+        command = (
+            'osascript -e $\'tell application "Keynote"\\n\\x63lose front document saving no\\n'
+            "end tell'"
+        )
         dangerous, key, desc = detect_dangerous_command(command)
         assert dangerous is True, command
         assert key == DESCRIPTION
@@ -175,8 +189,39 @@ class TestDetection:
         # JXA's `ask` prompts by itself; a heredoc whose CR line is not the delimiter still closes.
         'cat <<beep | osascript\nbeep\rquit\nbeep\n',
     ])
-    def test_the_matrix_controls_stay_inert(self, command):
+    def test_the_matrix_controls_stay_inert(self, command, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/zsh")
         assert detect_dangerous_command(command) == (False, None, None), command
+
+    @pytest.mark.parametrize("command", [
+        # Bound twice: the latest literal before the call is the effective options, so the
+        # document is kept and the earlier `saving: "no"` is dead code.
+        'osascript -l JavaScript -e \'var o = {saving: "no"}; o = {saving: "yes"}; '
+        'Application("Keynote").documents[0].close(o)\'',
+        # A filter's argv is its pattern, not the program: only `activate` reaches the binary.
+        'printf \'tell application "Keynote" to activate\\n\' | grep -v \'quit without saving\' '
+        '| osascript',
+        # `$"…"` is locale translation, not ANSI-C quoting: no sh-family shell decodes escapes
+        # inside it, so the binary reads one line holding `\\n`, which closes nothing.
+        'osascript -e $"tell application \\"Keynote\\"\\nclose front document saving no\\nend tell"',
+    ])
+    def test_the_acceptance_file_controls_stay_inert(self, command):
+        """Rows from the acceptance file a verifier drove through this head (#141346)."""
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_echo_follows_the_shell_that_will_run_the_pipeline(self, monkeypatch):
+        """`echo` hands the escapes over as bytes under zsh and prints them under bash.
+
+        The terminal tool spawns the pipeline in the user's `$SHELL`
+        (`tools/environments/local.py::_find_shell`), so the detector reads the same value: decoding
+        under bash flagged a producer that in fact passes one literal line (#141346).
+        """
+        command = ('echo \'tell application "Keynote"\\nclose front document saving no\\n'
+                   "end tell' | osascript")
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        assert detect_dangerous_command(command)[0] is True
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        assert detect_dangerous_command(command) == (False, None, None)
 
 
 class TestSmartModeAsksTheOperator:

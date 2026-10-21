@@ -1574,15 +1574,46 @@ def _heredoc_delimiter(marker) -> str:
 
 # A stage that copies stdin to stdout untouched; the payload behind the pipe is the stage before it.
 _STDIN_PASS_THROUGH = frozenset({"cat"})
+# Stages that only transform the stream they read: their argv is a pattern, not the program, so the
+# payload behind the pipe is still the stage before them (`printf '…' | grep -v x | osascript`).
+_PIPE_FILTER_STAGES = frozenset(
+    {"grep", "egrep", "fgrep", "sed", "awk", "head", "tail", "sort", "tr", "cut", "uniq"}
+)
 # Producers that decode backslash escapes on their way to stdout: `printf 'a\nb'` hands osascript
 # two lines, not one line holding `\n` — and on that single line `\nclose` is not the word `close`.
+# `printf` decodes in every sh-family shell; `echo` only where the shell interprets them itself.
 _ESCAPE_DECODING_PRODUCERS = frozenset({"printf", "echo"})
-_SHELL_ESCAPE_RE = re.compile(r"\\(?P<code>[nrt])")
+# The shells whose `echo` writes those escapes out as bytes rather than printing them: zsh
+# interprets them with no flag, while bash/sh/dash/ksh print the two characters. `terminal` spawns
+# the user's `$SHELL` (`tools/environments/local.py::_find_shell`), so that names the shell the
+# pipeline really reaches the binary from.
+_ECHO_LITERAL_SHELLS = frozenset({"bash", "sh", "dash", "ksh", "mksh"})
+_SHELL_ESCAPE_RE = re.compile(
+    r"\\(?:x(?P<hex>[0-9A-Fa-f]{1,2})|(?P<octal>[0-7]{1,3})|(?P<code>[nrt]))"
+)
+_SHELL_ESCAPE_CODES = {"n": "\n", "r": "\r", "t": "\t"}
 
 
 def _decode_shell_escapes(text: str) -> str:
-    """Spell out the `\\n`, `\\r`, `\\t` escapes a `printf` writes as real line breaks."""
-    return _SHELL_ESCAPE_RE.sub(lambda match: {"n": "\n", "r": "\r", "t": "\t"}[match.group("code")], text)
+    """Spell out the escapes a decoding producer writes as bytes, `\\xHH` and `\\NNN` included."""
+    def replace(match) -> str:
+        if match.group("hex"):
+            return chr(int(match.group("hex"), 16))
+        if match.group("octal"):
+            return chr(int(match.group("octal"), 8))
+        return _SHELL_ESCAPE_CODES[match.group("code")]
+
+    return _SHELL_ESCAPE_RE.sub(replace, text)
+
+
+def _echo_decodes_escapes() -> bool:
+    """Whether this host's `echo` hands the escapes over as bytes (`zsh`) or prints them as text.
+
+    The detector runs in the process that spawns the command, so `$SHELL` is the shell the pipeline
+    will reach the binary from. An unset `$SHELL` keeps the decoding reading: it is the one that
+    catches the destructive program instead of printing it (reported on #141346).
+    """
+    return os.path.basename(os.environ.get("SHELL", "")).lower() not in _ECHO_LITERAL_SHELLS
 
 
 def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
@@ -1652,22 +1683,26 @@ def _osascript_language(value: str) -> str | None:
     return None
 
 
-def _argv_script_payload(token: str) -> str:
+def _argv_script_payload(token: str, ansi_c: bool = True) -> str:
     """The script text the shell hands `osascript` for one argv word.
 
     `$'…'` is ANSI-C quoting: the shell decodes those escapes before the word becomes an argument,
     so `-e $'tell …\\nclose …'` passes two physical lines and not their spelling. Judging the
-    escapes left `\\nclose` with no word boundary before the verb (reported on #141346). The
-    tokenizer drops the quotes and keeps the `$`, which is the marker read here.
+    escapes left `\\nclose` with no word boundary before the verb (reported on #141346). `$"…"` is
+    locale translation, which decodes nothing in any sh-family shell — but the tokenizer drops the
+    quotes and keeps the `$`, so both spellings arrive as the same word and *ansi_c* (read off the
+    raw command) is what tells them apart.
     """
     if token.startswith("$'") or token.startswith('$"'):
         return _decode_shell_escapes(token[2:])
     if token.startswith("$") and "\\" in token and not token.startswith("${"):
-        return _decode_shell_escapes(token[1:])
+        return _decode_shell_escapes(token[1:]) if ansi_c else token[1:]
     return token
 
 
-def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], str | None, bool]:
+def _osascript_argv_sources(
+    tokens: list[str], index: int, ansi_c: bool = True
+) -> tuple[list[str], str | None, bool]:
     """Script payloads in an `osascript` argv, their language, and whether a source is unreadable.
 
     `index` is the executable's own position, so ``tokens[index + 1:]`` is its argv. A source
@@ -1701,7 +1736,7 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             if position + 1 < len(tokens):
                 # Repeated `-e` options build ONE program, a line each: `-e '… saving ¬' -e 'no'`
                 # is the continued statement, not two scripts that each read as incomplete.
-                exec_payloads.append(_argv_script_payload(tokens[position + 1]))
+                exec_payloads.append(_argv_script_payload(tokens[position + 1], ansi_c))
                 carries_source = True
             position += 2
             continue
@@ -1709,7 +1744,7 @@ def _osascript_argv_sources(tokens: list[str], index: int) -> tuple[list[str], s
             # The payload may ride on the switch with no space between them: `osascript -e'tell …'`
             # is accepted by the binary and executes the attached argument (measured on macOS), so
             # the text after the two characters is the script, not an unknown `-e…` switch.
-            exec_payloads.append(_argv_script_payload(token[2:]))
+            exec_payloads.append(_argv_script_payload(token[2:], ansi_c))
             carries_source = True
             position += 1
             continue
@@ -1750,7 +1785,9 @@ def _osascript_script_sources(command: str):
                      None)
         if index is None:
             continue
-        payloads, language, carries_source = _osascript_argv_sources(tokens, index)
+        payloads, language, carries_source = _osascript_argv_sources(
+            tokens, index, ansi_c="$'" in command
+        )
         marker = _HEREDOC_MARKER_RE.search(segment)
         if marker:
             marker_at = command.find(marker.group(0), start)
@@ -1840,6 +1877,11 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         if not tokens:
             continue
         name = os.path.basename(_deobfuscate_shell_word_for_detection(tokens[0])).lower()
+        if name in _PIPE_FILTER_STAGES:
+            # A filter transforms the stream; its argv is the pattern, not the program. Reading it
+            # as the program judged `grep -v 'quit without saving'` as the script, so a producer
+            # that only activates the app was flagged on the filter's excluded text (#141346).
+            continue
         if name in _STDIN_PASS_THROUGH and len(tokens) == 1:
             # `printf … | cat | osascript`: `cat` copies stdin to stdout, so the payload behind the
             # pipe is the stage before it, not `cat`'s empty argv.
@@ -1850,12 +1892,14 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         # reaches stdin as a single line; joining with newlines left `quit` and `without saving`
         # on separate lines and the operation never met its parameter.
         payload = " ".join(tokens[1:])
-        if name == "printf" or name == "echo":
+        if name == "printf" or (name == "echo" and _echo_decodes_escapes()):
             # The program arrives with the line breaks still spelled as escapes; decode them the
-            # way the producer does before judging the script's lines. `echo` decodes them with no
-            # flag under zsh (the login shell on macOS): `echo 'tell …\nclose …' | osascript`
-            # reaches the binary as two physical lines, and judging the escapes left `\nclose` with
-            # no word boundary before the verb (reported on #141346).
+            # way the producer does before judging the script's lines. `printf` decodes them in
+            # every sh-family shell; `echo` only where the shell interprets escapes itself (zsh
+            # does, bash and sh print them), so the reading follows `$SHELL` — the same shell the
+            # terminal tool spawns the pipeline in. Judging the escapes left `\nclose` with no
+            # word boundary before the verb (reported on #141346), and decoding them under bash
+            # flagged a producer that hands the binary one literal line (#141346).
             payload = _decode_shell_escapes(payload)
         if tokens[1].startswith("$'"):
             # ANSI-C quoting (`printf $'tell …\nclose …'`): the shell decodes the escapes itself.

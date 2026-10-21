@@ -13,7 +13,10 @@ it was made by another uid, or after :data:`RECHECK_AFTER_SECONDS` in any case. 
 escalated or shelled out to: the hint is for the user to run.
 
 POSIX only: without ``os.getuid`` (Windows) a PermissionError is usually a transient open
-handle, so the prune keeps retrying there exactly as before.
+handle, so the prune keeps retrying there exactly as before. Read-only Git objects are not
+that case: they are cleared and the removal retried in
+:func:`rmtree_collecting_permission_errors`, so what this record remembers is an *ownership*
+refusal (a path this user may not chmod), not a read-only attribute.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -44,6 +48,19 @@ def tracking_supported() -> bool:
 
 def is_permission_error(exc: BaseException) -> bool:
     return isinstance(exc, OSError) and exc.errno in _PERMISSION_ERRNOS
+
+
+def _make_writable(path: str) -> bool:
+    """Set the user write bit on *path* and report whether it took. Never raises: an owner
+    mismatch (a root-owned file) is precisely the blocker the caller goes on to record."""
+    try:
+        mode = os.lstat(path).st_mode
+        if mode & stat.S_IWUSR:
+            return False
+        os.chmod(path, mode | stat.S_IWUSR)
+    except OSError:
+        return False
+    return True
 
 
 def _fingerprint(entry: Path) -> list[int] | None:
@@ -140,15 +157,31 @@ def load_skips(root: Path, *, persist: bool = True) -> frozenset[str]:
 
 def rmtree_collecting_permission_errors(entry: Path) -> list[str]:
     """``rmtree`` that keeps going past errors (like ``ignore_errors=True``) and returns the
-    directories that refused access with EACCES/EPERM (empty: nothing was denied)."""
+    directories that refused access with EACCES/EPERM (empty: nothing was denied).
+
+    A read-only *object* is not a denied entry: Git writes loose objects and packfiles with
+    ``FILE_ATTRIBUTE_READONLY`` on Windows, where ``os.unlink`` refuses them with ``WinError 5``
+    (and ``os.rmdir`` refuses a read-only directory the same way). The write bit is cleared on
+    the path that refused and the exact operation is retried once, so the entry is removed
+    instead of being left behind and re-walked on every pass. A path this user may not chmod —
+    root-owned output of a container, the case the record below exists for — stays a blocker.
+    """
     blockers: list[str] = []
 
     def _onexc(func, path, exc):
-        if is_permission_error(exc):
-            # scandir/open of a dir fails on the dir itself; unlink/rmdir on its parent's perms.
-            blocker = path if func in (os.scandir, os.open, os.lstat) else os.path.dirname(path)
-            if blocker not in blockers:
-                blockers.append(blocker)
+        if not is_permission_error(exc):
+            return
+        if _make_writable(path):
+            try:
+                func(path)
+                return
+            except OSError as retry_exc:
+                if not is_permission_error(retry_exc):
+                    return
+        # scandir/open of a dir fails on the dir itself; unlink/rmdir on its parent's perms.
+        blocker = path if func in (os.scandir, os.open, os.lstat) else os.path.dirname(path)
+        if blocker not in blockers:
+            blockers.append(blocker)
 
     if sys.version_info >= (3, 12):
         shutil.rmtree(entry, onexc=_onexc)

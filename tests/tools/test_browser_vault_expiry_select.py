@@ -89,6 +89,12 @@ def test_single_digit_month_matches_padded_value(tmp_path):
     assert out["value"] == "7/2027"
 
 
+def test_padded_four_digit_option_matches_padded_value(tmp_path):
+    options = [{"value": "01/2027", "textContent": "01 / 2027"}]
+    out = _fill_expiry_select(tmp_path, options, current="", secret="01/27")
+    assert out["value"] == "01/2027"
+
+
 def test_two_digit_year_option_still_matches(tmp_path):
     options = [{"value": "10/27", "textContent": "10 / 27"}]
     out = _fill_expiry_select(tmp_path, options, current="")

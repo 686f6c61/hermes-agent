@@ -315,19 +315,21 @@ _FILL_JS_TEMPLATE = """(() => {
       if (el.tagName === "SELECT") {
         const want = norm(f.value);
         // A combined expiry <select> may spell the year with four digits ("10/2027", visible text
-        // "10 / 2027") while the value derived from exp_month/exp_year is MM/YY. Accept both year
-        // widths and compare the expiry forms without whitespace; every other token keeps exact
-        // matching, so country/state options are unaffected.
-        const monthYear = /^(\\d{1,2})\\/(\\d{2}|\\d{4})$/.exec(want.replace(/\\s+/g, ""));
-        const expiryForms = monthYear ? (() => {
-          const month = String(Number(monthYear[1]));
-          const year = monthYear[2].length === 2 ? "20" + monthYear[2] : monthYear[2];
-          return [month + "/" + year, month + "/" + year.slice(-2)];
-        })() : [];
+        // "10 / 2027") while the value derived from exp_month/exp_year is MM/YY. Both sides go through
+        // the same parser here, so "01/27", "1/27" and "01/2027" are one expiry; every other token
+        // keeps the exact matching below, so country/state options are unaffected.
+        const expiryKey = (t) => {
+          const digits = norm(t).replace(/\\s+/g, "");
+          const m = /^(\\d{1,2})\\/(\\d{2}|\\d{4})$/.exec(digits);
+          if (!m) return "";
+          const year = m[2].length === 2 ? "20" + m[2] : m[2];
+          return String(Number(m[1])) + "/" + year;
+        };
+        const wantExpiry = expiryKey(f.value);
         const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => {
           const candidate = norm(t);
           return candidate === want || candidate === want.replace(/^0/, "")
-            || expiryForms.includes(candidate.replace(/\\s+/g, ""));
+            || (wantExpiry !== "" && expiryKey(t) === wantExpiry);
         }));
         if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
         continue;

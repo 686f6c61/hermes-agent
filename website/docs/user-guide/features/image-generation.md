@@ -247,6 +247,20 @@ named endpoint's `api_key`/`key_env` → `OPENAI_API_KEY`; an explicit `base_url
 or `key_env` next to `provider` therefore overrides that part of the endpoint. A
 name that matches no `providers:` entry is logged as a warning and ignored.
 
+**Slow self-hosted servers.** The OpenAI client gives each image request 600 s
+unless told otherwise, and a self-hosted server that loads the model per request
+can take longer than that on the first image. Set `image_gen.openai.timeout` in
+seconds to widen it:
+
+```yaml
+image_gen:
+  openai:
+    timeout: 1200    # seconds; unset keeps the client's own default
+```
+
+A blank, non-numeric, or non-positive value is ignored with a debug line, so a
+typo cannot shorten the deadline.
+
 ## Usage
 
 The agent-facing schema is intentionally minimal — the model picks up whatever you've configured:

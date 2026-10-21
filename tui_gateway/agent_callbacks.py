@@ -109,9 +109,10 @@ def _agent_presentation_enabled(sid: str, *, diagnostic: bool) -> bool:
 
 def _agent_status_update(sid: str, kind: str, text: str | None = None) -> None:
     from gateway.warning_notifications import is_warning_status
-    if not _agent_presentation_enabled(sid, diagnostic=is_warning_status(kind, text if text is not None else kind)):
+    diagnostic = is_warning_status(kind, text if text is not None else kind)
+    if not _agent_presentation_enabled(sid, diagnostic=diagnostic):
         return
-    _status_update(sid, str(kind), None if text is None else str(text))
+    _status_update(sid, str(kind), None if text is None else str(text), diagnostic=diagnostic)
 
 
 def _agent_thinking_update(sid: str, text: str) -> None:

@@ -132,3 +132,43 @@ def test_is_compaction_progress_status_covers_routine_in_progress_lines():
         tokens=85_000, threshold=72_000, reason="ineffective"
     )
     assert is_compaction_progress_status(overflow) is False
+
+
+def _feasibility_notice() -> str:
+    """The auto-lowered feasibility notice (#142789), worded as the producer emits it."""
+    return (
+        "⚠ Compression model gemma-4-E2B-it-UD-Q4_K_XL.gguf (local) context is 112,640 tokens, but the main "
+        "model qwen3.8-27b's compression threshold was 222,822 tokens. Auto-lowered this session's threshold "
+        "to 112,640 tokens so compression can run."
+    )
+
+
+def test_diagnostic_feasibility_notice_is_not_retagged(server, monkeypatch):
+    from gateway.warning_notifications import DiagnosticText
+
+    events = _capture(server, monkeypatch)
+    notice = DiagnosticText(_feasibility_notice())
+    server._status_update("sid", "lifecycle", notice, diagnostic=True)
+
+    assert events == [{"kind": "lifecycle", "text": notice}]
+
+
+def test_agent_callback_keeps_diagnostic_lifecycle_kind(server, monkeypatch):
+    from gateway.warning_notifications import DiagnosticText
+
+    events = _capture(server, monkeypatch)
+    monkeypatch.setattr(server, "_agent_presentation_enabled", lambda sid, *, diagnostic: True)
+    notice = DiagnosticText(_feasibility_notice())
+    server._agent_status_update("sid", "lifecycle", notice)
+
+    assert events == [{"kind": "lifecycle", "text": notice}]
+
+
+def test_agent_callback_still_retags_real_compaction_progress(server, monkeypatch):
+    from agent.conversation_compression import COMPACTION_STATUS
+
+    events = _capture(server, monkeypatch)
+    monkeypatch.setattr(server, "_agent_presentation_enabled", lambda sid, *, diagnostic: True)
+    server._agent_status_update("sid", "lifecycle", COMPACTION_STATUS)
+
+    assert events == [{"kind": "compacting", "text": COMPACTION_STATUS}]

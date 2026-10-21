@@ -868,14 +868,14 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
         settle("resolved")
 
 
-def _status_update(sid: str, kind: str, text: str | None = None):
+def _status_update(sid: str, kind: str, text: str | None = None, *, diagnostic: bool = False):
     if not (body := (text if text is not None else kind).strip()):
         return
     out_kind = kind if text is not None else "status"
     # Auto-compaction arrives as a generic "lifecycle" status; re-tag so drivers can show a
-    # summarizing indicator — otherwise idle/preflight compaction looks like a hung turn.
-    # See #97239.
-    if out_kind == "lifecycle":
+    # summarizing indicator — otherwise idle/preflight compaction looks like a hung turn (#97239).
+    # A producer-classified diagnostic that merely says "compression" is not progress (#142789).
+    if out_kind == "lifecycle" and not diagnostic:
         from agent.conversation_compression import is_compaction_progress_status
         if is_compaction_progress_status(body):
             out_kind = "compacting"

@@ -154,6 +154,40 @@ def _keyless_tier_enabled() -> bool:
         return True
 
 
+def _norm_vendor(name: str) -> str:
+    """Normalize a bundled web plugin dir or a provider name to one vendor string.
+
+    Bundled web plugins live under ``web/<vendor>`` and their registered provider name differs from
+    the directory only by hyphen/underscore, so both sides go through this.
+    """
+    return name.strip().lower().replace("-", "_")
+
+
+def _configured_vendor(configured: Optional[str] = None, *, capability: Optional[str] = None) -> Optional[str]:
+    """Normalized vendor of the configured backend (``web.<capability>_backend`` → ``web.backend``)."""
+    if not configured and capability in ("search", "extract"):
+        configured = _configured_backend(capability)
+    return _norm_vendor(configured) if configured else None
+
+
+def _iter_web_plugins():
+    """Yield ``(plugin_key, loaded)`` for the bundled ``web/`` plugins.
+
+    Yields nothing when the plugin manager is unavailable: a diagnostics lookup must never turn a
+    missing provider into a raised exception.
+    """
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        items = list(get_plugin_manager()._plugins.items())
+    except Exception as exc:
+        logger.debug("web-plugin manager lookup failed: %s", exc)
+        return
+    for key, loaded in items:
+        if isinstance(key, str) and key.startswith("web/"):
+            yield key, loaded
+
+
 def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Optional[str] = None) -> Optional[str]:
     """Plugin key of a *disabled* bundled web plugin that would have provided
     the configured backend (``web.<capability>_backend`` → ``web.backend``), or None.
@@ -161,8 +195,7 @@ def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Op
     Lets the dispatcher say "re-enable web-firecrawl" instead of "No web extract
     provider configured". Resolved from config.yaml rather than the resolved
     backend because a disabled provider fails the availability gate and silently
-    drops to the default. Bundled web plugins live under ``web/<vendor>`` with
-    the provider name differing only by hyphen/underscore, so both are normalized.
+    drops to the default.
 
     When a user sets ``web.extract_backend: firecrawl`` (or the search equivalent) but also lists
     ``web-firecrawl`` in ``plugins.disabled``, the provider never registers and the dispatcher would
@@ -170,27 +203,39 @@ def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Op
     even though the backend IS configured correctly. This helper detects that case so the dispatcher can
     point the user at the actual cause (issue #40190 follow-up: pi314's disabled-plugin symptom).
     """
-    def _norm(s: str) -> str:
-        return s.strip().lower().replace("-", "_")
-
-    if not configured and capability in ("search", "extract"):
-        configured = _configured_backend(capability)
-    if not configured:
+    want = _configured_vendor(configured, capability=capability)
+    if not want:
         return None
+    for key, loaded in _iter_web_plugins():
+        if (
+            not loaded.enabled and loaded.error == "disabled via config"
+            and _norm_vendor(key.split("/", 1)[1]) == want
+        ):
+            return key
+    return None
 
-    want = _norm(configured)
-    try:
-        from hermes_cli.plugins import get_plugin_manager
 
-        pm = get_plugin_manager()
-        for key, loaded in pm._plugins.items():
-            if (
-                isinstance(key, str) and key.startswith("web/") and not loaded.enabled
-                and loaded.error == "disabled via config" and _norm(key.split("/", 1)[1]) == want
-            ):
-                return key
-    except Exception as exc:
-        logger.debug("disabled-web-plugin lookup failed: %s", exc)
+def _failed_web_plugin_for(
+    configured: Optional[str] = None, *, capability: Optional[str] = None
+) -> Optional[tuple[str, str]]:
+    """``(plugin_key, error)`` of a bundled web plugin whose *load failed* in this process, or None.
+
+    A failed load is a third state next to "enabled" and "disabled via config": the plugin is
+    discovered, its import or ``register()`` raised (or overran its deadline), its registrations were
+    swept and ``loaded.error`` holds the text, but ``plugins.disabled`` says nothing about it. The
+    provider is therefore absent from the registry for the life of the process — ``discover_and_load()``
+    returns early unless forced — while the config still names it correctly. Reporting that as "no
+    registered provider has that name. Run 'hermes tools' to change it" sends the user to reconfigure a
+    backend that is already right; the actionable line is "restart", and the load error says why.
+    """
+    want = _configured_vendor(configured, capability=capability)
+    if not want:
+        return None
+    for key, loaded in _iter_web_plugins():
+        if loaded.enabled or not loaded.error or loaded.error == "disabled via config":
+            continue
+        if _norm_vendor(key.split("/", 1)[1]) == want:
+            return key, loaded.error
     return None
 
 

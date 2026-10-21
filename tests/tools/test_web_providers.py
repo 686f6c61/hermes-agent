@@ -509,3 +509,85 @@ class TestDisabledPluginDiagnostic:
         finally:
             restore()
 
+
+class TestFailedPluginDiagnostic:
+    """#142577: a bundled web plugin whose *load failed* in this process is a third state next to
+    "enabled" and "disabled via config" — ``enabled`` False, the exception text in ``error``, nothing
+    in ``plugins.disabled``. The provider is therefore missing for the life of the process while the
+    config still names it, so the dispatcher has to name the restart instead of sending the user back
+    to `hermes tools` to fix a backend that is already right.
+    """
+
+    class _FakeLoaded:
+        def __init__(self, enabled, error):
+            self.enabled = enabled
+            self.error = error
+
+    def _patch_manager(self, monkeypatch, plugins_map):
+        import hermes_cli.plugins as plugins_mod
+
+        class _StubMgr:
+            _plugins = plugins_map
+
+        monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: _StubMgr())
+
+    def test_failed_web_plugin_for_returns_key_and_error(self, monkeypatch):
+        from agent.web_search_registry import _failed_web_plugin_for
+
+        self._patch_manager(monkeypatch, {
+            "web/firecrawl": self._FakeLoaded(False, "dictionary changed size during iteration"),
+            "web/ddgs": self._FakeLoaded(True, None),
+            "web/tavily": self._FakeLoaded(False, "disabled via config"),
+        })
+        assert _failed_web_plugin_for("firecrawl") == (
+            "web/firecrawl", "dictionary changed size during iteration"
+        )
+        # An enabled plugin, a disabled one and an unknown name are all "not a failed load".
+        assert _failed_web_plugin_for("ddgs") is None
+        assert _failed_web_plugin_for("tavily") is None
+        assert _failed_web_plugin_for("nope") is None
+
+    def _patch_config(self, monkeypatch, capability: str, backend: str):
+        """Point the config read at a stored selection for *capability* only."""
+        import agent.web_search_registry as wsr
+
+        wanted = ("web", f"{capability}_backend")
+        monkeypatch.setattr(
+            wsr, "_read_config_key", lambda *path: backend if path == wanted else None
+        )
+
+    def test_extract_error_names_the_failed_plugin_instead_of_the_tools_hint(self, monkeypatch):
+        from tools import web_tools_extract
+
+        self._patch_manager(monkeypatch, {
+            "web/firecrawl": self._FakeLoaded(False, "PluginLoadTimeout: 30.0s"),
+        })
+        self._patch_config(monkeypatch, "extract", "firecrawl")
+        # No registered provider for the configured backend, but a stored selection: the strict branch.
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_provider", lambda name: None, raising=True
+        )
+        monkeypatch.setattr(web_tools_extract, "selection_exists", lambda section: True)
+
+        provider, error = web_tools_extract._resolve_extract_provider("firecrawl")
+
+        assert provider is None
+        message = json.loads(error)["error"]
+        assert "web/firecrawl" in message
+        assert "PluginLoadTimeout: 30.0s" in message
+        assert "restart Hermes" in message
+        assert "Run 'hermes tools' to change it" not in message
+
+    def test_no_provider_error_covers_search_and_leaves_the_fallback_alone(self, monkeypatch):
+        from tools import web_tools_extract
+
+        fallback = "No web search provider configured. Run `hermes tools` to set one up."
+        self._patch_config(monkeypatch, "search", "brave-free")
+        self._patch_manager(monkeypatch, {
+            "web/brave-free": self._FakeLoaded(False, "ImportError: no module named brave"),
+        })
+        assert "web/brave-free" in web_tools_extract._no_provider_error("search", fallback)
+
+        self._patch_manager(monkeypatch, {"web/brave-free": self._FakeLoaded(True, None)})
+        assert web_tools_extract._no_provider_error("search", fallback) == fallback
+

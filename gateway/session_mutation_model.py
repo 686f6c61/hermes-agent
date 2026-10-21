@@ -79,13 +79,15 @@ async def prepare_model(authority, live, payload, prepared):
         # An inline key (or an alias key's pointer) authenticates the route it was picked on: once the
         # followed route moved, the same-route cleanup below would keep it for the new endpoint.
         held = bound_route_holds(frozen.get('model'), frozen, followed, config)
-        # Every other route-bound key follows the profile's current route.
+        # Every other route-bound key follows the profile's current route. Named apart from
+        # ``moved`` below: the rename map for displaced provider entries must stay the dict the
+        # secret-path rewrite reads, and a following session still runs that rewrite (#142488).
         kept = ('api_key', 'api', 'api_key_from') if held else ()
-        moved = tuple(k for k in ROUTE_BOUND_KEYS if k not in kept)
-        frozen['model'] = {k: v for k, v in (frozen.get('model') or {}).items() if k not in moved}
+        dropped = tuple(k for k in ROUTE_BOUND_KEYS if k not in kept)
+        frozen['model'] = {k: v for k, v in (frozen.get('model') or {}).items() if k not in dropped}
         # The profile's inline key and its private-secret pointer are not copied into the receipt:
         # its secrets stay at the profile's own path, never re-committed under this session.
-        frozen['model'].update({k: followed[k] for k in moved
+        frozen['model'].update({k: followed[k] for k in dropped
                                 if k in followed and k not in ('api_key', 'api', 'api_key_from')})
     # The one selection shape config.yaml gets (#25106): api_mode follows the target, a context pin
     # and the endpoint-bound credential fields (inline key, key_env/api_key_env) drop on a route change.

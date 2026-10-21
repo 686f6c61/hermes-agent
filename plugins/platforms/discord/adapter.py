@@ -1909,14 +1909,9 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         await self._emit_platform_event("thread_renamed", _build)
 
     async def _cancel_bot_task(self) -> None:
-        """Cancel and await the background client.start() task, if running."""
-        if self._bot_task and not self._bot_task.done():
-            self._bot_task.cancel()
-            try:
-                await self._bot_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._bot_task = None
+        """Cancel and await the background client.start() task, if running (bounded wait)."""
+        from .bot_task import cancel_client_task
+        await cancel_client_task(self)
 
     def _start_liveness_probe(self) -> None:
         """Start the periodic Gateway WS health probe (REST success doesn't prove event delivery)."""

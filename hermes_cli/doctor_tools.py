@@ -415,7 +415,7 @@ def _plural(n: int) -> str:
 
 
 def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual_issues: list[str]) -> None:
-    """Run one `npm audit --json` and report; any failure is silently skipped.
+    """Run one `npm audit --json` and report; a run that did not complete is reported as such.
 
     Every row here audits a tree whose versions come from a COMMITTED lockfile
     (`npm ci` in `_run_npm_install_deterministic` reifies exactly that state on
@@ -424,38 +424,58 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual
     the finding reappears. The durable remedy in every case is a lockfile bump
     on main (update `package-lock.json` and ship it); the doctor therefore never
     prescribes a local mutating fix command. See #116774.
+
+    `npm audit` exits 0 for a clean tree and 1 for a tree with findings, so a
+    parseable payload under either code is a completed audit. A timeout, any
+    other exit code (registry error, arborist crash) or an unparseable payload
+    leaves the findings UNKNOWN — reporting that as "(no known vulnerabilities)"
+    told users a vulnerable tree was clean (#142635).
     """
     import json
     from hermes_constants import with_hermes_node_path
+    incomplete = f"{label} npm audit did not complete; findings are unknown — re-run `hermes doctor`"
     try:
         # Resolved absolute path so Windows can execute npm.cmd (CreateProcessW can't run bare .cmd names).
         audit_result = subprocess.run([npm_bin, "audit", "--json", *audit_extra], cwd=str(npm_dir),
                                       capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
                                       env=with_hermes_node_path(), check=False)
-        audit_data = json.loads(audit_result.stdout) if audit_result.stdout.strip() else {}
-        counts = audit_data.get("metadata", {}).get("vulnerabilities", {})
-        critical, high, moderate = (counts.get(k, 0) for k in ("critical", "high", "moderate"))
-        total = critical + high + moderate
-        workspace_scoped = bool(audit_extra) and audit_extra[0] == "--workspace"
-        if total == 0:
-            check_ok(f"{label} deps", "(no known vulnerabilities)")
-        elif critical > 0 or high > 0:
-            remedy = ("fix is an upstream lockfile bump — a local manual fix does not persist"
-                      " (the next `hermes update` reinstalls from the committed lockfile)")
-            check_warn(f"{label} deps", f"({critical} critical, {high} high, {moderate} moderate — {remedy})")
-            if workspace_scoped:
-                check_info("  ^ workspace audit includes runtime and build dependencies; if manual npm remediation "
-                           "errors with an arborist crash it's a known npm bug — clears via a lockfile bump")
-            else:
-                check_info("  ^ runtime dependency tree; report/pin the fix in package-lock.json — see #116774")
-            manual_issues.append(
-                f"{label} has {total} npm {_plural(total)}; wait for an upstream lockfile fix, then update "
-                "your installation (Docker: pull a rebuilt image; recreating the same image restores the same dependencies)"
-            )
+    except subprocess.TimeoutExpired:
+        check_warn(f"{label} deps", "(audit timed out — findings unknown)")
+        manual_issues.append(incomplete)
+        return
+    except (OSError, ValueError):
+        # npm missing or not executable in this tree: nothing to audit, as before.
+        return
+    counts = None
+    if audit_result.returncode in (0, 1) and audit_result.stdout.strip():
+        try:
+            counts = json.loads(audit_result.stdout).get("metadata", {}).get("vulnerabilities")
+        except (json.JSONDecodeError, AttributeError):
+            counts = None
+    if not isinstance(counts, dict):
+        check_warn(f"{label} deps", "(audit did not complete — findings unknown)")
+        manual_issues.append(incomplete)
+        return
+    critical, high, moderate = (counts.get(k, 0) for k in ("critical", "high", "moderate"))
+    total = critical + high + moderate
+    workspace_scoped = bool(audit_extra) and audit_extra[0] == "--workspace"
+    if total == 0:
+        check_ok(f"{label} deps", "(no known vulnerabilities)")
+    elif critical > 0 or high > 0:
+        remedy = ("fix is an upstream lockfile bump — a local manual fix does not persist"
+                  " (the next `hermes update` reinstalls from the committed lockfile)")
+        check_warn(f"{label} deps", f"({critical} critical, {high} high, {moderate} moderate — {remedy})")
+        if workspace_scoped:
+            check_info("  ^ workspace audit includes runtime and build dependencies; if manual npm remediation "
+                       "errors with an arborist crash it's a known npm bug — clears via a lockfile bump")
         else:
-            check_ok(f"{label} deps", f"({moderate} moderate {_plural(moderate)})")
-    except Exception:
-        pass
+            check_info("  ^ runtime dependency tree; report/pin the fix in package-lock.json — see #116774")
+        manual_issues.append(
+            f"{label} has {total} npm {_plural(total)}; wait for an upstream lockfile fix, then update "
+            "your installation (Docker: pull a rebuilt image; recreating the same image restores the same dependencies)"
+        )
+    else:
+        check_ok(f"{label} deps", f"({moderate} moderate {_plural(moderate)})")
 
 
 @doctor_check()

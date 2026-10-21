@@ -1820,6 +1820,11 @@ export type { HermesGateway } from '@/hermes'
 /** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
  *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
 export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'
+/** A UI-only clock that ticks while the document is actually being viewed, and
+ *  fires a leading tick when it comes back. Use it wherever a rendered label is
+ *  derived from `Date.now()`: the value passing time is not a prop, so a row
+ *  whose output is cached against its inputs alone can hold "now" for hours. */
+export { useViewedInterval } from '@/hooks/use-viewed-interval'
 /** Localized copy. `useI18n` reuses the app's strings; `usePluginI18n(id)` +
  *  `ctx.i18n.register` let a plugin ship its OWN locale bundles, scoped like
  *  `ctx.storage` and resolved against the app's active locale — no core edit.

@@ -17,7 +17,7 @@
 
 import type * as HermesSdk from '@hermes/plugin-sdk'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BotRow } from './bot-row'
 import { $groupChats } from './group-chat'
@@ -228,5 +228,69 @@ describe('age label reflects the last worker run, not only the last conversation
     } as RosterRow)
 
     expect(screen.getByText('3d')).toBeTruthy()
+  })
+})
+
+/**
+ * The age label is `Date.now()` minus an activity timestamp, so a roster that
+ * is merely sitting there hands the row the same inputs every poll and the
+ * label it cached never moves — the bot reads "now" for hours (#142521). These
+ * cases hold the timestamp and the labels fixed and only let time pass.
+ */
+describe('age label clock', () => {
+  const nowSec = () => Date.now() / 1000
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-21T12:00:00Z'))
+    // hasFocus() is unreliable across runners, so pin it (same as the status timer tests).
+    vi.spyOn(globalThis.document, 'hasFocus').mockReturnValue(true)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('advances an idle row past the minute boundary', () => {
+    renderRow({ name: 'idle', last_session: { last_active: nowSec() } } as RosterRow)
+
+    expect(screen.getByText('now')).toBeTruthy()
+
+    act(() => vi.advanceTimersByTime(61_000))
+
+    expect(screen.queryByText('now')).toBeNull()
+    expect(screen.getByText('1m')).toBeTruthy()
+  })
+
+  it('crosses the hour boundary without new activity', () => {
+    renderRow({ name: 'quiet', last_session: { last_active: nowSec() } } as RosterRow)
+
+    act(() => vi.advanceTimersByTime(59 * 60_000))
+    expect(screen.getByText('59m')).toBeTruthy()
+
+    act(() => vi.advanceTimersByTime(60_000))
+    expect(screen.getByText('1h')).toBeTruthy()
+  })
+
+  it('catches the label up on the first tick after the app comes back', () => {
+    renderRow({ name: 'backgrounded', last_session: { last_active: nowSec() } } as RosterRow)
+
+    expect(screen.getByText('now')).toBeTruthy()
+
+    // A blurred window stops the clock here instead of waking React behind it.
+    act(() => {
+      vi.mocked(globalThis.document.hasFocus).mockReturnValue(false)
+      window.dispatchEvent(new Event('blur'))
+    })
+    act(() => vi.advanceTimersByTime(2 * 3600_000))
+    expect(screen.getByText('now')).toBeTruthy()
+
+    act(() => {
+      vi.mocked(globalThis.document.hasFocus).mockReturnValue(true)
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    expect(screen.getByText('2h')).toBeTruthy()
   })
 })

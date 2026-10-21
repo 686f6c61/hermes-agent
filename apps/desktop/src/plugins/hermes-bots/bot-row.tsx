@@ -28,8 +28,10 @@ import {
   SidebarRowLead,
   Tip,
   useI18n,
-  useValue
+  useValue,
+  useViewedInterval
 } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { isBackfilledFacePng } from './avatar-image'
@@ -96,11 +98,34 @@ import {
  *  Deliberately the same `coarseElapsed` + suffix pair the session rows
  *  directly above use, so the two lists in one rail don't disagree about how
  *  an age is spelled. Not `relativeTime` — that's the bidirectional Intl form
- *  ("in 14 hr"), which belongs on a scheduled next-run. */
-function rowAge(ms: number, r: SidebarRowLabels): string {
-  const { unit, value } = coarseElapsed(Date.now() - ms)
+ *  ("in 14 hr"), which belongs on a scheduled next-run. `now` is a parameter
+ *  rather than a `Date.now()` read so the caller owns the clock: the row reads
+ *  a value that actually changes (see `AgeLabel`). */
+function rowAge(ms: number, r: SidebarRowLabels, now: number): string {
+  const { unit, value } = coarseElapsed(now - ms)
 
   return unit === 'second' ? r.ageNow : `${value}${unit === 'day' ? r.ageDay : unit === 'hour' ? r.ageHour : r.ageMin}`
+}
+
+/** Tick under the coarsest boundary the label can show: a row that just went
+ *  quiet has to reach "1m" within a tick of the minute, and nothing above the
+ *  minute changes faster than that. */
+const AGE_TICK_MS = 15_000
+
+/** The age label, clock included.
+ *
+ *  The row's age is `Date.now()` minus an activity timestamp, so nothing that
+ *  makes up the row changes as time passes — polling the same roster and
+ *  re-rendering the pane hand back the same inputs, and the compiled row keeps
+ *  the label it cached, which is how a bot can read "now" for hours. Holding
+ *  the clock in this leaf is what re-renders the label: the row itself still
+ *  renders once, and only this text moves. */
+function AgeLabel({ labels, ts }: { labels: SidebarRowLabels; ts: number }) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useViewedInterval(() => setNow(Date.now()), AGE_TICK_MS)
+
+  return <>{rowAge(ts, labels, now)}</>
 }
 
 interface BotRowProps {
@@ -307,7 +332,7 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
           ) : null}
           {rowAgeTs ? (
             <span className="shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)">
-              {rowAge(rowAgeTs * 1000, t.sidebar.row)}
+              <AgeLabel labels={t.sidebar.row} ts={rowAgeTs * 1000} />
             </span>
           ) : null}
         </div>
@@ -610,7 +635,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
           ) : null}
           {lastAt ? (
             <span className="shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)">
-              {rowAge(lastAt, t.sidebar.row)}
+              <AgeLabel labels={t.sidebar.row} ts={lastAt} />
             </span>
           ) : null}
         </div>

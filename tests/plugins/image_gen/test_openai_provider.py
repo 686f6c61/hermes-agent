@@ -191,6 +191,42 @@ class TestEndpointConfig:
         http_client.close()
 
 
+# ── Request timeout ─────────────────────────────────────────────────────────
+
+
+class TestRequestTimeout:
+    """``image_gen.openai.timeout`` reaches ``openai.OpenAI``; unset keeps the SDK's own default
+    (#142699: a self-hosted server that loads a model per request runs past the 600 s cutoff)."""
+
+    def _client_kwargs(self, provider, tmp_path, *, write_config: dict | None = None) -> dict:
+        import hermes_yaml as yaml
+        if write_config is not None:
+            (tmp_path / "config.yaml").write_text(yaml.safe_dump(write_config))
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        with _patched_openai(fake_client):
+            assert provider.generate("a cat")["success"] is True
+            kwargs = __import__("sys").modules["openai"].OpenAI.call_args.kwargs
+        if kwargs.get("http_client") is not None:
+            kwargs["http_client"].close()
+        return kwargs
+
+    def test_configured_timeout_reaches_the_client(self, provider, tmp_path):
+        kwargs = self._client_kwargs(
+            provider, tmp_path, write_config={"image_gen": {"openai": {"timeout": 1200}}})
+        assert kwargs["timeout"] == 1200.0
+
+    def test_unset_timeout_keeps_the_sdk_default(self, provider, tmp_path):
+        kwargs = self._client_kwargs(provider, tmp_path)
+        assert "timeout" not in kwargs
+
+    @pytest.mark.parametrize("value", ["soon", 0, -1, True])
+    def test_unusable_timeout_falls_back_to_the_sdk_default(self, provider, tmp_path, value):
+        kwargs = self._client_kwargs(
+            provider, tmp_path, write_config={"image_gen": {"openai": {"timeout": value}}})
+        assert "timeout" not in kwargs
+
+
 # ── Generate ────────────────────────────────────────────────────────────────
 
 

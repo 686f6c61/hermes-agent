@@ -3,7 +3,8 @@ base64 output → image cache. Selection: ``OPENAI_IMAGE_MODEL`` → ``image_gen
 ``image_gen.model`` → :data:`DEFAULT_MODEL`; an id outside the catalog is sent verbatim.
 Endpoint: ``image_gen.openai.base_url`` → the named endpoint ``image_gen.openai.provider`` →
 ``OPENAI_BASE_URL`` → SDK default; key: env named by ``image_gen.openai.key_env`` → the named
-endpoint's credential → ``OPENAI_API_KEY``."""
+endpoint's credential → ``OPENAI_API_KEY``. Timeout: ``image_gen.openai.timeout`` in seconds;
+unset keeps the client's own default."""
 
 from __future__ import annotations
 
@@ -76,7 +77,28 @@ def _resolve_endpoint() -> tuple[str, str]:
     return base_url, api_key
 
 
-def _build_client(openai: Any, base_url: str, api_key: str) -> Any:
+def _request_timeout() -> Optional[float]:
+    """``image_gen.openai.timeout`` in seconds, or ``None`` to keep the SDK's own default.
+
+    The client's default cutoff is 600 s. A self-hosted OpenAI-compatible server on a modest or
+    on-demand GPU can take longer than that on the first image (cold model load), and the request
+    dies client-side while the server finishes it (#142699). Anything that is not a positive
+    number is ignored — a typo must not shorten the deadline to zero."""
+    raw = load_image_gen_config("openai").get("timeout")
+    if isinstance(raw, bool) or raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.debug("image_gen.openai.timeout %r is not a number; keeping the SDK default", raw)
+        return None
+    if value <= 0:
+        logger.debug("image_gen.openai.timeout %r is not positive; keeping the SDK default", raw)
+        return None
+    return value
+
+
+def _build_client(openai: Any, base_url: str, api_key: str, timeout: Optional[float] = None) -> Any:
     """``openai.OpenAI`` on Hermes' env-only-proxy httpx client, so a local/custom endpoint never
     routes through a macOS system proxy whose ExceptionsList httpx cannot see (#64888). The project
     header is blanked: an ``OPENAI_PROJECT_ID`` set for chat makes ``/images/generations`` 403 on
@@ -86,6 +108,8 @@ def _build_client(openai: Any, base_url: str, api_key: str) -> Any:
     kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"OpenAI-Project": ""}}
     if base_url:
         kwargs["base_url"] = base_url
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     http_client = build_keepalive_http_client(base_url)
     if http_client is not None:
         kwargs["http_client"] = http_client
@@ -173,7 +197,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         sources = collect_source_images(image_url, reference_image_urls, limit=16)
         is_edit = bool(sources)
         fail = error_factory("openai", aspect, model=tier_id, prompt=prompt)
-        client = _build_client(openai, base_url, api_key)
+        client = _build_client(openai, base_url, api_key, _request_timeout())
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.

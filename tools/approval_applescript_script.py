@@ -172,8 +172,12 @@ def _jxa_closes_without_saving(source: str) -> bool:
             continue
         if _JXA_NO_SAVE_OBJECT_RE.search(arguments):
             return True
+        identifiers = _SCRIPT_STRING_LITERAL_RE.sub('""', _SCRIPT_SINGLE_QUOTED_LITERAL_RE.sub("''", arguments))
         for name in names:
-            if not re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", arguments):
+            # The reference has to be an IDENTIFIER: `close("o")` passes the one-character string
+            # `o`, not the binding named `o`, so the literal is blanked before the name is looked
+            # for (reported on #141346). The inline object was already read above.
+            if not re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", identifiers):
                 continue
             effective = [
                 literal for position, bound, literal in assignments

@@ -1592,6 +1592,9 @@ _SHELL_ESCAPE_RE = re.compile(
     r"\\(?:x(?P<hex>[0-9A-Fa-f]{1,2})|(?P<octal>[0-7]{1,3})|(?P<code>[nrt]))"
 )
 _SHELL_ESCAPE_CODES = {"n": "\n", "r": "\r", "t": "\t"}
+# `echo`'s own switches: `-e` forces the escape decoding, `-E` turns it off. They can be spelled
+# together (`-ne`, `-nE`) and they are not part of the text the binary reads.
+_ECHO_FLAG_RE = re.compile(r"^-[neE]+$")
 
 
 def _decode_shell_escapes(text: str) -> str:
@@ -1614,6 +1617,29 @@ def _echo_decodes_escapes() -> bool:
     catches the destructive program instead of printing it (reported on #141346).
     """
     return os.path.basename(os.environ.get("SHELL", "")).lower() not in _ECHO_LITERAL_SHELLS
+
+
+def _echo_payload(tokens) -> tuple:
+    """The text `echo` prints, and whether it decodes escapes, out of *tokens* (its own argv).
+
+    The shell decides the default — zsh decodes, bash/sh print — but `echo`'s own flags override
+    it in both directions: `-e` asks for the decoding anywhere, `-E` turns it off where the shell
+    would have decoded. A flag is not part of the text, so it leaves the payload. Reading only
+    `$SHELL` judged `SHELL=/bin/bash; echo -e '…\\nclose …'` as one literal line and the close
+    went unseen (reported on #141346).
+    """
+    decodes = _echo_decodes_escapes()
+    text: list[str] = []
+    for token in tokens:
+        if _ECHO_FLAG_RE.match(token):
+            for flag in token[1:]:
+                if flag == "e":
+                    decodes = True
+                elif flag == "E":
+                    decodes = False
+            continue
+        text.append(token)
+    return decodes, " ".join(text)
 
 
 def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str | None:
@@ -1892,12 +1918,19 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         # reaches stdin as a single line; joining with newlines left `quit` and `without saving`
         # on separate lines and the operation never met its parameter.
         payload = " ".join(tokens[1:])
-        if name == "printf" or (name == "echo" and _echo_decodes_escapes()):
+        decodes = name == "printf"
+        if name == "echo":
+            # `echo`'s escape handling is a property of its own flags AND of the shell: `-e` asks
+            # for the decoding in every shell, `-E` turns it off where it is on by default (bash),
+            # and with no flag the shell decides — zsh decodes, bash/sh print. Reading only
+            # `$SHELL` missed `SHELL=/bin/bash; echo -e '…\nclose …'`, where the documented close
+            # reaches the binary as two lines and was judged inert (reported on #141346).
+            decodes, payload = _echo_payload(tokens[1:])
+        if decodes:
             # The program arrives with the line breaks still spelled as escapes; decode them the
             # way the producer does before judging the script's lines. `printf` decodes them in
-            # every sh-family shell; `echo` only where the shell interprets escapes itself (zsh
-            # does, bash and sh print them), so the reading follows `$SHELL` — the same shell the
-            # terminal tool spawns the pipeline in. Judging the escapes left `\nclose` with no
+            # every sh-family shell; `echo` follows its flags and then `$SHELL` — the same shell
+            # the terminal tool spawns the pipeline in. Judging the escapes left `\nclose` with no
             # word boundary before the verb (reported on #141346), and decoding them under bash
             # flagged a producer that hands the binary one literal line (#141346).
             payload = _decode_shell_escapes(payload)
@@ -1915,15 +1948,17 @@ def detect_dangerous_command(command: str) -> tuple:
     if _is_verification_artifact_cleanup(command):
         return (False, None, None)
     variants = list(_command_detection_variants(command))
-    if command not in variants:
-        # The raw line is a projection too, and it is the only one that still holds the escapes a
-        # printf-style producer decodes (`printf 'a\nb' | osascript`): the de-obfuscated variants
-        # drop the backslash, `"Keynote"\nclose` becomes `"Keynote"nclose`, and the word boundary
-        # the close verb needs is gone before the script is ever judged.
-        variants.insert(0, command)
+    # The raw line is a projection too, and it is the only one that still holds the escapes a
+    # printf-style producer decodes (`printf 'a\nb' | osascript`): the de-obfuscated variants drop
+    # the backslash, `"Keynote"\nclose` becomes `"Keynote"nclose`, and the word boundary the close
+    # verb needs is gone before the script is ever judged. It is fed to the AppleScript reader
+    # ONLY: the flat patterns judge prose too, and the raw line carries the quoted text the
+    # de-obfuscated variants drop, so `git commit -m "notes\ndd if=/dev/zero of=/dev/sda"` came
+    # back as `disk copy` from inside the message body (reported on #141346).
+    script_variants = variants if command in variants else [command, *variants]
     # Identity-based checks run over every projection BEFORE the flat patterns, so a carrier's
     # generic description (`sh -c`, `env -S`) cannot shadow the specific, manual-only reason.
-    for command_variant in variants:
+    for command_variant in script_variants:
         if not command_variant:
             continue
         description = _applescript_unsaved_close_description(command_variant)

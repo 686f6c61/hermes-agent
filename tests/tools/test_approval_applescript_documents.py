@@ -306,3 +306,72 @@ class TestCarriersTheReportLeft:
     ])
     def test_the_same_carrier_reading_is_inert(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command
+
+
+class TestTheVerifiersSecondRound:
+    """Three diagnostics a verifier drove through head `2b8520e9f0` (#141346)."""
+
+    def test_echo_dash_e_decodes_under_a_bash_shell(self, monkeypatch):
+        """`echo -e` asks for the decoding wherever the shell defaults to printing.
+
+        The shell decides the default (zsh decodes, bash prints), but `-e` overrides it in both
+        directions, so `SHELL=/bin/bash; echo -e '…\\nclose …'` hands the binary two lines and the
+        close is real. Reading only `$SHELL` judged it inert (#141346).
+        """
+        command = ('echo -e \'tell application "Keynote"\\\\nclose front document saving no\\\\n'
+                   "end tell' | osascript")
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    @pytest.mark.parametrize("command", [
+        # `-E` turns the decoding off under the shell that would have done it, so the same payload
+        # reaches the binary as one literal line holding `\\n` — a `-e`-style flag pair, read both
+        # ways.
+        'echo -E \'tell application "Keynote"\\\\nclose front document saving no\\\\n'
+        "end tell' | osascript",
+        # The flag can ride with another one (`-n`, no trailing newline).
+        'echo -nE \'tell application "Keynote"\\\\nclose front document saving no\\\\n'
+        "end tell' | osascript",
+    ])
+    def test_echo_dash_capital_e_prints_them_literally(self, command, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_the_raw_projection_stays_out_of_the_flat_patterns(self):
+        """A commit message that merely mentions a destructive command is prose, not a command.
+
+        The raw line is fed to the AppleScript reader because it is the only projection that keeps
+        the escapes a `printf`-style producer decodes; the flat patterns judge the de-obfuscated
+        variants, and reading the raw line there matched `disk copy` inside the message body
+        (#141346).
+        """
+        command = 'git commit -m "notes\ndd if=/dev/zero of=/dev/sda explained"'
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_the_flat_patterns_still_read_the_command_itself(self):
+        """The control for the row above: the same text as an actual command is still caught."""
+        dangerous, key, _desc = detect_dangerous_command("dd if=/dev/zero of=/dev/sda")
+        assert dangerous is True
+        assert key == "disk copy"
+
+    def test_a_name_inside_a_string_literal_is_not_the_binding(self):
+        """`close("o")` passes the one-character string `o`, not a bound options object.
+
+        Resolving the identifier out of the quote read a binding the call never uses, so a close
+        that keeps the document came back manual-only (#141346).
+        """
+        command = ('osascript -l JavaScript -e \'var o = {saving: "no"}; '
+                   'Application("Keynote").documents[0].close("o")\'')
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_the_same_name_passed_bare_is_the_binding(self):
+        """The control: the identifier outside the quotes is the object it was bound to."""
+        command = ('osascript -l JavaScript -e \'var o = {saving: "no"}; '
+                   'Application("Keynote").documents[0].close(o)\'')
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION

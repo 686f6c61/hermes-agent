@@ -62,10 +62,12 @@ def _decode_shell_escapes(text: str) -> str:
 def _echo_decodes_escapes(shell: str | None = None) -> bool:
     """Whether this host's `echo` hands the escapes over as bytes (`zsh`) or prints them as text.
 
-    The detector runs in the process that spawns the command, so `$SHELL` is the shell the pipeline
-    will reach the binary from — unless the command itself pins it (`SHELL=/bin/dash echo …`), which
-    *shell* names. An unset `$SHELL` keeps the decoding reading: it is the one that catches the
-    destructive program instead of printing it (reported on #141346).
+    The shell that decides is the one that PARSES the pipeline, and that is the one the terminal
+    spawns — `$SHELL` in this process — never a `SHELL=…` word in the command: an inline assignment
+    is the child's environment, so `SHELL=/bin/bash echo '…\\n…'` under zsh still reaches a zsh
+    builtin and decodes, and the same word under bash prints the escapes (measured on #141346).
+    Reading the assignment as the selector judged both rows backwards. An unset `$SHELL` keeps the
+    decoding reading: it is the one that catches the destructive program instead of printing it.
     """
     name = shell if shell is not None else os.environ.get("SHELL", "")
     return os.path.basename(name).lower() not in _ECHO_LITERAL_SHELLS
@@ -83,14 +85,18 @@ def _echo_payload(tokens, shell: str | None = None) -> tuple:
     decodes = _echo_decodes_escapes(shell)
     text: list[str] = []
     for token in tokens:
-        if _ECHO_FLAG_RE.match(token):
-            for flag in token[1:]:
-                if flag == "e":
-                    decodes = True
-                elif flag == "E":
-                    decodes = False
+        # A switch is only a switch BEFORE the first operand: once `echo` has text to print the
+        # words after it are that text, so `echo 'a\nb' -e` prints `a\nb -e` and decodes nothing
+        # (measured on bash and zsh; reported on #141346). Reading the trailing `-e` as a flag
+        # decoded a payload the shell hands over literally.
+        if text or not _ECHO_FLAG_RE.match(token):
+            text.append(token)
             continue
-        text.append(token)
+        for flag in token[1:]:
+            if flag == "e":
+                decodes = True
+            elif flag == "E":
+                decodes = False
     return decodes, " ".join(text)
 
 

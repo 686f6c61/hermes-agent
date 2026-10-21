@@ -1649,25 +1649,56 @@ def _osascript_language(value: str) -> str | None:
     return None
 
 
-def _argv_script_payload(token: str, ansi_c: bool = True) -> str:
+# A word the shell rewrites before it becomes an argument: `$'…'` is ANSI-C quoting (escapes
+# decoded), `$"…"` is locale translation (nothing decoded). The tokenizer drops the quotes and
+# keeps the `$`, so both spellings arrive as the same word, and the raw command is the only place
+# the spelling survives — read per word, not once for the whole line (reported on #141346).
+_DOLLAR_QUOTED_WORD_RE = re.compile(r"\$('|\")((?:[^\\]|\\.)*?)\1", re.DOTALL)
+
+
+def _dollar_quoted_words(command: str) -> list:
+    """``(body, is_ansi_c)`` for each `$'…'`/`$"…"` word of *command*, in source order."""
+    return [(match.group(2), match.group(1) == "'") for match in _DOLLAR_QUOTED_WORD_RE.finditer(command)]
+
+
+def _ansi_c_for_word(word: str, dollar_words: list) -> bool:
+    """Whether that `$`-prefixed *word* was ANSI-C quoted, consuming its source occurrence.
+
+    The comparison drops backslashes on both sides: the tokenizer has already resolved the ones
+    that quote a `"` inside the word (`$"… \"Keynote\" …"` reaches us with the bare quote) while
+    the source spelling keeps them, and the bodies are otherwise the same text in source order.
+    """
+    body = word[1:].replace("\\", "")
+    for position, (source_body, ansi_c) in enumerate(dollar_words):
+        source_body = source_body.replace("\\", "")
+        if source_body == body or source_body.startswith(body) or body.startswith(source_body):
+            dollar_words.pop(position)
+            return ansi_c
+    return True
+
+
+def _argv_script_payload(token: str, dollar_words: list | None = None) -> str:
     """The script text the shell hands `osascript` for one argv word.
 
     `$'…'` is ANSI-C quoting: the shell decodes those escapes before the word becomes an argument,
     so `-e $'tell …\\nclose …'` passes two physical lines and not their spelling. Judging the
     escapes left `\\nclose` with no word boundary before the verb (reported on #141346). `$"…"` is
     locale translation, which decodes nothing in any sh-family shell — but the tokenizer drops the
-    quotes and keeps the `$`, so both spellings arrive as the same word and *ansi_c* (read off the
-    raw command) is what tells them apart.
+    quotes and keeps the `$`, so both spellings arrive as the same word. *dollar_words* is the raw
+    command's `$'…'`/`$"…"` words in source order, and each payload word consumes its own: reading
+    one flag for the whole command decoded a `$"…"` program because an unrelated `echo $'done'`
+    further along the line was ANSI-C quoted (reported on #141346).
     """
     if token.startswith("$'") or token.startswith('$"'):
         return _decode_shell_escapes(token[2:])
     if token.startswith("$") and "\\" in token and not token.startswith("${"):
+        ansi_c = _ansi_c_for_word(token, dollar_words) if dollar_words is not None else True
         return _decode_shell_escapes(token[1:]) if ansi_c else token[1:]
     return token
 
 
 def _osascript_argv_sources(
-    tokens: list[str], index: int, ansi_c: bool = True
+    tokens: list[str], index: int, dollar_words: list | None = None
 ) -> tuple[list[str], str | None, bool]:
     """Script payloads in an `osascript` argv, their language, and whether a source is unreadable.
 
@@ -1707,7 +1738,7 @@ def _osascript_argv_sources(
             if position + 1 < len(tokens):
                 # Repeated `-e` options build ONE program, a line each: `-e '… saving ¬' -e 'no'`
                 # is the continued statement, not two scripts that each read as incomplete.
-                exec_payloads.append(_argv_script_payload(tokens[position + 1], ansi_c))
+                exec_payloads.append(_argv_script_payload(tokens[position + 1], dollar_words))
                 carries_source = True
             position += 2
             continue
@@ -1715,7 +1746,7 @@ def _osascript_argv_sources(
             # The payload may ride on the switch with no space between them: `osascript -e'tell …'`
             # is accepted by the binary and executes the attached argument (measured on macOS), so
             # the text after the two characters is the script, not an unknown `-e…` switch.
-            exec_payloads.append(_argv_script_payload(token[2:], ansi_c))
+            exec_payloads.append(_argv_script_payload(token[2:], dollar_words))
             carries_source = True
             position += 1
             continue
@@ -1757,7 +1788,7 @@ def _osascript_script_sources(command: str):
         if index is None:
             continue
         payloads, language, carries_source = _osascript_argv_sources(
-            tokens, index, ansi_c="$'" in command
+            tokens, index, _dollar_quoted_words(segment)
         )
         marker = _HEREDOC_MARKER_RE.search(segment)
         if marker:
@@ -1827,13 +1858,10 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
             continue
         # Leading `VAR=value` words are the stage's environment, not its program: reading
         # `SHELL=/bin/dash` as the program name judged the literal word `echo` as the payload and
-        # left the escapes undecoded, so `SHELL=/bin/dash echo '…\nclose …'` read as inert
-        # (reported on #141346). A pinned SHELL names the shell whose `echo` builtin decides.
-        shell: str | None = None
+        # left the escapes undecoded. They do NOT select the shell that decides the decoding —
+        # they only set the child's environment, while the parsing shell is the one the terminal
+        # spawned (`$SHELL`) — so the value is dropped with the word (measured on #141346).
         while tokens and _SHELL_ASSIGNMENT_RE.match(tokens[0]):
-            variable, _, value = tokens[0].partition("=")
-            if variable.strip().upper() == "SHELL":
-                shell = value
             tokens = tokens[1:]
         if not tokens:
             continue
@@ -1847,9 +1875,12 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
             if printed is not None:
                 return printed
             continue
-        if name in _STDIN_PASS_THROUGH and len(tokens) == 1:
+        if name == "tee" or (name in _STDIN_PASS_THROUGH and len(tokens) == 1):
             # `printf … | cat | osascript`: `cat` copies stdin to stdout, so the payload behind the
-            # pipe is the stage before it, not `cat`'s empty argv.
+            # pipe is the stage before it, not `cat`'s empty argv. `tee` does the same to stdout —
+            # its argv is the file it also writes, never the program — so
+            # `printf … | tee /dev/null | osascript` carries the producer's text and reading
+            # `/dev/null` as the payload made the pipeline look inert (reported on #141346).
             continue
         if len(tokens) < 2:
             return None
@@ -1861,10 +1892,10 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         if name == "echo":
             # `echo`'s escape handling is a property of its own flags AND of the shell: `-e` asks
             # for the decoding in every shell, `-E` turns it off where it is on by default (bash),
-            # and with no flag the shell decides — zsh decodes, bash/sh print. Reading only
-            # `$SHELL` missed `SHELL=/bin/bash; echo -e '…\nclose …'`, where the documented close
+            # and with no flag the shell decides — zsh decodes, bash/sh print. Reading the flags
+            # only as `-e`-or-nothing missed `echo -e '…\nclose …'`, where the documented close
             # reaches the binary as two lines and was judged inert (reported on #141346).
-            decodes, payload = _echo_payload(tokens[1:], shell)
+            decodes, payload = _echo_payload(tokens[1:])
         if decodes:
             # The program arrives with the line breaks still spelled as escapes; decode them the
             # way the producer does before judging the script's lines. `printf` decodes them in

@@ -4,20 +4,28 @@ import pytest
 
 from tools.approval import detect_dangerous_command
 
+# The echo row pins the process `$SHELL`, because that is the shell whose builtin decides whether
+# the escapes reach osascript as bytes: an inline `SHELL=` word is the stage's environment and
+# selects nothing (measured on #141346). A row whose verdict does not depend on the shell leaves it
+# as None.
 PRODUCERS = [
     pytest.param(
-        "SHELL=/bin/dash echo 'tell application \"Keynote\"\\nclose front document saving no\\nend tell' | osascript",
+        "/bin/dash",
+        "SHELL=/bin/bash echo 'tell application \"Keynote\"\\nclose front document saving no\\nend tell' | osascript",
         id="dash-echo-escape",
     ),
     pytest.param(
+        None,
         "printf '%s' 'tell application \"Keynote\" to quit without saving' | osascript 2>&1",
         id="redirection-not-an-operand",
     ),
     pytest.param(
+        None,
         "osascript <<'EOF'\ntell application \"Keynote\" to quit without saving\n",
         id="unterminated-heredoc",
     ),
     pytest.param(
+        None,
         "awk 'BEGIN{print \"tell application \\\"Keynote\\\" to quit without saving\"}' | osascript",
         id="awk-producer",
     ),
@@ -41,8 +49,10 @@ INERT = [
 ]
 
 
-@pytest.mark.parametrize("command", PRODUCERS)
-def test_a_producer_stage_reaches_osascript_as_stdin(command):
+@pytest.mark.parametrize("shell,command", PRODUCERS)
+def test_a_producer_stage_reaches_osascript_as_stdin(shell, command, monkeypatch):
+    if shell:
+        monkeypatch.setenv("SHELL", shell)
     dangerous, key, desc = detect_dangerous_command(command)
     assert dangerous is True, (command, dangerous, key, desc)
 

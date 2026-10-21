@@ -34,6 +34,18 @@ _APPLESCRIPT_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 _APPLESCRIPT_BLOCK_COMMENT_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 _JS_LINE_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
 _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+# A block comment can SPAN lines, which the per-line stripping below cannot see: `(*` alone on the
+# first line and `*)` on the third left the operation spelled between them reading as the
+# operation. A heredoc body is judged whole, so this is where such a body was flagged although the
+# close sat inside prose (reported on #141346). An unterminated opener runs to the end: the
+# language rejects that program, so nothing it appears to do happens.
+_SCRIPT_BLOCK_COMMENT_RE = re.compile(r"\(\*.*?(?:\*\)|\Z)|/\*.*?(?:\*/|\Z)", re.DOTALL)
+# The de-obfuscation projections split adjacent symbols onto their own lines (`(` then `*`), which
+# destroys the comment marker and hands the commented-out operation to the reader as live text.
+# The marker is the same command however much whitespace the shell would have dropped, so the gap
+# is closed here, before the comment is removed.
+_SCRIPT_BLOCK_OPEN_GAP_RE = re.compile(r"\(\s*\*|/\s*\*")
+_SCRIPT_BLOCK_CLOSE_GAP_RE = re.compile(r"\*\s*\)|\*\s*/")
 # JXA's close option is the string enum "yes" | "no" | "ask" (`saving: false` also appears in the
 # wild); only the two that discard the document count — `saving: "ask"` prompts by itself. The key
 # is a JS property name, so it may be quoted. The object is any ARGUMENT of the call, not just the
@@ -109,6 +121,13 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
     # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
     # same operation as `saving no`; splitting first would strand each half on its own line.
     source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
+    source = _SCRIPT_BLOCK_OPEN_GAP_RE.sub(
+        lambda match: "(*" if match.group(0).lstrip().startswith("(") else "/*", source
+    )
+    source = _SCRIPT_BLOCK_CLOSE_GAP_RE.sub(
+        lambda match: "*)" if match.group(0).rstrip().endswith(")") else "*/", source
+    )
+    source = _SCRIPT_BLOCK_COMMENT_RE.sub(" ", source)
     if language:
         readings = (language,)
     else:
@@ -152,6 +171,37 @@ def _call_arguments(source: str, open_paren: int) -> str | None:
     return None
 
 
+def _blank_string_literals(source: str) -> str:
+    """*source* with every string literal's characters replaced by spaces, same length.
+
+    Used to LOOK for code (`_JXA_CALL_RE`) once: a `.close(` written inside a literal is data —
+    `console.log(".close({saving: \\"no\\"})")` prints the text and closes nothing — so searching
+    the raw source flagged an inert program (reported on #141346). Blanking instead of deleting
+    keeps every offset valid for the follow-up reads against the original text.
+    """
+    out = list(source)
+    index, length = 0, len(source)
+    while index < length:
+        char = source[index]
+        if char in "\"'`":
+            quote = char
+            out[index] = " "
+            index += 1
+            while index < length:
+                if source[index] == "\\" and index + 1 < length:
+                    out[index] = out[index + 1] = " "
+                    index += 2
+                    continue
+                out[index] = " "
+                if source[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            continue
+        index += 1
+    return "".join(out)
+
+
 def _jxa_closes_without_saving(source: str) -> bool:
     """Whether a JXA close/quit call carries a no-save options object.
 
@@ -166,7 +216,9 @@ def _jxa_closes_without_saving(source: str) -> bool:
         for match in _JXA_OBJECT_BINDING_RE.finditer(source)
     ]
     names = {name for _position, name, _literal in assignments}
-    for match in _JXA_CALL_RE.finditer(source):
+    # Calls are searched in the string-free copy so a call written inside a literal is not one;
+    # the offsets are the same, so the arguments are then read from the real source.
+    for match in _JXA_CALL_RE.finditer(_blank_string_literals(source)):
         arguments = _call_arguments(source, match.end())
         if arguments is None:
             continue

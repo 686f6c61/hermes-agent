@@ -159,4 +159,39 @@ describe('an addressed member that (pass)ed', () => {
     expect(log(room, 'Quiet')[0].from.kind).toBe('user')
     expect(room.activity.currentGroupActivity('Quiet').filter(event => event.kind === 'failed')).toEqual([])
   })
+
+  it('does not re-ask a member that already answered the address earlier in the drive', async () => {
+    // Both members are mentioned, so the round engine keeps re-selecting them;
+    // research answers the address in round 0 and later legitimately (pass)es —
+    // the teammate's line adds nothing for it. The address is satisfied, so
+    // there is nothing to re-ask and nothing to record as noncompliance.
+    const calls = new Map<string, number>()
+
+    const room = await loadRoom({
+      turn: ({ profile }) => {
+        const seen = (calls.get(profile) || 0) + 1
+
+        calls.set(profile, seen)
+
+        if (profile === 'research') {
+          return seen === 1 ? 'deploy went out at noon' : '(pass)'
+        }
+
+        return seen === 1 ? 'status is green' : '(pass)'
+      }
+    })
+
+    room.rounds.sendToGroupChat('Answered', MEMBERS, '@research @builder status?')
+    await settle(room, 'Answered')
+
+    const researchCalls = room.gateway.calls.filter(call => call.profile === 'research')
+
+    expect(researchCalls.filter(call => call.prompt.includes('explicitly addressed'))).toEqual([])
+    expect(room.activity.currentGroupActivity('Answered').filter(event => event.kind === 'failed')).toEqual([])
+    expect(
+      log(room, 'Answered')
+        .filter(entry => entry.from.kind === 'member')
+        .map(entry => entry.text)
+    ).toEqual(['deploy went out at noon', 'status is green'])
+  })
 })

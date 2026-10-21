@@ -302,6 +302,15 @@ export async function runGroupRoundMember(
 
   const spoke = reply !== null && !isGroupPassText(reply)
 
+  // #142740: the address is satisfied the moment the member answers it in this
+  // drive. The drive-start set is frozen for handoff reasons (#94478), so
+  // without this an addressed member that already replied is re-asked in a
+  // later round — where its delta no longer holds the user entry — and a
+  // correct `(pass)` is then recorded as noncompliance.
+  if (spoke) {
+    context.addressedKeys?.delete(memberKey)
+  }
+
   if (reply !== null && spoke) {
     appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread)
   } else if (reply !== null && context.isCurrent() && context.addressedKeys?.has(memberKey)) {

@@ -314,7 +314,21 @@ _FILL_JS_TEMPLATE = """(() => {
     try {
       if (el.tagName === "SELECT") {
         const want = norm(f.value);
-        const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
+        // A combined expiry <select> may spell the year with four digits ("10/2027", visible text
+        // "10 / 2027") while the value derived from exp_month/exp_year is MM/YY. Accept both year
+        // widths and compare the expiry forms without whitespace; every other token keeps exact
+        // matching, so country/state options are unaffected.
+        const monthYear = /^(\\d{1,2})\\/(\\d{2}|\\d{4})$/.exec(want.replace(/\\s+/g, ""));
+        const expiryForms = monthYear ? (() => {
+          const month = String(Number(monthYear[1]));
+          const year = monthYear[2].length === 2 ? "20" + monthYear[2] : monthYear[2];
+          return [month + "/" + year, month + "/" + year.slice(-2)];
+        })() : [];
+        const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => {
+          const candidate = norm(t);
+          return candidate === want || candidate === want.replace(/^0/, "")
+            || expiryForms.includes(candidate.replace(/\\s+/g, ""));
+        }));
         if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
         continue;
       }

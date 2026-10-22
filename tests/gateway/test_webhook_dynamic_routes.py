@@ -7,7 +7,10 @@ from gateway.config import PlatformConfig
 from gateway.platforms.webhook import (
     WebhookAdapter,
     _DYNAMIC_ROUTES_FILENAME,
+    _WebhookDeliveryIdentity,
 )
+from gateway.platforms.webhook_delivery import route_digest
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
 
 def _make_adapter(routes=None, extra=None):
@@ -79,3 +82,33 @@ class TestDynamicRouteSecretValidation:
         assert "valid" in adapter._routes
 
 
+
+class TestRoutedProfileScope:
+    """The routed profile's home is not the subscription authority (#142889)."""
+
+    def test_route_digest_survives_a_routed_profile_scope(self, tmp_path):
+        # Ingress reloads the table in the listener owner's home; durable admission for a
+        # `--route-profile` delivery then runs under the routed profile's home override, whose
+        # home has no subscriptions file. Resolving the file per reload there cleared the shared
+        # adapter's routes, so the following lookup raised RuntimeStoreError('not_found') and the
+        # delivery was dropped after the sender had already been answered.
+        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(json.dumps(
+            {"monitor-alert": {"secret": "dyn-secret", "prompt": "hi", "events": [],
+                               "profile": "watcher"}}))
+        adapter = _make_adapter()
+        adapter._reload_dynamic_routes()
+        assert "monitor-alert" in adapter._routes
+
+        secondary = tmp_path / "profiles" / "watcher"
+        secondary.mkdir(parents=True)
+        chat_id = _WebhookDeliveryIdentity.from_parts(
+            "watcher", "monitor-alert", "d-1").session_chat_id
+        token = set_hermes_home_override(secondary)
+        try:
+            digest = route_digest(adapter, chat_id)
+        finally:
+            reset_hermes_home_override(token)
+
+        assert len(digest) == 64
+        # And the routed scope's reload must not clear the table ingress is served from.
+        assert "monitor-alert" in adapter._routes

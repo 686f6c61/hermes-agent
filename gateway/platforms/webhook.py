@@ -25,6 +25,7 @@ from collections import deque
 from datetime import datetime, timezone, UTC
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 try:
@@ -222,6 +223,12 @@ class WebhookAdapter(BasePlatformAdapter):
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
         self._routes: dict[str, dict] = dict(self._static_routes)
+        # The subscriptions file belongs to the listener owner. Capture that home here, in the
+        # owner's scope: durable admission of a `--route-profile` delivery runs under the routed
+        # profile's home override, whose home has no subscriptions file, so resolving the path
+        # per reload there cleared the shared adapter's routes and the delivery died `not_found`.
+        from hermes_constants import get_hermes_home
+        self._routes_home = get_hermes_home()
         self._runner = None
         self._v1_signature_warned: set[str] = set()  # routes already warned about legacy V1 (once per route)
         # Keyed by session chat_id; read by EVERY send() (interim status messages AND the final
@@ -435,14 +442,22 @@ class WebhookAdapter(BasePlatformAdapter):
             return False
         return True
 
+    def _subscription_home(self) -> "Path":
+        """The home that owns the dynamic subscriptions file: the listener owner's.
+
+        Captured at construction (``_routes_home``); adapters built without ``__init__`` (test
+        doubles) fall back to the ambient home.
+        """
+        from hermes_constants import get_hermes_home
+        return getattr(self, "_routes_home", None) or get_hermes_home()
+
     def _reload_dynamic_routes(self) -> None:
         """Reload agent-created subscriptions when the file's stat identity changes.
 
         Runs on every POST before auth, so it never takes the CLI writer lock: writers publish via
         atomic rename, which also gives the file a new inode, so a restored mtime cannot hide a change.
         """
-        from hermes_constants import get_hermes_home
-        subs_path = get_hermes_home() / _DYNAMIC_ROUTES_FILENAME
+        subs_path = self._subscription_home() / _DYNAMIC_ROUTES_FILENAME
         try:
             st = subs_path.stat()
         except FileNotFoundError:

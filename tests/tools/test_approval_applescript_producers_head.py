@@ -78,3 +78,52 @@ def test_destructive_producer_shapes(shell, command, monkeypatch):
 def test_inert_producer_and_comment_shapes(shell, command, monkeypatch):
     monkeypatch.setenv("SHELL", shell)
     assert not _dangerous(command)
+
+
+def _symlinked_sh(tmp_path, target: str) -> str:
+    """A `…/bin/sh` whose resolved basename is *target*; skips where symlinks are refused."""
+    interpreter = tmp_path / "shells" / target
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("")
+    link = tmp_path / target / "bin" / "sh"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(interpreter)
+    except (OSError, NotImplementedError):  # Windows without developer mode
+        pytest.skip("this host cannot create symlinks")
+    return str(link)
+
+
+@pytest.mark.parametrize("target,expected", [("dash", True), ("bash", False)],
+                         ids=["sh-resolves-to-dash", "sh-resolves-to-bash"])
+def test_a_bare_sh_reads_the_interpreter_behind_the_symlink(target, expected, tmp_path, monkeypatch):
+    """`/bin/sh` is bash on macOS and dash on Debian, so the resolved basename decides (#141346).
+
+    The verifier's matrix measured `/bin/sh -> /usr/bin/dash` emitting `41 0a 42 0a` for
+    `echo 'A\\nB'` while `/bin/bash` printed the escapes, and this detector answered
+    `(False, None, None)` for the dash route because it read the spelling `sh`.
+    """
+    monkeypatch.setenv("SHELL", _symlinked_sh(tmp_path, target))
+    assert _dangerous(f"echo '{PROGRAM}' | osascript") is expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A block opener inside a JS literal is data, and reading it as a comment ran to the end of
+        # the program: the live close on the next statement was deleted with it.
+        (
+            'osascript -l JavaScript -e \'var marker = "/*"; '
+            'Application("Keynote").documents[0].close({saving: "no"})\''
+        ),
+        # The same opener in an AppleScript literal, one `-e` ahead of the closing statement.
+        (
+            'osascript -e \'set marker to "(*"\' -e '
+            '\'tell application "Keynote" to close front document saving no\''
+        ),
+    ],
+    ids=["jxa-string-holds-a-block-opener", "applescript-string-holds-a-block-opener"],
+)
+def test_a_block_opener_inside_a_literal_does_not_eat_the_close(command, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    assert _dangerous(command)

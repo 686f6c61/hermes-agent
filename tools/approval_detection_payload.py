@@ -12,6 +12,7 @@ nothing here imports it back, so the two stay acyclic.
 
 import os
 import re
+import shutil
 
 # A heredoc delimiter is a shell word, not an identifier: `<<'APPLESCRIPT-END'` is valid, a quoted
 # delimiter may hold spaces (`<<'END SCRIPT'`), and `<<-` (tabs stripped) is not the same body rule
@@ -59,6 +60,26 @@ def _decode_shell_escapes(text: str) -> str:
     return _SHELL_ESCAPE_RE.sub(replace, text)
 
 
+def _shell_basename_behind(name: str) -> str:
+    """The interpreter basename *name* actually runs, following the `sh` symlink it usually is.
+
+    `/bin/sh` is bash on macOS and dash on Debian, so the spelling alone cannot say whether that
+    shell's `echo` writes escapes as bytes; the resolved basename can (measured on #141346:
+    `/bin/sh -> /usr/bin/dash` emitted `41 0a 42 0a` for `echo 'A\\nB'`, `/bin/bash` printed the
+    escapes). An empty result means the name resolves to nothing this host can read.
+    """
+    path = name
+    if os.sep not in path and (os.altsep is None or os.altsep not in path):
+        path = shutil.which(path) or ""
+    if not path:
+        return ""
+    try:
+        resolved = os.path.realpath(path)
+    except OSError:
+        return os.path.basename(name).lower()
+    return os.path.basename(resolved).lower()
+
+
 def _echo_decodes_escapes(shell: str | None = None) -> bool:
     """Whether this host's `echo` hands the escapes over as bytes (`zsh`) or prints them as text.
 
@@ -68,9 +89,22 @@ def _echo_decodes_escapes(shell: str | None = None) -> bool:
     builtin and decodes, and the same word under bash prints the escapes (measured on #141346).
     Reading the assignment as the selector judged both rows backwards. An unset `$SHELL` keeps the
     decoding reading: it is the one that catches the destructive program instead of printing it.
+
+    A bare `sh` is the one spelling that stays ambiguous — `/bin/sh` is bash on macOS and dash on
+    Debian — so it is resolved to the interpreter behind the symlink: `/bin/sh -> dash` decodes
+    (XSI `echo`), `/bin/sh -> bash` prints, and a name that resolves to nothing keeps the literal
+    reading the spelling has always had (reported on #141346).
     """
     name = shell if shell is not None else os.environ.get("SHELL", "")
-    return os.path.basename(name).lower() not in _ECHO_LITERAL_SHELLS
+    base = os.path.basename(name).lower()
+    if base not in _ECHO_LITERAL_SHELLS:
+        return True
+    if base == "bash":
+        return False
+    resolved = _shell_basename_behind(name)
+    if resolved in ("", "sh"):
+        return False
+    return resolved not in _ECHO_LITERAL_SHELLS
 
 
 def _echo_payload(tokens, shell: str | None = None) -> tuple:

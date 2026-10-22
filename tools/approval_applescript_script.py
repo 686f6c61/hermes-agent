@@ -39,7 +39,12 @@ _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 # operation. A heredoc body is judged whole, so this is where such a body was flagged although the
 # close sat inside prose (reported on #141346). An unterminated opener runs to the end: the
 # language rejects that program, so nothing it appears to do happens.
-_SCRIPT_BLOCK_COMMENT_RE = re.compile(r"\(\*.*?(?:\*\)|\Z)|/\*.*?(?:\*/|\Z)", re.DOTALL)
+#
+# It is a scan and not a regex because the markers are also DATA: `var marker = "/*";` opened a
+# "comment" that ran to the end of the program and deleted the live `.close({saving: "no"})`
+# after it (measured on #141346), the same way `"(*"` ate an AppleScript close. A quoted span is
+# not a comment, so the scan below carries the quote state and the regex cannot.
+_SCRIPT_QUOTE_CHARS = "\"'`"
 # The de-obfuscation projections split adjacent symbols onto their own lines (`(` then `*`), which
 # destroys the comment marker and hands the commented-out operation to the reader as live text.
 # The marker is the same command however much whitespace the shell would have dropped, so the gap
@@ -102,6 +107,45 @@ def strip_js_comments(statement: str) -> str:
     return "".join(out)
 
 
+def strip_block_comments(source: str) -> str:
+    """Drop `(* … *)` and `/* … */` that sit outside a string literal, one space for each.
+
+    A quoted span is data, not prose: `var marker = "/*";` used to open a comment that ran to the
+    end of the program and deleted the live `.close({saving: "no"})` after it, and `set marker to
+    "(*"` did the same to an AppleScript close (measured on #141346). An opener that is NOT inside
+    a literal still runs to the end when unclosed — the language rejects that program, so nothing
+    it appears to do happens — which is why the scan stops there instead of raising.
+    """
+    out: list[str] = []
+    index, length, quote = 0, len(source), ""
+    while index < length:
+        char = source[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(source[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in _SCRIPT_QUOTE_CHARS:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if source.startswith("(*", index) or source.startswith("/*", index):
+            close = "*)" if source[index + 1] == "*" else "*/"
+            end = source.find(close, index + 2)
+            out.append(" ")
+            index = length if end < 0 else end + 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def script_closes_without_saving(source: str, language: str | None = None) -> bool:
     """Whether *source*, as script text in *language*, closes or quits a document without saving.
 
@@ -127,7 +171,7 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
     source = _SCRIPT_BLOCK_CLOSE_GAP_RE.sub(
         lambda match: "*)" if match.group(0).rstrip().endswith(")") else "*/", source
     )
-    source = _SCRIPT_BLOCK_COMMENT_RE.sub(" ", source)
+    source = strip_block_comments(source)
     if language:
         readings = (language,)
     else:

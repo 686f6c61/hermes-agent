@@ -609,6 +609,20 @@ def test_explicit_flags_on_resume_are_checked_against_the_frozen_route(store):
         assert GatewaySessionStore(db.connection).open_session(cli("local-old", resumed=True), launch) == "local-old"
 
 
+def test_a_session_without_a_frozen_policy_resumes_with_its_explicit_flags(store):
+    """A session row from before the gateway froze a launch request (``INFO`` carries no
+    ``launch_request``: v0.22.2 rows have no policy at all) resumes with the flags the caller
+    passes — ``--max-turns``, ``--run-budget`` and ``-v`` are its first explicit values, not
+    overrides of a route it never froze. The guard stands as soon as the policy exists, an
+    empty one included."""
+    db, client = store
+    launch = {"max_turns": 1000, "run_budget": 30, "verbose": True}
+    assert GatewaySessionStore(db.connection).open_session(cli("local-old", resumed=True), launch) == "local-old"
+    _frozen_launch(client, {})
+    with pytest.raises(GatewayClientError, match="Resume retains gateway session policy"):
+        GatewaySessionStore(db.connection).open_session(cli("local-old", resumed=True), launch)
+
+
 def test_explicit_toolsets_on_resume_are_checked_against_the_frozen_route(store):
     """CLI-2 `-t`: only an explicit `-t` (``cli._typed_toolsets``) is checked on resume; the CLI's
     resolved default selection in ``launch`` never refuses one."""

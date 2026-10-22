@@ -294,6 +294,17 @@ def _requested_policy(args):
     return policy
 
 
+def frozen_launch_policy(info):
+    """The creation request the session froze, or ``None`` when it has none.
+
+    A session created before the gateway recorded a launch policy (rows from v0.22.2 have no
+    policy at all) reports no ``launch_request``: there is no route to violate, so the explicit
+    flags of the first resume are what that session launches with instead of an override."""
+    if not isinstance(info, dict) or "launch_request" not in info:
+        return None
+    return dict(info.get("launch_request") or {})
+
+
 def check_resume_policy(args, snapshot):
     """A resume may repeat the flags the session was created with (scripts re-run one command
     line); anything that would CHANGE the frozen route is refused, as before."""
@@ -303,8 +314,10 @@ def check_resume_policy(args, snapshot):
     if not requested:
         return
     info = snapshot.get("info") if isinstance(snapshot, dict) else None
-    frozen = dict((info or {}).get("launch_request") or {})
-    if info and "cwd" in info:
+    frozen = frozen_launch_policy(info)
+    if frozen is None or not isinstance(info, dict):
+        return
+    if "cwd" in info:
         frozen["cwd"] = info["cwd"]
     if "model" in requested and requested["model"] == frozen.get("model_requested"):
         requested["model"] = frozen.get("model")  # the alias the owner resolved at creation

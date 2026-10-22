@@ -344,3 +344,19 @@ async def test_oneshot_z_writes_no_session_lines_to_stderr_like_main(monkeypatch
     assert await gateway_chat.run_gateway_chat(argparse.Namespace(query="q", quiet=True)) == 0
     err = capsys.readouterr().err
     assert "Session: stored-z" in err and "session_id: stored-z" in err
+
+
+def test_a_session_without_a_frozen_policy_takes_its_first_explicit_flags():
+    """A row from before the gateway froze a launch request (sessions created on v0.22.2 have no
+    policy row at all) reports no ``launch_request``: there is no route to violate, so the flags
+    of the first resume are what the session launches with instead of an override to refuse.
+    A session whose policy WAS frozen keeps the guard, an empty one included."""
+    from hermes_cli import gateway_chat
+    legacy = {"info": {"source": "cli", "model": "m", "lazy": True, "profile_id": "default"}}
+    gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=1000, query="x"), legacy)
+    gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=1000, toolsets="file",
+                                                        source="cli", query="x"), legacy)
+    for frozen_request in ({"max_turns": 5}, {}):
+        frozen = {"info": {"launch_request": dict(frozen_request), "cwd": "/w"}}
+        with pytest.raises(gateway_chat.GatewayClientError, match="Resume retains gateway session policy"):
+            gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=1000, query="x"), frozen)

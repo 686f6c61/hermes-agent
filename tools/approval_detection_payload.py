@@ -40,7 +40,8 @@ _ESCAPE_DECODING_PRODUCERS = frozenset({"printf", "echo"})
 # command line is what names the decoder (`terminal` spawns the user's `$SHELL`).
 _ECHO_LITERAL_SHELLS = frozenset({"bash", "sh"})
 _SHELL_ESCAPE_RE = re.compile(
-    r"\\(?:x(?P<hex>[0-9A-Fa-f]{1,2})|(?P<octal>[0-7]{1,3})|(?P<code>[nrt]))"
+    r"\\(?:0(?P<zeroed_octal>[0-7]{0,3})|x(?P<hex>[0-9A-Fa-f]{1,2})"
+    r"|(?P<octal>[0-7]{1,3})|(?P<code>[nrt]))"
 )
 _SHELL_ESCAPE_CODES = {"n": "\n", "r": "\r", "t": "\t"}
 # `echo`'s own switches: `-e` forces the escape decoding, `-E` turns it off. They can be spelled
@@ -49,10 +50,19 @@ _ECHO_FLAG_RE = re.compile(r"^-[neE]+$")
 
 
 def _decode_shell_escapes(text: str) -> str:
-    """Spell out the escapes a decoding producer writes as bytes, `\\xHH` and `\\NNN` included."""
+    """Spell out the escapes a decoding producer writes as bytes, `\\xHH` and `\\0NNN` included.
+
+    POSIX spells an octal byte as `\\0NNN` — the leading zero is part of the syntax, not a digit —
+    so `\\0161` is `q` and `echo '\\0161uit'` hands over the word `quit`. Reading the digits three at
+    a time instead took `016` and left a `1`, and the program that arrived downstream was
+    unrecognisable (reported on #141346). A bare `\\NNN` is still accepted because bash and zsh
+    interpret it that way too.
+    """
     def replace(match) -> str:
         if match.group("hex"):
             return chr(int(match.group("hex"), 16))
+        if match.group("zeroed_octal") is not None:
+            return chr(int(match.group("zeroed_octal") or "0", 8))
         if match.group("octal"):
             return chr(int(match.group("octal"), 8))
         return _SHELL_ESCAPE_CODES[match.group("code")]

@@ -107,14 +107,40 @@ def strip_js_comments(statement: str) -> str:
     return "".join(out)
 
 
+def _line_comment_starts(source: str, index: int) -> bool:
+    """Whether the two characters at *index* open a line comment rather than an operator.
+
+    Both script languages end a comment at the line break, and a marker inside one is prose:
+    `-- (* open` left the scan below in block-comment state to the end of the program and hid the
+    `close … saving no` on the next line (reported on #141346). `--` is ALSO JavaScript's
+    decrement, so it only starts a comment where no value is being decremented.
+    """
+    pair = source[index:index + 2]
+    if pair == "//":
+        # `//` is a comment in JavaScript wherever it is not inside a literal, and AppleScript has
+        # no `//` operator to confuse it with.
+        return True
+    if pair != "--":
+        return False
+    previous = source[index - 1] if index else ""
+    return previous == "" or not (previous.isalnum() or previous in "_$)]")
+
+
 def strip_block_comments(source: str) -> str:
-    """Drop `(* … *)` and `/* … */` that sit outside a string literal, one space for each.
+    """Drop `(* … *)`, `/* … */` and the line comments that sit outside a string literal.
 
     A quoted span is data, not prose: `var marker = "/*";` used to open a comment that ran to the
     end of the program and deleted the live `.close({saving: "no"})` after it, and `set marker to
     "(*"` did the same to an AppleScript close (measured on #141346). An opener that is NOT inside
     a literal still runs to the end when unclosed — the language rejects that program, so nothing
     it appears to do happens — which is why the scan stops there instead of raising.
+
+    The closing marker follows the OPENER: `(*` closes on `*)` and `/*` on `*/`. Reading it off the
+    second character (`*`, true of both openers) sent every `/* … */` looking for a `*)` that a
+    JavaScript program never contains, so the scan ran to the end of the source and the live
+    `.close({saving: "no"})` after a closed comment read as inert (reported on #141346). Line
+    comments are consumed here for the same reason: `-- (*` inside one is text, and treating it as
+    an opener collapsed the rest of the program.
     """
     out: list[str] = []
     index, length, quote = 0, len(source), ""
@@ -135,8 +161,12 @@ def strip_block_comments(source: str) -> str:
             out.append(char)
             index += 1
             continue
+        if _line_comment_starts(source, index):
+            newline = source.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
         if source.startswith("(*", index) or source.startswith("/*", index):
-            close = "*)" if source[index + 1] == "*" else "*/"
+            close = "*)" if source[index] == "(" else "*/"
             end = source.find(close, index + 2)
             out.append(" ")
             index = length if end < 0 else end + 2
@@ -215,6 +245,42 @@ def _call_arguments(source: str, open_paren: int) -> str | None:
     return None
 
 
+def _quoted_end(source: str, index: int) -> int:
+    """Index just past the literal that opens at *index*, or ``len(source)`` when it never closes."""
+    quote = source[index]
+    index += 1
+    while index < len(source):
+        if source[index] == "\\":
+            index += 2
+            continue
+        if source[index] == quote:
+            return index + 1
+        index += 1
+    return len(source)
+
+
+def _template_expression_end(source: str, start: int) -> int:
+    """Index of the `}` that closes the `${` whose expression starts at *start*, or -1.
+
+    Nested braces and nested literals both keep the scan honest: `${a.b({c: "}"})}` closes on the
+    last brace, not on the one inside the string.
+    """
+    depth, index, length = 1, start, len(source)
+    while index < length:
+        char = source[index]
+        if char in "\"'`":
+            index = _quoted_end(source, index)
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
 def _blank_string_literals(source: str) -> str:
     """*source* with every string literal's characters replaced by spaces, same length.
 
@@ -222,6 +288,10 @@ def _blank_string_literals(source: str) -> str:
     `console.log(".close({saving: \\"no\\"})")` prints the text and closes nothing — so searching
     the raw source flagged an inert program (reported on #141346). Blanking instead of deleting
     keeps every offset valid for the follow-up reads against the original text.
+
+    A template's `${…}` is the exception and stays: it is an expression, so the destructive call
+    written there runs while the text around it is only data (`\u0060${documents[0].close({saving:
+    "no"})}\u0060` closed the document and read as inert; reported on #141346).
     """
     out = list(source)
     index, length = 0, len(source)
@@ -235,6 +305,13 @@ def _blank_string_literals(source: str) -> str:
                 if source[index] == "\\" and index + 1 < length:
                     out[index] = out[index + 1] = " "
                     index += 2
+                    continue
+                if quote == "`" and source.startswith("${", index):
+                    end = _template_expression_end(source, index + 2)
+                    if end < 0:
+                        break
+                    out[index] = out[index + 1] = out[end] = " "
+                    index = end + 1
                     continue
                 out[index] = " "
                 if source[index] == quote:

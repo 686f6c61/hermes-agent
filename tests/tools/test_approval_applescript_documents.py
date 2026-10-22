@@ -375,3 +375,46 @@ class TestTheVerifiersSecondRound:
         assert dangerous is True, command
         assert key == DESCRIPTION
         assert desc == DESCRIPTION
+
+
+class TestTheVerifiersThirdRound:
+    """The rows the verifier drove on `111e21817c` (#141346).
+
+    Two of them are one defect: the block-comment scan picked its closing marker off the second
+    character of the opener, which is `*` for BOTH `(*` and `/*`, so every `/* … */` went looking
+    for a `*)` a JavaScript program never holds, ran to the end of the source and deleted the live
+    call that followed a closed comment. The rest are the same trust boundary one level down: a
+    marker written inside a line comment, a template expression that is code beside data, and the
+    POSIX spelling of an octal byte.
+    """
+
+    @pytest.mark.parametrize("command", [
+        # A CLOSED comment in front of the operation.
+        'osascript -l JavaScript -e \'/* closed */ '
+        'Application("Keynote").documents[0].close({saving: "no"})\'',
+        # A comment MARKER inside a line comment is prose, in both languages.
+        'osascript -e \'-- (* open\ntell application "Keynote" to close front document saving no\'',
+        'osascript -l JavaScript -e \'// /* open\n'
+        'Application("Keynote").documents[0].close({saving: "no"})\'',
+        # A template expression is an expression even though the template's text is data.
+        'osascript -l JavaScript -e \'`${Application("Keynote").documents[0].close({saving: "no"})}`\'',
+        # `\\0NNN` is POSIX octal: `\\0157` is `o`, so the payload reads `saving no`.
+        'printf \'close front document saving n\\0157\' | osascript',
+        'echo \'\\0161uit without saving\' | osascript',
+    ])
+    def test_the_closed_comment_and_the_octal_byte_reach_the_verb(self, command):
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    @pytest.mark.parametrize("command", [
+        # Template TEXT prints the words and closes nothing; only `${…}` is code.
+        'osascript -l JavaScript -e \'console.log(`.close({saving: "no"})`)\'',
+        # `--` is also JavaScript's decrement, so it does not open a comment there.
+        'osascript -l JavaScript -e \'var i = 3; i--; i--; console.log(i)\'',
+        # A closed comment leaves the program standing, and a read is still a read.
+        'osascript -e \'(* note *) get name of front document\'',
+    ])
+    def test_the_comment_and_template_controls_stay_inert(self, command):
+        assert detect_dangerous_command(command) == (False, None, None), command

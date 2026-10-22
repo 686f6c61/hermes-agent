@@ -44,7 +44,15 @@ _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 # "comment" that ran to the end of the program and deleted the live `.close({saving: "no"})`
 # after it (measured on #141346), the same way `"(*"` ate an AppleScript close. A quoted span is
 # not a comment, so the scan below carries the quote state and the regex cannot.
-_SCRIPT_QUOTE_CHARS = "\"'`"
+#
+# The quote set is the LANGUAGE's, not the union of both: AppleScript has one string delimiter, the
+# double quote, and a single quote is the apostrophe of `front document's name`. Reading `'` as a
+# delimiter paired that possessive with the apostrophe inside the NEXT literal (`& "'s (*"`), which
+# closed the string two characters early and left the `(*` reading as a block opener, so the scan
+# ran to the end and the live `close front document saving no` disappeared (reported on #141346).
+# JavaScript does use all three, and there the union is what keeps `'/*'` data.
+_APPLESCRIPT_QUOTE_CHARS = "\""
+_JS_QUOTE_CHARS = "\"'`"
 # The de-obfuscation projections split adjacent symbols onto their own lines (`(` then `*`), which
 # destroys the comment marker and hands the commented-out operation to the reader as live text.
 # The marker is the same command however much whitespace the shell would have dropped, so the gap
@@ -66,8 +74,12 @@ _JXA_OBJECT_BINDING_RE = re.compile(
     r"(?<![\w$.])(?:(?:var|let|const)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(\{[^{}]*\})"
 )
 # AppleScript can address a command by its four-character code: `«event coreclos»` is `close` and
-# `«class savo»` is the `saving` parameter, which is the same Standard Suite operation.
+# `«class savo»` is the `saving` parameter, which is the same Standard Suite operation. A VALUE can
+# be spelled raw too: `saving «constant ****no  »` is `saving no` with the four characters padded to
+# the width AppleScript stores, and reading the spelling instead of the code left it inert
+# (reported on #141346).
 _APPLESCRIPT_RAW_CODE_RE = re.compile(r"«(?:event|class)\s+([A-Za-z0-9]+)»")
+_APPLESCRIPT_RAW_CONSTANT_RE = re.compile(r"«constant\s+\*{0,4}\s*([A-Za-z0-9]+)\s*»")
 _APPLESCRIPT_RAW_CODE_NAMES = {"coreclos": "close", "aevtquit": "quit", "savo": "saving"}
 
 
@@ -113,7 +125,9 @@ def _line_comment_starts(source: str, index: int) -> bool:
     Both script languages end a comment at the line break, and a marker inside one is prose:
     `-- (* open` left the scan below in block-comment state to the end of the program and hid the
     `close … saving no` on the next line (reported on #141346). `--` is ALSO JavaScript's
-    decrement, so it only starts a comment where no value is being decremented.
+    decrement, so it only starts a comment where no value is being decremented — and the operand
+    can follow the operator: `var j = --i` put a word character after the pair, opened a comment
+    that ate the live `.close({saving: "no"})` on the same line (reported on #141346).
     """
     pair = source[index:index + 2]
     if pair == "//":
@@ -122,11 +136,14 @@ def _line_comment_starts(source: str, index: int) -> bool:
         return True
     if pair != "--":
         return False
+    following = source[index + 2:index + 3]
+    if following and (following.isalnum() or following in "_$"):
+        return False
     previous = source[index - 1] if index else ""
     return previous == "" or not (previous.isalnum() or previous in "_$)]")
 
 
-def strip_block_comments(source: str) -> str:
+def strip_block_comments(source: str, javascript: bool) -> str:
     """Drop `(* … *)`, `/* … */` and the line comments that sit outside a string literal.
 
     A quoted span is data, not prose: `var marker = "/*";` used to open a comment that ran to the
@@ -141,7 +158,12 @@ def strip_block_comments(source: str) -> str:
     `.close({saving: "no"})` after a closed comment read as inert (reported on #141346). Line
     comments are consumed here for the same reason: `-- (*` inside one is text, and treating it as
     an opener collapsed the rest of the program.
+
+    What counts as a string is the language's answer, and that is why the caller passes it: a
+    single quote is JavaScript's delimiter and AppleScript's apostrophe, so reading the pair in the
+    wrong blob opens a string that never closes (`javascript=False` keeps `'` ordinary text).
     """
+    quotes = _JS_QUOTE_CHARS if javascript else _APPLESCRIPT_QUOTE_CHARS
     out: list[str] = []
     index, length, quote = 0, len(source), ""
     while index < length:
@@ -156,7 +178,7 @@ def strip_block_comments(source: str) -> str:
                 quote = ""
             index += 1
             continue
-        if char in _SCRIPT_QUOTE_CHARS:
+        if char in quotes:
             quote = char
             out.append(char)
             index += 1
@@ -192,6 +214,12 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
         lambda match: _APPLESCRIPT_RAW_CODE_NAMES.get(match.group(1).lower(), match.group(0)),
         source,
     )
+    # …and a value can be spelled raw the same way: `«constant ****no  »` is the code `no`, which is
+    # also the word the reading below looks for, so the four characters replace the spelling.
+    source = _APPLESCRIPT_RAW_CONSTANT_RE.sub(
+        lambda match: _APPLESCRIPT_RAW_CODE_NAMES.get(match.group(1).lower(), match.group(1)),
+        source,
+    )
     # `¬` continues an AppleScript statement on the next physical line, so `saving ¬\nno` is the
     # same operation as `saving no`; splitting first would strand each half on its own line.
     source = _APPLESCRIPT_CONTINUATION_RE.sub(" ", source)
@@ -201,7 +229,13 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
     source = _SCRIPT_BLOCK_CLOSE_GAP_RE.sub(
         lambda match: "*)" if match.group(0).rstrip().endswith(")") else "*/", source
     )
-    source = strip_block_comments(source)
+    # Each reading gets the program stripped under its own quote rule: `'` is a delimiter in JXA and
+    # an apostrophe in AppleScript, so the union of both (which is what this scan used to carry)
+    # opens a string that never closes in whichever language the quote does not belong to.
+    texts = {
+        "applescript": strip_block_comments(source, javascript=False),
+        "javascript": strip_block_comments(source, javascript=True),
+    }
     if language:
         readings = (language,)
     else:
@@ -212,10 +246,13 @@ def script_closes_without_saving(source: str, language: str | None = None) -> bo
         # JXA reading, where the apostrophe of `front document's name` pairs with the one in
         # `-- don't` and swallows the `saving no` between them.
         code_only = _SCRIPT_STRING_LITERAL_RE.sub(
-            '""', _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", _APPLESCRIPT_LINE_COMMENT_RE.sub("", source))
+            '""', _APPLESCRIPT_BLOCK_COMMENT_RE.sub("", _APPLESCRIPT_LINE_COMMENT_RE.sub("", texts["applescript"]))
         )
         readings = ("applescript", "javascript") if _JS_SCRIPT_HINT_RE.search(code_only) else ("applescript",)
-    return any(_reading_closes_without_saving(source, reading == "javascript") for reading in readings)
+    return any(
+        _reading_closes_without_saving(texts.get(reading, texts["applescript"]), reading == "javascript")
+        for reading in readings
+    )
 
 
 def _call_arguments(source: str, open_paren: int) -> str | None:

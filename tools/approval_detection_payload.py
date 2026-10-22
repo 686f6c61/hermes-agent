@@ -106,9 +106,11 @@ def _echo_decodes_escapes(shell: str | None = None) -> bool:
     decoding reading: it is the one that catches the destructive program instead of printing it.
 
     A bare `sh` is the one spelling that stays ambiguous — `/bin/sh` is bash on macOS and dash on
-    Debian — so it is resolved to the interpreter behind the symlink: `/bin/sh -> dash` decodes
-    (XSI `echo`), `/bin/sh -> bash` prints, and a name that resolves to nothing keeps the literal
-    reading the spelling has always had (reported on #141346).
+    Debian — and the interpreter behind the name does not settle it either: macOS keeps `/bin/sh`
+    as its own binary (not a symlink) and that shell decodes (`echo 'A\\nB'` emitted `41 0a 42 0a`
+    on macOS 15.7.9, measured), while the resolved `sh` of a shell that is really bash would print.
+    So the ambiguous case keeps the DECODING reading: it is the one that catches the destructive
+    program instead of printing it (reported on #141346).
     """
     name = shell if shell is not None else os.environ.get("SHELL", "")
     base = os.path.basename(name).lower()
@@ -118,7 +120,7 @@ def _echo_decodes_escapes(shell: str | None = None) -> bool:
         return False
     resolved = _shell_basename_behind(name)
     if resolved in ("", "sh"):
-        return False
+        return True
     return resolved not in _ECHO_LITERAL_SHELLS
 
 

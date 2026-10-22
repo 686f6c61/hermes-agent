@@ -7,6 +7,8 @@ and JXA accept, and smart mode must not let the auxiliary guardian approve this 
 APPROVE is not the consent of the person whose work is at stake.
 """
 
+import os
+
 import pytest
 
 from tools import approval as approval_module
@@ -400,13 +402,26 @@ class TestTheVerifiersThirdRound:
         'osascript -l JavaScript -e \'`${Application("Keynote").documents[0].close({saving: "no"})}`\'',
         # `\\0NNN` is POSIX octal: `\\0157` is `o`, so the payload reads `saving no`.
         'printf \'close front document saving n\\0157\' | osascript',
-        'echo \'\\0161uit without saving\' | osascript',
     ])
     def test_the_closed_comment_and_the_octal_byte_reach_the_verb(self, command):
         dangerous, key, desc = detect_dangerous_command(command)
         assert dangerous is True, command
         assert key == DESCRIPTION
         assert desc == DESCRIPTION
+
+    def test_the_octal_byte_row_pins_the_shell_that_decodes_it(self, monkeypatch):
+        """`echo '\\0161uit'` is `quit` only under a shell whose `echo` writes escapes.
+
+        The row above cannot inherit the reviewer's `$SHELL`: under bash the same word is printed
+        literally and the payload never reaches `osascript`, so the expectation flips with the
+        environment the suite runs in — 88 passed / 1 failed with `SHELL=/bin/bash`, 89/89 with
+        zsh (reported on #141346). The decoding shell is pinned here, and bash keeps the control.
+        """
+        command = 'echo \'\\0161uit without saving\' | osascript'
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        assert detect_dangerous_command(command) == (True, DESCRIPTION, DESCRIPTION), command
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        assert detect_dangerous_command(command) == (False, None, None), command
 
     @pytest.mark.parametrize("command", [
         # Template TEXT prints the words and closes nothing; only `${…}` is code.
@@ -440,3 +455,74 @@ class TestTheVerifiersThirdRound:
                    "end tell' | osascript")
         monkeypatch.setenv("SHELL", "/bin/dash")
         assert detect_dangerous_command(command) == (False, None, None), command
+
+
+class TestTheVerifiersFourthRound:
+    """The rows the verifier drove on `579dc9129f` (#141346).
+
+    Three of them are one shape: a piece of the program that the reader treated as a delimiter or a
+    comment when the language says it is the operation. AppleScript has ONE string delimiter, so an
+    apostrophe is prose and a literal that starts with one must not swallow the next `(*`; `--` is
+    the JXA decrement when a value follows it; and a raw four-character code is the value it spells.
+    The fourth is the shell behind an ambiguous `sh`, which decodes on this host whatever the
+    basename says.
+    """
+
+    def test_a_possessive_before_a_literal_does_not_swallow_the_close(self):
+        """`document's name & "'s (*"` is an apostrophe, then a DOUBLE-quoted literal.
+
+        Reading `'` as a delimiter paired the possessive with the apostrophe inside the next
+        literal, closed the string early, and let the `(*` open a comment that ran to the end of the
+        program: the live `close front document saving no` disappeared (reported on #141346).
+        """
+        script = ('tell application "Keynote"\n'
+                  'set n to front document\'s name & "\'s (*"\n'
+                  'close front document saving no\n'
+                  'end tell')
+        command = "osascript <<'EOF'\n" + script + "\nEOF\n"
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    def test_a_prefix_decrement_is_not_a_comment(self):
+        """`var j = --i` puts the operand AFTER the pair, and that is where `--` is an operator.
+
+        Reading the pair as a comment only when no value preceded it opened a comment at `--i` and
+        deleted the live `.close({saving: "no"})` on the same line (reported on #141346).
+        """
+        command = ('osascript -l JavaScript -e \'var i = 3; var j = --i; '
+                   'Application("Keynote").documents[0].close({saving: "no"})\'')
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    def test_the_raw_constant_is_the_value_it_spells(self):
+        """`saving «constant ****no  »` is `saving no`, padded to four characters."""
+        command = 'osascript -e \'tell application "Keynote" to close front document saving «constant ****no  »\''
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    def test_a_shell_named_sh_is_read_as_decoding(self, monkeypatch, tmp_path):
+        """The ambiguity of `sh` cannot be resolved from the name, so it keeps the safe reading.
+
+        macOS keeps `/bin/sh` as its own binary and that shell decodes (`echo 'A\\nB'` emitted
+        `41 0a 42 0a`); the resolved `sh` of a shell that is really bash would print. The detector
+        therefore reads an ambiguous `sh` as decoding, which is the direction that catches the
+        program instead of printing it (reported on #141346). The shell is a symlink built here, so
+        the row does not read the host's `/bin/sh`.
+        """
+        if not os.path.exists("/bin/sh"):
+            pytest.skip("no /bin/sh on this host")
+        shell_dir = tmp_path / "bin"
+        shell_dir.mkdir()
+        (shell_dir / "sh").symlink_to("/bin/sh")
+        monkeypatch.setenv("SHELL", str(shell_dir / "sh"))
+        command = 'echo \'tell application "Keynote"\\nclose front document saving no\' | osascript'
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION

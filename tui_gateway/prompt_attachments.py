@@ -199,12 +199,16 @@ def _sanitize_attachment_name(name: str) -> str:
 def _stage_session_file_attachment(
     session: dict, *, raw_path: str, data_url: str, name: str) -> tuple[Path, bool]:
     """Make a desktop file attachment available to the gateway agent: ``(stored_path, uploaded)``.
-    Inside the workspace -> as-is; gateway-visible but outside -> copied into ``attachments/``
-    (bind-mounted into container backends so ``@file:`` resolves in the sandbox); not on the
-    gateway -> ``data_url`` bytes decoded into ``attachments/``."""
+    ``data_url`` bytes win when the client shipped them — it only uploads what the gateway cannot
+    read, so its ``path`` names a file on the *client* and resolving it here would read whatever
+    sits at that name on the gateway host. Otherwise: inside the workspace -> as-is;
+    gateway-visible but outside -> copied into ``attachments/`` (bind-mounted into container
+    backends so ``@file:`` resolves in the sandbox); not on the gateway -> error."""
     workspace = Path(_session_cwd(session)).resolve()
     resolved = None
-    if raw_path:
+    # A shipped payload is the attachment. Resolving raw_path first is what staged the gateway's
+    # same-path file for a remote desktop (#142876): the bytes are the client's only authority.
+    if raw_path and not data_url:
         try:
             from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
         except Exception:

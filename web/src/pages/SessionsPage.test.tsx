@@ -56,12 +56,16 @@ function click(el: Element | null) {
 
 const button = (label: string) => document.querySelector(`button[aria-label="${label}"]`);
 
-async function renderSessionsPage(rows: Record<string, unknown>[]) {
+async function renderSessionsPage(
+  rows: Record<string, unknown>[],
+  overviewRows: Record<string, unknown>[] = [],
+) {
   // Page list uses limit 20; the overview tab's recent-cards fetch uses 50 —
-  // keep the overview empty so the list view (with row actions) renders.
+  // keep the overview empty unless a case is about those cards, so the list
+  // view (with row actions) renders.
   apiMocks.getSessions.mockImplementation(async (limit: number) => ({
-    sessions: limit >= 50 ? [] : rows,
-    total: limit >= 50 ? 0 : rows.length,
+    sessions: limit >= 50 ? overviewRows : rows,
+    total: limit >= 50 ? overviewRows.length : rows.length,
     limit,
     offset: 0,
   }));
@@ -91,7 +95,11 @@ async function renderSessionsPage(rows: Record<string, unknown>[]) {
       </I18nProvider>,
     ),
   );
-  await waitFor(() => Boolean(button("Delete session")));
+  await waitFor(() =>
+    overviewRows.length > 0
+      ? (document.body.textContent ?? "").includes(String(overviewRows[0].title))
+      : Boolean(button("Delete session")),
+  );
 }
 
 beforeEach(() => {
@@ -257,5 +265,19 @@ describe("structured reasoning rendering (#59957)", () => {
     expect(text).toContain("<action>tool_call</action>");
     expect(text).toContain('<result>{"ok":true}</result>');
     expect(document.querySelectorAll("pre code").length).toBe(0);
+  });
+});
+
+describe("overview recent sessions (#142835)", () => {
+  it("opens a session from its recent card, the way Resume in Chat does", async () => {
+    await renderSessionsPage([], [
+      { id: "sid-recent", profile: "default", source: "cli", model: "openai/gpt", title: "Recent one",
+        started_at: 1, ended_at: null, last_active: 1, is_active: false, message_count: 3,
+        tool_call_count: 0, input_tokens: 1, output_tokens: 1, preview: "recent" },
+    ]);
+
+    const link = document.querySelector<HTMLAnchorElement>('a[href="/chat?resume=sid-recent"]');
+    if (!link) throw new Error("the recent card is not a link");
+    expect(link.textContent).toContain("Recent one");
   });
 });

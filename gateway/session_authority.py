@@ -879,6 +879,10 @@ class SessionAuthority:
                         # Accepted for this exact claim before its turn adopted an agent: whatever agent
                         # the turn adopts for this generation must not run the work as if no Stop arrived.
                         self.pending_stops[ref.session_id] = generation
+                    elif self._generation_returned(live, ref, generation):
+                        # The route holds a real agent that is not this generation's any more: the
+                        # Stop must reach neither that agent nor the turn waiting behind it.
+                        agent = None
                 if agent is not None:
                     self.delivered_stops[ref.session_id] = generation
         # Main's Stop: hard-cancel (aborts compression too) and end the session's own background
@@ -907,6 +911,18 @@ class SessionAuthority:
             if running(route):
                 runner._hm_evict_reaped_agent(route)
         return running(route)
+
+    def _generation_returned(self, live, ref, generation):
+        """That generation's turn is over although its admission still reads ``started``.
+
+        Either another generation is the executing one, or this one's execution returned and its
+        settlement is in flight — committed but not yet published, so ``_pending_rows`` masks the
+        terminal row. The route's live agent then belongs to the turn that replaced it.
+        """
+        executing = self.executing.get(ref.session_id)
+        if executing is not None and executing != generation:
+            return True
+        return any(row.get('generation') == generation for row in live.settling.values())
 
     def _runs_own_agent(self, ref):
         """The route's running slot holds a real agent (not the claim's pending sentinel), so the

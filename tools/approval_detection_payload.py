@@ -164,6 +164,52 @@ def _echo_payload(tokens, shell: str | None = None) -> tuple:
     return decodes, " ".join(text)
 
 
+_PRINTF_CONVERSION_RE = re.compile(r"%(.)")
+
+# A pipeline whose text cannot be reconstructed from the argv (`printf '… %b' … | osascript`,
+# `printf '…quiz…' | tr z t | osascript`): the stage in between rewrites bytes, so judging the
+# producer's words judges a program the binary never receives. The reader fails closed on this
+# instead of assuming the earlier literal is the payload (reported on #141346).
+UNREADABLE_PIPED_SCRIPT = object()
+
+
+def printf_script_text(tokens) -> object:
+    """The text `printf` writes for *tokens*, or ``UNREADABLE_PIPED_SCRIPT`` when it cannot be read
+    from the argv alone.
+
+    `printf 'tell … to close front document saving %s' no | osascript` hands the binary a program
+    whose verb and parameter come out of the format, so joining the argv spells `saving %s no` and
+    the close never meets its parameter (reported on #141346). ``%s`` is the one conversion that is
+    a straight substitution; ``%%`` is a literal; anything else (``%b``, ``%d``, ``%q``, ``%*s``)
+    reinterprets its argument, and a format with more arguments than conversions is repeated by
+    printf, so those stay unreadable rather than guessed.
+    """
+    if not tokens:
+        return ""
+    fmt = tokens[0]
+    conversions = _PRINTF_CONVERSION_RE.findall(fmt)
+    arguments = list(tokens[1:])
+    if any(kind not in ("s", "%") for kind in conversions):
+        return UNREADABLE_PIPED_SCRIPT
+    if sum(1 for kind in conversions if kind == "s") != len(arguments):
+        return UNREADABLE_PIPED_SCRIPT
+    out: list[str] = []
+    written = 0
+    position = 0
+    while position < len(fmt):
+        if fmt[position] == "%" and position + 1 < len(fmt):
+            if fmt[position + 1] == "%":
+                out.append("%")
+            else:
+                out.append(arguments[written])
+                written += 1
+            position += 2
+            continue
+        out.append(fmt[position])
+        position += 1
+    return "".join(out)
+
+
 def _printed_literals(raw_stage: str) -> str | None:
     """Text a filter-`print` stage emits from its own literals, or None when it only transforms.
 

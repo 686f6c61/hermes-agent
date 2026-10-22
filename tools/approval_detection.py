@@ -15,12 +15,14 @@ import unicodedata
 from tools.approval_applescript_script import script_closes_without_saving
 from tools.approval_detection_payload import (
     _HEREDOC_MARKER_RE,
+    UNREADABLE_PIPED_SCRIPT,
     _decode_shell_escapes,
     _echo_payload,
     _heredoc_body,
     _heredoc_delimiter,
     _printed_literals,
     _strip_output_redirections,
+    printf_script_text,
 )
 
 logger = logging.getLogger("tools.approval")
@@ -509,8 +511,15 @@ _QUOTE_MASKED_DANGEROUS_DESCRIPTIONS = frozenset({
 # consulting the guardian. Keep this list to actions that destroy state the agent did not create
 # and cannot recreate — every entry is a guaranteed prompt, not a smarter classifier.
 _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION = "AppleScript closes or quits a document without saving"
+# A pipeline that reshapes the program before `osascript` reads it: the destructive statement may
+# be spelled in bytes the argv never held, so the same operator-owned blast radius applies as soon
+# as the binary is reached that way (#141346).
+_APPLESCRIPT_UNREADABLE_PIPE_DESCRIPTION = (
+    "osascript reads its program from a pipeline this detector cannot reconstruct"
+)
 SMART_MANUAL_ONLY_DESCRIPTIONS = frozenset({
     _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION,
+    _APPLESCRIPT_UNREADABLE_PIPE_DESCRIPTION,
 })
 
 # Preserve approvals stored under the removed interpreter regex rules.
@@ -1570,13 +1579,17 @@ def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
 
 # A stage that copies stdin to stdout untouched; the payload behind the pipe is the stage before it.
 _STDIN_PASS_THROUGH = frozenset({"cat"})
-# Stages that only transform the stream they read: their argv is a pattern, not the program, so the
-# payload behind the pipe is still the stage before them (`printf '…' | grep -v x | osascript`).
-_PIPE_FILTER_STAGES = frozenset(
-    {"grep", "egrep", "fgrep", "sed", "awk", "head", "tail", "sort", "tr", "cut", "uniq"}
-)
-# The filters that can also EMIT text of their own (`awk 'BEGIN{print "…"}'`), as opposed to the
-# ones that only match (`grep -v '…'`): for those the argv really is a program.
+# Stages that only narrow the stream they read: their argv is a pattern, not the program, and every
+# line the next stage receives is one the producer already wrote, so the payload behind the pipe is
+# still the stage before them (`printf '…' | grep -v x | osascript`).
+_PIPE_FILTER_STAGES = frozenset({"grep", "egrep", "fgrep", "head", "tail", "sort", "uniq"})
+# Stages that REWRITE the bytes they read (`tr z t`, `sed s/a/b/`, `cut -d: -f1`): the text the next
+# stage receives is not the text behind them, so reading the earlier literal judges a program the
+# binary never sees. `printf '…quiz…' | tr z t | osascript` ran a destructive close while the
+# detector judged the word `quiz` (reported on #141346) — the payload is unreadable, not inert.
+_PIPE_REWRITE_STAGES = frozenset({"tr", "sed", "cut", "awk"})
+# The rewriting stages that can also EMIT text of their own (`awk 'BEGIN{print "…"}'`), as opposed
+# to the ones that only match (`grep -v '…'`): for those the argv really is a program.
 _LITERAL_PRINT_STAGES = frozenset({"awk"})
 # A stage's leading `VAR=value` words set its environment; the program is what follows them.
 _SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -1597,6 +1610,11 @@ def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str
     if "osascript" not in command.lower():
         return None
     for source, language in _osascript_script_sources(command):
+        if source is UNREADABLE_PIPED_SCRIPT:
+            # The pipeline into stdin rewrites or reformats the bytes, so no reading of the argv
+            # tells what the binary receives. Asking the operator is the only honest answer: the
+            # alternative is judging a literal the program never contained (#141346).
+            return _APPLESCRIPT_UNREADABLE_PIPE_DESCRIPTION
         if script_closes_without_saving(source, language):
             return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
     if _depth < 3:
@@ -1824,7 +1842,7 @@ def _enclosing_command_start(command: str, word_start: int) -> int:
     return start
 
 
-def _piped_script_source(command: str, executable_start: int) -> str | None:
+def _piped_script_source(command: str, executable_start: int) -> object:
     """Script text of the pipeline stage that feeds *osascript* on stdin.
 
     *executable_start* is the start of the command that owns the executable — a wrapper
@@ -1839,6 +1857,7 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
     stages = [stage for stage in _iter_top_level_shell_segments(prefix[:-1]) if stage.strip()]
     if not stages:
         return None
+    rewrites = False  # a stage between the payload and the binary reshapes the bytes
     for raw_stage in reversed(stages):
         producer = raw_stage.strip()
         marker = _HEREDOC_MARKER_RE.search(producer)
@@ -1870,10 +1889,18 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
             # A filter transforms the stream; its argv is the pattern, not the program. Reading it
             # as the program judged `grep -v 'quit without saving'` as the script, so a producer
             # that only activates the app was flagged on the filter's excluded text (#141346).
-            # `awk` is the filter that can ALSO emit its own text, whose literals are a program.
+            continue
+        if name in _PIPE_REWRITE_STAGES:
+            # `awk` is the rewriting stage that can ALSO emit its own text, whose literals are a
+            # program. Every other rewriting stage (and an `awk` without a print verb) hands the
+            # next stage bytes nobody can reconstruct from this argv, so the payload is unknown —
+            # fail closed rather than judge the literal behind it (#141346).
             printed = _printed_literals(producer) if name in _LITERAL_PRINT_STAGES else None
             if printed is not None:
                 return printed
+            # Nothing to read here; whether the text behind it is the program depends on what the
+            # stage before this one wrote, which the walk below is about to find out.
+            rewrites = True
             continue
         if name == "tee" or (name in _STDIN_PASS_THROUGH and len(tokens) == 1):
             # `printf … | cat | osascript`: `cat` copies stdin to stdout, so the payload behind the
@@ -1889,6 +1916,15 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         # on separate lines and the operation never met its parameter.
         payload = " ".join(tokens[1:])
         decodes = name == "printf"
+        if name == "printf":
+            # `printf` writes its FORMAT, not its argv: `printf '… saving %s' no` hands over
+            # `saving no` while the joined argv spells `saving %s no`, and the close never met its
+            # parameter (reported on #141346). A format this reader cannot apply is unknown, not
+            # inert.
+            printed = printf_script_text(tokens[1:])
+            if printed is UNREADABLE_PIPED_SCRIPT:
+                return printed
+            payload = str(printed)
         if name == "echo":
             # `echo`'s escape handling is a property of its own flags AND of the shell: `-e` asks
             # for the decoding in every shell, `-E` turns it off where it is on by default (bash),
@@ -1907,7 +1943,9 @@ def _piped_script_source(command: str, executable_start: int) -> str | None:
         if tokens[1].startswith("$'"):
             # ANSI-C quoting (`printf $'tell …\nclose …'`): the shell decodes the escapes itself.
             payload = _decode_shell_escapes(payload)
-        return payload
+        # A rewriting stage in between means these words are not the program any more, and a stage
+        # that prints nothing (`awk '{print $1}'` over an empty stream) has no payload to judge.
+        return UNREADABLE_PIPED_SCRIPT if rewrites else payload
     return None
 
 

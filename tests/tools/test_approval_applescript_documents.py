@@ -526,3 +526,34 @@ class TestTheVerifiersFourthRound:
         assert dangerous is True, command
         assert key == DESCRIPTION
         assert desc == DESCRIPTION
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # `tr z t` turns `quiz` into `quit`: the argv behind the pipe holds no destructive word,
+            # the bytes the binary reads do (measured on #141346).
+            """printf 'tell application "Keynote" to quiz without saving' | tr z t | osascript""",
+            # printf writes its FORMAT: the argv spells `saving %s no`, the program says `saving no`.
+            """printf 'tell application "Keynote" to close front document saving %s' no | osascript""",
+        ],
+    )
+    def test_a_pipeline_that_rebuilds_the_program_fails_closed(self, command):
+        """Neither row is inert: one is the destructive close itself, the other is unreadable.
+
+        Reading the producer's argv judged a program the binary never receives, so a rewriting
+        stage (`tr`, `sed`, `cut`, an `awk` without a print verb) or a `printf` format this reader
+        cannot apply now asks the operator instead of answering "no risk" (#141346).
+        """
+        dangerous, key, _desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key in (DESCRIPTION, "osascript reads its program from a pipeline this detector cannot reconstruct")
+
+    def test_a_printf_format_is_applied_before_the_script_is_judged(self):
+        """`printf '… saving %s' no` hands over `… saving no`, so the close meets its parameter."""
+        command = """printf 'tell application "Keynote" to close front document saving %s' no | osascript"""
+        assert detect_dangerous_command(command) == (True, DESCRIPTION, DESCRIPTION)
+
+    def test_a_pure_filter_still_carries_the_producer_program(self):
+        """`grep` narrows lines without rewriting them, so the producer behind it is still the script."""
+        command = """printf 'tell application "Keynote" to quit without saving' | grep -v x | osascript"""
+        assert detect_dangerous_command(command) == (True, DESCRIPTION, DESCRIPTION)

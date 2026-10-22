@@ -47,6 +47,11 @@ _SHELL_ESCAPE_CODES = {"n": "\n", "r": "\r", "t": "\t"}
 # `echo`'s own switches: `-e` forces the escape decoding, `-E` turns it off. They can be spelled
 # together (`-ne`, `-nE`) and they are not part of the text the binary reads.
 _ECHO_FLAG_RE = re.compile(r"^-[neE]+$")
+# But the pair is not POSIX: bash, zsh and the ksh family implement it, while dash's `echo` and the
+# `/bin/sh` that resolves to it treat the word as text — on this host `/bin/dash` prints `-E A` and
+# still writes the `\n` as a byte (measured on #141346). Reading `-E` as a switch there turned the
+# decoding off and the close the shell really put on its own line went unseen.
+_ECHO_FLAG_SHELLS = frozenset({"bash", "zsh", "ksh", "ksh93", "mksh", "pdksh"})
 
 
 def _decode_shell_escapes(text: str) -> str:
@@ -117,6 +122,15 @@ def _echo_decodes_escapes(shell: str | None = None) -> bool:
     return resolved not in _ECHO_LITERAL_SHELLS
 
 
+def _echo_implements_escape_flags(shell: str | None = None) -> bool:
+    """Whether this shell's `echo` reads `-e`/`-E` as switches instead of printing them."""
+    name = shell if shell is not None else os.environ.get("SHELL", "")
+    base = os.path.basename(name).lower()
+    if not base or base in _ECHO_FLAG_SHELLS:
+        return True
+    return _shell_basename_behind(name) in _ECHO_FLAG_SHELLS
+
+
 def _echo_payload(tokens, shell: str | None = None) -> tuple:
     """The text `echo` prints, and whether it decodes escapes, out of *tokens* (its own argv).
 
@@ -127,13 +141,17 @@ def _echo_payload(tokens, shell: str | None = None) -> tuple:
     went unseen (reported on #141346).
     """
     decodes = _echo_decodes_escapes(shell)
+    reads_flags = _echo_implements_escape_flags(shell)
     text: list[str] = []
     for token in tokens:
         # A switch is only a switch BEFORE the first operand: once `echo` has text to print the
         # words after it are that text, so `echo 'a\nb' -e` prints `a\nb -e` and decodes nothing
         # (measured on bash and zsh; reported on #141346). Reading the trailing `-e` as a flag
         # decoded a payload the shell hands over literally.
-        if text or not _ECHO_FLAG_RE.match(token):
+        #
+        # And a switch is only a switch where the shell HAS one: dash's `echo` prints `-E` and
+        # still decodes, so the word is text there and the decoding stays on.
+        if text or not reads_flags or not _ECHO_FLAG_RE.match(token):
             text.append(token)
             continue
         for flag in token[1:]:

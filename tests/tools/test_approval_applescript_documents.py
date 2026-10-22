@@ -418,3 +418,25 @@ class TestTheVerifiersThirdRound:
     ])
     def test_the_comment_and_template_controls_stay_inert(self, command):
         assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_dash_prints_the_switch_and_still_decodes(self, monkeypatch):
+        """`-E` is not POSIX: dash's `echo` prints the word and writes the escapes anyway.
+
+        On this host `/bin/dash` emits `-E A`, `0a`, `B` for `echo -E 'A\\nB'`, so the same
+        pipeline that bash hands over as one literal line is TWO lines under dash and the close is
+        real. Reading `-E` as a switch there turned the decoding off (#141346).
+        """
+        command = ('echo -E \'tell application "Keynote"\\nclose front document saving no\\n'
+                   "end tell' | osascript")
+        monkeypatch.setenv("SHELL", "/bin/dash")
+        dangerous, key, desc = detect_dangerous_command(command)
+        assert dangerous is True, command
+        assert key == DESCRIPTION
+        assert desc == DESCRIPTION
+
+    def test_dash_reads_are_still_reads(self, monkeypatch):
+        """The control: the same producer under dash, with nothing destructive to decode."""
+        command = ('echo -E \'tell application "Keynote"\\nget name of front document\\n'
+                   "end tell' | osascript")
+        monkeypatch.setenv("SHELL", "/bin/dash")
+        assert detect_dangerous_command(command) == (False, None, None), command

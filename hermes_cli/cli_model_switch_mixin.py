@@ -764,23 +764,6 @@ class CLIModelSwitchMixin:
 
         return [(i, e) for (i, e) in pairs if _subseq(q, str(e).lower())]
 
-    @staticmethod
-    def _compute_model_picker_viewport(
-        selected: int, scroll_offset: int, n: int, term_rows: int, reserved_below: int = 6,
-        panel_chrome: int = 6, min_visible: int = 3) -> tuple[int, int]:
-        """Resolve (scroll_offset, visible) for the /model picker viewport. ``reserved_below``
-        matches the approval/clarify panels (input, status bar, separators); ``panel_chrome`` is
-        borders + blanks + hint row. The offset slides to keep ``selected`` on screen."""
-        max_visible = max(min_visible, term_rows - reserved_below - panel_chrome)
-        if n <= max_visible:
-            return 0, n
-        visible = max_visible
-        if selected < scroll_offset:
-            scroll_offset = selected
-        elif selected >= scroll_offset + visible:
-            scroll_offset = selected - visible + 1
-        return max(0, min(scroll_offset, n - visible)), visible
-
     def _stage_and_swap_model(self, result, old_model) -> bool:
         """Stage ``result`` onto the CLI fields, then swap the live agent in place.
 

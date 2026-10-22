@@ -40,7 +40,7 @@ from typing import Optional
 
 from hermes_cli.cli_footer_split import FooterSplit
 from hermes_cli.cli_panel import _Panel
-from hermes_cli.cli_tui_wrap import _prefix_wrapped_rows, _wrap_rows
+from hermes_cli.cli_tui_wrap import _prefix_wrapped_rows, _scroll_list_visible_rows, _wrap_rows
 
 # Rows below an overlay panel taken by spinner/tool-progress, status bar, input, separators and
 # prompt symbol (measured ~6 during live PTY approval prompts) — shared by every panel budget.
@@ -519,11 +519,12 @@ class CLITuiMixin:
     def _render_scroll_list_panel(self, state, title, hint, labels, *, min_width, max_width, indent):
         """Titled panel with a hint row and a scrolling selectable list (model picker, palette).
 
-        The panel renders into a Window with no max height, so the visible slice is limited to
-        the terminal rows or the bottom border and trailing items get clipped on long lists
-        (e.g. Ollama Cloud's 36+ models). ``state["_scroll_offset"]`` is updated in place.
+        The window is budgeted in rendered rows, not labels: an entry wraps into as many rows as
+        its text needs, so a slice sized by label count still drew past the terminal and put the
+        trailing entries under the composer (#143140). ``state["_scroll_offset"]`` is updated in
+        place so the next frame keeps the window where the cursor left it.
         """
-        from cli import HermesCLI, _panel_box_width, _wrap_panel_text
+        from cli import _panel_box_width, _wrap_panel_text
         box_width = _panel_box_width(title, [hint] + labels, min_width=min_width, max_width=max_width)
         # ``_Panel.row`` pads every row to ``box_width - 2``, so that is the real
         # body width. Keep the wrap budget in sync with it and reserve the
@@ -537,23 +538,19 @@ class CLITuiMixin:
             term_rows = get_app().output.get_size().rows
         except Exception:
             term_rows = _term_rows()
-        scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
-            selected, state.get("_scroll_offset", 0), len(labels), term_rows)
-        state["_scroll_offset"] = scroll_offset
+        visible_rows = _scroll_list_visible_rows(
+            _wrap_panel_text, selected, state.get("_scroll_offset", 0), labels, label_width,
+            indent, term_rows, reserved_below=_PANEL_RESERVED_BELOW,
+        )
+        state["_scroll_offset"] = visible_rows[0][0] if visible_rows else 0
 
         panel = _Panel('class:clarify-border', box_width, title, 'class:clarify-title')
         panel.blank()
         panel.row('class:clarify-hint', hint)
         panel.blank()
-        for idx in range(scroll_offset, min(scroll_offset + visible, len(labels))):
+        for idx, wrapped_rows in visible_rows:
             style = 'class:clarify-selected' if idx == selected else 'class:clarify-choice'
-            # The cursor cell is always two columns wide, so unselected rows get two spaces
-            # regardless of ``indent`` (the palette's continuation indent is four) — otherwise
-            # the selected label starts two columns left of its neighbours.
-            lead = '❯ ' if idx == selected else '  '
-            for wrapped in _prefix_wrapped_rows(
-                _wrap_panel_text, labels[idx], label_width, lead, indent
-            ):
+            for wrapped in wrapped_rows:
                 panel.row(style, wrapped)
         panel.blank()
         return panel.close()

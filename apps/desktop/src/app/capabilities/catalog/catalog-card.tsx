@@ -107,12 +107,16 @@ export function CatalogCard({ entry, action, accentIndex, onOpen, onCategory, on
       {showsCardImage(entry) && <CatalogImage className="catalog-card-image aspect-[2/1]" key={entry.imageUrl!} src={entry.imageUrl!} />}
       {variant !== 'default' && <div className="catalog-card-topline">
         <span className="min-w-0 truncate" title={entry.author || catalogLabel(entry.source)}>{entry.author || catalogLabel(entry.source)}</span>
-        {variant !== 'hero' && <span className="relative shrink-0">{action}</span>}
+        {variant !== 'hero' && <span className="relative z-10 shrink-0">{action}</span>}
       </div>}
       <div className="catalog-card-copy flex min-h-0 w-full flex-col gap-2 p-3">
         <div className="flex min-w-0 items-center gap-2.5">
           {/* Its ::after stretches over the whole card, so any empty spot opens the
-              detail; real controls sit above it (`relative`). One focus stop per card. */}
+              detail; real controls sit above it — `relative` alone is not enough for
+              the ones rendered before this button (the topline action), because the
+              overlay is positioned against the card and DOM order paints it last.
+              Those need a stacking level (`z-10`); the ones after it paint on top
+              already. One focus stop per card. */}
           <RowButton
             aria-haspopup="dialog"
             aria-label={entry.name}

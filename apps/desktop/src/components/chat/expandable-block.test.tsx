@@ -40,4 +40,24 @@ describe('ExpandableBlock', () => {
 
     expect(screen.getByRole('button', { name: 'Collapse' }).getAttribute('aria-expanded')).toBe('true')
   })
+
+  // The scroller carries `scrollbar-overlay`, so the platform's classic lane sits
+  // inside its right edge (~15px macOS, ~17px Windows). A toggle flush with that
+  // edge takes the clicks meant for the scroll track (and reflows the transcript
+  // by toggling instead of scrolling) — the row has to keep its gutter.
+  it('keeps the toggle row clear of the scrollbar lane', () => {
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
+    render(
+      <ExpandableBlock>
+        <pre data-testid="content">{'line\n'.repeat(20)}</pre>
+      </ExpandableBlock>
+    )
+
+    const row = screen.getByTestId('expandable-block-toggle-row')
+    const toggle = screen.getByRole('button', { name: 'Expand' })
+
+    expect(toggle.parentElement).toBe(row)
+    expect(row.className).toMatch(/\bpr-5\b/)
+  })
 })

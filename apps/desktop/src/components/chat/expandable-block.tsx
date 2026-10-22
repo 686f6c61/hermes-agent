@@ -48,9 +48,15 @@ export function ExpandableBlock({ children, className }: ExpandableBlockProps) {
         // it spans the full bottom edge (over the horizontal scrollbar of a wide
         // code block AND the block's last line), so making it clickable killed
         // both sideways scrolling and text selection. Keep the fade
-        // `pointer-events-none` and pin the only clickable target — a compact
-        // toggle — to the right edge, clear of the draggable scrollbar track.
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-7 justify-end bg-linear-to-t from-[var(--expandable-fade-from,var(--ui-chat-surface-background))] to-transparent">
+        // `pointer-events-none` and inset the one clickable target by a gutter:
+        // the scroller is a `scrollbar-overlay`, so its right edge belongs to the
+        // platform's classic scrollbar lane (~15px macOS, ~17px Windows), and a
+        // toggle flush with that edge swallowed the clicks meant for the track
+        // (#143184). 20px clears both lanes with the button's outer box.
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 flex h-7 justify-end bg-linear-to-t from-[var(--expandable-fade-from,var(--ui-chat-surface-background))] to-transparent pr-5"
+          data-testid="expandable-block-toggle-row"
+        >
           <button
             aria-expanded={expanded}
             aria-label={expanded ? 'Collapse' : 'Expand'}

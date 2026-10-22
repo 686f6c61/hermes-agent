@@ -2958,9 +2958,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             model_config = None
         # Exact-id consumers may inspect/resume delegate children even though
         # list endpoints intentionally omit them. Project only the provenance
-        # bits the client needs so it cannot accidentally promote such a row
-        # into an ordinary session list, nor read a /new reset as a fork;
-        # never expose the model snapshot.
+        # fields the client needs so it cannot accidentally promote such a row
+        # into an ordinary session list, nor read a /new reset as a fork: the
+        # two bits plus the raw session-id markers, never the model snapshot.
         payload.update(session_provenance_flags(model_config))
         return payload
 

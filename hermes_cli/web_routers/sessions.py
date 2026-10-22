@@ -235,9 +235,9 @@ def get_sessions(
                 s["archived"] = bool(s.get("archived"))
                 s["pinned"] = bool(s.get("pinned"))
                 # A /new reset keeps parent_session_id for lineage but is a new
-                # conversation, not a fork; model_config is stripped below.
-                s["is_reset_child"] = session_provenance_flags(
-                    s.get("model_config"))["is_reset_child"]
+                # conversation, not a fork; model_config is stripped below, so
+                # the derived flag and the raw markers land on the row first.
+                s.update(session_provenance_flags(s.get("model_config")))
             if not full:
                 _strip_session_list_rows(sessions)
             # ``storage`` tells an empty page apart from an unreadable store (#72046); same

@@ -58,6 +58,19 @@ def test_reset_child_is_flagged_without_leaking_model_config(client):
     assert "must-not-leak" not in str(rows["reset-conversation"])
 
 
+def test_list_rows_ship_the_raw_markers_without_the_snapshot(client):
+    """The dashboard list is the third consumer: it must ship the same pair the
+    TUI gateway's ``_project_tree_row`` sends, and still no ``model_config``."""
+    rows = _rows(client)
+    assert rows["reset-conversation"]["_reset_from"] == "root-conversation"
+    assert rows["branch-conversation"]["_branched_from"] == "root-conversation"
+    assert "_branched_from" not in rows["reset-conversation"]
+    assert "_reset_from" not in rows["branch-conversation"]
+    for row in rows.values():
+        assert "model_config" not in row
+        assert "must-not-leak" not in str(row)
+
+
 def test_roots_and_branches_keep_nesting_as_forks(client):
     rows = _rows(client)
     assert rows["root-conversation"]["is_reset_child"] is False

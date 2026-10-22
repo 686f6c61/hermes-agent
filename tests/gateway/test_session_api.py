@@ -123,6 +123,13 @@ async def test_get_session_projects_delegate_provenance_without_model_config(
     assert reset["is_reset_child"] is True
     assert child["is_reset_child"] is False
     assert branch["is_reset_child"] is False
+    # The raw markers ride with the booleans: a client that predates
+    # ``is_reset_child`` (the Android one reads exactly this pair) resolves the
+    # parent edge from them, and ``_branched_from`` is an independent source.
+    assert reset["_reset_from"] == "parent"
+    assert branch["_branched_from"] == "parent"
+    assert "_branched_from" not in reset
+    assert "_reset_from" not in child
     assert "model_config" not in child
     assert "must-not-leak" not in str(child)
 

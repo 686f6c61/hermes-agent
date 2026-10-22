@@ -73,4 +73,25 @@ describe('cleanThinkingText', () => {
       )
     ).toBe('**Resolving comments on GitHub**\nActual step\nnext step')
   })
+
+  it('leaves spinner verbs used as ordinary content words untouched', () => {
+    const prose = [
+      "displayed in the user's TUI as their Qwen model’s reasoning stream",
+      'Before we proceed, careful reasoning is required to avoid errors',
+      'The spinner keeps pondering through long calls',
+      'Reasoning about the recursion is most of this work',
+      'It reported on words like "reasoning", "analyzing", and similar ones',
+      "I'm not sure, this needs more computing... let me check"
+    ].join('\n')
+
+    expect(cleanThinkingText(prose)).toBe(prose)
+  })
+
+  it('never welds the neighbours of a stripped status fragment', () => {
+    expect(cleanThinkingText('The spinner keeps pondering through long calls')).toBe(
+      'The spinner keeps pondering through long calls'
+    )
+    expect(cleanThinkingText('(¬_¬) pondering...Actual step')).toBe('Actual step')
+    expect(cleanThinkingText('Actual step\n· musing\nnext step')).toBe('Actual step\nnext step')
+  })
 })

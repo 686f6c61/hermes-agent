@@ -77,7 +77,13 @@ export const pasteTokenLabel = (text: string, lineCount: number) => {
 }
 
 const THINKING_STATUS_RE = new RegExp(`^(?:${VERBS.join('|')})\\.{0,3}$`, 'i')
-const THINKING_STATUS_CHUNK_RE = new RegExp(`[^A-Za-z\n]+\\s*(?:${VERBS.join('|')})\\.{0,3}\\s*`, 'giu')
+// A spinner ticker is line-leading: an optional face/emoji run (any run without ASCII
+// letters, e.g. "( ͡° ͜ʖ ͡°)"), then a verb that closes the fragment (ellipsis or end of
+// line). Reasoning prose uses the same words as ordinary content ("the model's reasoning
+// stream", "careful reasoning is required"); an unanchored match deleted those words and
+// swallowed the spaces on both sides, welding the neighbours together (#143228). Anchoring
+// the fragment to the line start and to its closing boundary keeps prose verbatim.
+const THINKING_STATUS_CHUNK_RE = new RegExp(`^[^A-Za-z\\n]*?(?:${VERBS.join('|')})(?:\\.{2,3}[ \\t]*|[ \\t]*(?=\\n|$))`, 'giu')
 
 export const cleanThinkingText = (reasoning: string) =>
   reasoning

@@ -2,7 +2,7 @@ import type { Unstable_TriggerAdapter, Unstable_TriggerItem } from '@assistant-u
 import { type MutableRefObject, type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 
 import { hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
-import { desktopSlashCommandArgumentMode } from '@/lib/desktop-slash-commands'
+import { desktopSlashArgumentModeState, desktopSlashCommandArgumentMode } from '@/lib/desktop-slash-commands'
 
 import {
   COMPLETION_ACTIONS,
@@ -369,15 +369,25 @@ export function useComposerTrigger({
     // there's no command invocation for the args to belong to.
     const command = (item.metadata as { command?: string } | undefined)?.command ?? ''
 
-    const argumentMode = desktopSlashCommandArgumentMode(command)
-    const expandsToArgs = trigger.kind === '/' && !trigger.inline && !serialized.includes(' ') && argumentMode !== null
+    const argumentMode = desktopSlashArgumentModeState(command)
+    // An unknown mode is not "no argument stage": picking `/plan` before the
+    // catalog has named it must not pin a pill, so it commits as plain text and
+    // no argument step opens. An inline pick is a reference inside prose and
+    // chips either way.
+    const expandsToArgs =
+      trigger.kind === '/' &&
+      !trigger.inline &&
+      !serialized.includes(' ') &&
+      argumentMode.known &&
+      argumentMode.mode !== null
 
     const text = starter || serialized.endsWith(' ') ? serialized : `${serialized} `
     const directive = !starter && serialized.match(/^@([^:]+):(.+)$/)
     // No pill while expanding — the bare command stays plain text until an arg
     // is picked, at which point a single pill is emitted for the full command.
-    const slashKind = !expandsToArgs && trigger.kind === '/' ? slashChipKindForItem(item) : null
-    const keepTriggerOpen = starter || (expandsToArgs && argumentMode !== 'text')
+    const slashKind =
+      !expandsToArgs && trigger.kind === '/' && (argumentMode.known || trigger.inline) ? slashChipKindForItem(item) : null
+    const keepTriggerOpen = starter || (expandsToArgs && argumentMode.mode !== 'text')
 
     const chip = slashKind
       ? slashChipElement(serialized, slashKind)

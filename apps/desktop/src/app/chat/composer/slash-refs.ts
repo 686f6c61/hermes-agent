@@ -11,7 +11,7 @@
  */
 import type { SlashChipKind } from '@/components/assistant-ui/directive-text'
 import {
-  desktopSlashCommandArgumentMode,
+  desktopSlashArgumentModeState,
   isDesktopSlashCommand,
   resolveDesktopCommand
 } from '@/lib/desktop-slash-commands'
@@ -51,9 +51,15 @@ export interface SlashCommandScanOptions {
  * the bare `/name`, so the boundary is unambiguous. Arg-taking commands
  * (`/goal ship it`) stay text — their tail may be prose. Commands with no
  * desktop surface at all (`/exit`, `/config`) stay text too.
+ *
+ * A mode the backend has not reported yet is not the same as "no argument
+ * stage": chipping on it pins a `text` command as a pill that turns back into
+ * prose as soon as `commands.catalog` lands.
  */
 function chippableKind(command: string): SlashChipKind | null {
-  if (!isDesktopSlashCommand(command) || desktopSlashCommandArgumentMode(command) !== null) {
+  const argumentMode = desktopSlashArgumentModeState(command)
+
+  if (!isDesktopSlashCommand(command) || !argumentMode.known || argumentMode.mode !== null) {
     return null
   }
 

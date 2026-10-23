@@ -873,8 +873,39 @@ export function desktopSlashDescription(command: string, fallback = ''): string 
   return `${description}${usage}`
 }
 
+export type DesktopSlashArgumentModeState =
+  | { known: true; mode: DesktopSlashArgumentMode | null }
+  | { known: false; mode: null }
+
+/**
+ * Argument mode with "the backend has not told us" kept apart from "this command
+ * has no argument stage".
+ *
+ * `desktopSlashCommandArgumentMode` answers `null` for both, which is what a
+ * caller wants when it only asks whether an argument stage follows. The
+ * composer's chipping cannot use that collapse: before `commands.catalog`
+ * answers, most commands carry no local `argumentMode` (54 of the registry's
+ * inferred modes live only in the backend), so a `text` command reads as
+ * argument-less, commits as a pill, and turns back into prose once the catalog
+ * lands. A caller that draws a chip has to treat an unknown mode as "not
+ * chippable" rather than falling through to the argument-less branch.
+ */
+export function desktopSlashArgumentModeState(command: string): DesktopSlashArgumentModeState {
+  const declared = resolveDesktopCommand(command)?.argumentMode
+
+  if (declared) {
+    return { known: true, mode: declared }
+  }
+
+  if (!liveCatalog()?.commands) {
+    return { known: false, mode: null }
+  }
+
+  return { known: true, mode: asArgumentMode(catalogMeta(command)?.argument_mode) ?? null }
+}
+
 export function desktopSlashCommandArgumentMode(command: string): DesktopSlashArgumentMode | null {
-  return resolveDesktopCommand(command)?.argumentMode ?? asArgumentMode(catalogMeta(command)?.argument_mode) ?? null
+  return desktopSlashArgumentModeState(command).mode
 }
 
 export function desktopSkinSlashCompletions(

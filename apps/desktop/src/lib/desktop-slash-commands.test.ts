@@ -5,6 +5,7 @@ import {
   type CommandsCatalogLike,
   desktopSkinSlashCompletions,
   type DesktopSlashArgumentMode,
+  desktopSlashArgumentModeState,
   desktopSlashCommandArgumentMode,
   desktopSlashUnavailableMessage,
   desktopSubcommandUnavailableMessage,
@@ -458,5 +459,38 @@ describe('registry-derived block-list (contract with hermes_cli/commands.py)', (
         expect(isDesktopSlashCommand(name)).toBe(false)
       }
     }
+  })
+})
+
+describe('desktopSlashArgumentModeState', () => {
+  afterEach(() => {
+    rememberDesktopCommandsCatalog(undefined)
+  })
+
+  it('reports an unknown mode before the catalog answers, not "no arguments"', () => {
+    // `/plan` is `argument_mode: text` in the Python registry, but the offline
+    // dump carries only the desktop disposition — the mode arrives with
+    // `commands.catalog`. Until then the composer has to know that it does not
+    // know, or `/plan ` commits as a pill and turns back into prose later.
+    rememberDesktopCommandsCatalog(undefined)
+
+    expect(desktopSlashArgumentModeState('/plan')).toEqual({ known: false, mode: null })
+    expect(desktopSlashArgumentModeState('/stop')).toEqual({ known: false, mode: null })
+    // The one-argument accessor keeps collapsing both into null: its callers
+    // only ask whether an argument stage follows.
+    expect(desktopSlashCommandArgumentMode('/plan')).toBeNull()
+  })
+
+  it('keeps a mode the local table declares, catalog or not', () => {
+    rememberDesktopCommandsCatalog(undefined)
+
+    expect(desktopSlashArgumentModeState('/title')).toEqual({ known: true, mode: 'text' })
+  })
+
+  it('separates an argument-less command from an unknown one once the catalog answers', () => {
+    rememberDesktopCommandsCatalog(registryCatalog({ '/version': null, '/plan': 'text' }))
+
+    expect(desktopSlashArgumentModeState('/version')).toEqual({ known: true, mode: null })
+    expect(desktopSlashArgumentModeState('/plan')).toEqual({ known: true, mode: 'text' })
   })
 })

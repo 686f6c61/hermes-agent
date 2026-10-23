@@ -55,3 +55,32 @@ describe('slashCommandMatches', () => {
     expect(commands('/some-skill ', { boundaryBefore: false })).toEqual([])
   })
 })
+
+describe('slashCommandMatches — argument mode the catalog has not named yet', () => {
+  afterEach(() => {
+    rememberDesktopCommandsCatalog(undefined)
+  })
+
+  it('leaves a command as text while the mode is unknown', () => {
+    // Reported repro: on a fresh mount, before `commands.catalog` answers,
+    // `/plan ` and `/new ` hydrated as pills and turned back into prose the
+    // moment the catalog landed. The mode is a property of the command, not of
+    // when the catalog happened to arrive, so an unknown mode chips nothing.
+    rememberDesktopCommandsCatalog(undefined)
+
+    expect(commands('/plan ')).toEqual([])
+    expect(commands('/new ')).toEqual([])
+  })
+
+  it('chips the same command once the catalog calls it argument-less', () => {
+    rememberDesktopCommandsCatalog({ commands: { '/new': { argument_mode: null, desktop: null } } })
+
+    expect(commands('/new ')).toEqual(['command:/new'])
+  })
+
+  it('keeps a text command as text with the catalog loaded', () => {
+    rememberDesktopCommandsCatalog({ commands: { '/plan': { argument_mode: 'text', desktop: null } } })
+
+    expect(commands('/plan ')).toEqual([])
+  })
+})

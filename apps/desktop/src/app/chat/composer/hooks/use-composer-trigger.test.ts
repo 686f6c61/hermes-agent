@@ -307,3 +307,35 @@ describe('useComposerTrigger — chip survival (the plaintext-demotion bug class
     expect(editor.querySelector('[data-slash-kind]')).not.toBeNull()
   })
 })
+
+describe('useComposerTrigger — a mode the catalog has not answered yet', () => {
+  it('commits the pick as plain text instead of pinning a pill', () => {
+    // Same repro from the typed side: picking `/plan` before `commands.catalog`
+    // lands used to commit an argument-less pill, and the text turned back into
+    // prose once the catalog arrived. An unknown mode is not "no arguments".
+    rememberDesktopCommandsCatalog(undefined)
+    const editor = mountEditor('/pla')
+    const plan = item('/plan', 'Commands')
+    const { hook } = mountTrigger(editor, [plan])
+
+    act(() => hook.result.current.refreshTrigger())
+    act(() => hook.result.current.replaceTriggerWithChip(plan))
+
+    expect(composerPlainText(editor)).toBe('/plan ')
+    expect(editor.querySelector('[data-slash-kind]')).toBeNull()
+    // Nothing to expand, so the popover does not linger on the bare command.
+    expect(hook.result.current.trigger).toBeNull()
+  })
+
+  it('chips the same command once the catalog says it takes no argument', () => {
+    rememberDesktopCommandsCatalog({ commands: { '/plan': { argument_mode: null, desktop: null } } })
+    const editor = mountEditor('/pla')
+    const plan = item('/plan', 'Commands')
+    const { hook } = mountTrigger(editor, [plan])
+
+    act(() => hook.result.current.refreshTrigger())
+    act(() => hook.result.current.replaceTriggerWithChip(plan))
+
+    expect(editor.querySelector('[data-slash-kind]')?.getAttribute('data-ref-text')).toBe('/plan')
+  })
+})

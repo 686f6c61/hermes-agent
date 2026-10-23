@@ -18,13 +18,19 @@
 
 .thread-timeline-tick {
   position: absolute;
-  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
 
   height: 0.4375rem;
-  width: 100%;
+  /* Hug the bar. The strip is 3rem wide and the bar is drawn 0.5rem from its
+   * right edge, so a full-width tick left 34px of invisible button next to the
+   * code block's expand toggle, which sits in the same corner: an overshoot
+   * jumped the transcript instead of expanding the block (#143184). 1.5rem is
+   * the widest bar (1rem, the hover curve in timeline-data.ts) plus the 6px
+   * right padding, and it also clears the 24px minimum target in WCAG 2.5.8. */
+  width: 1.5rem;
   padding: 0 0.375rem 0 0;
   cursor: pointer;
   outline: none;

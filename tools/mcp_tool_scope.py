@@ -51,7 +51,8 @@ def _key_visible_in_scope(key: ServerKey, scope: Optional[str]) -> bool:
 def _resolve_server_key(name: str, scope: Optional[str] = None, *, current: bool = True) -> ServerKey:
     """The connection key a call to *name* from *scope* must use: the scope's own connection
     (live, connecting or lazily registered) when it has one, else a shared connection it
-    adopted, else its own (not yet existing) key so bookkeeping lands under this scope."""
+    adopted, else the process's own bare connection, else its own (not yet existing) key so
+    bookkeeping lands under this scope."""
     if scope is None and current:
         scope = _core._mcp_registry_scope()
     own = _server_key(name, scope, current=False)
@@ -60,6 +61,18 @@ def _resolve_server_key(name: str, scope: Optional[str] = None, *, current: bool
     for key, scopes in _core._server_tool_scopes.items():
         if scope in scopes and _key_name(key) == name and key in _core._servers:
             return key
+    # A bare key is the process's own profile connection: ``rekey_unscoped_connections`` moves every
+    # one of them under ``(launch scope, name)`` as soon as the process serves profiles, so a bare
+    # entry still here belongs to the single profile that owns the process. A *session-bound* tool
+    # scope — an ACP session attaching editor MCP servers
+    # (``gateway/session_local_mcp._borrowed``) — is an overlay on that same profile, so it reaches
+    # the bare connection instead of answering "is not connected" for a server that is live (#143502).
+    # A profile overlay scope must not: it belongs to another profile, and reaching the launch
+    # profile's bare connection would hand that profile its credentials (#106005).
+    if name in _core._servers or name in _core._lazy_server_configs:
+        from tools.registry import current_session_tool_scope
+        if scope is not None and current_session_tool_scope() == scope:
+            return name
     return own
 
 

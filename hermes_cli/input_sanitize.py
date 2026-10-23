@@ -12,20 +12,38 @@ _BOUNDARY_SUBS = (
     (re.compile(r"01~(?=$|[\s\n<\[\(\):;.,!?])"), ""),
 )
 
+# A clock-time range (``12:00~12:15``) reuses the shape of the degraded ``00~`` / ``01~`` markers, so its
+# span is held back from the boundary substitutions and passed through verbatim.
+_CLOCK_TIME_RANGE = re.compile(r"\d{1,2}:\d{2}~[ \t]?\d{1,2}:\d{2}")
+
 # Corruption signature from desktop bracketed-paste leaks (#62557).
 _DESKTOP_PASTE_ARTIFACT = "~[[e"
 
 
-def strip_leaked_bracketed_paste_wrappers(text: str) -> str:
-    """Strip leaked bracketed-paste wrapper markers: canonical wrappers unconditionally, degraded visible forms
-    (``[200~`` / ``[201~`` and ``00~`` / ``01~``) only at boundaries so ``literal[200~tag`` stays intact."""
-    if not text:
-        return text
+def _strip_boundary_wrappers(text: str) -> str:
     for wrapper in ("\x1b[200~", "\x1b[201~", "^[[200~", "^[[201~"):
         text = text.replace(wrapper, "")
     for pattern, repl in _BOUNDARY_SUBS:
         text = pattern.sub(repl, text)
     return text
+
+
+def strip_leaked_bracketed_paste_wrappers(text: str) -> str:
+    """Strip leaked bracketed-paste wrapper markers: canonical wrappers unconditionally, degraded visible forms
+    (``[200~`` / ``[201~`` and ``00~`` / ``01~``) only at boundaries so ``literal[200~tag`` stays intact.
+
+    A clock-time range is user text, not a wrapper: ``12:00~12:15`` reaches the model unchanged.
+    """
+    if not text:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for match in _CLOCK_TIME_RANGE.finditer(text):
+        pieces.append(_strip_boundary_wrappers(text[cursor : match.start()]))
+        pieces.append(match.group(0))
+        cursor = match.end()
+    pieces.append(_strip_boundary_wrappers(text[cursor:]))
+    return "".join(pieces)
 
 
 def collapse_repeated_input_artifacts(text: str, min_repeats: int = 4) -> str:

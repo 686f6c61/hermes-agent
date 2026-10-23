@@ -17,6 +17,18 @@ class TestStripLeakedBracketedPasteWrappers:
         text = "literal[200~tag and literal[201~tag should stay"
         assert strip_leaked_bracketed_paste_wrappers(text) == text
 
+    def test_keeps_clock_time_ranges_intact(self):
+        """A time range is user text, not a degraded marker (#143444)."""
+        for text in ("12:00~12:15", "08:00~09:30", "9:00~9:30", "12:01~ 12:15"):
+            assert strip_leaked_bracketed_paste_wrappers(text) == text
+
+    def test_keeps_a_time_range_inside_a_sentence(self):
+        text = "Schedule lunch 12:00~12:15."
+        assert strip_leaked_bracketed_paste_wrappers(text) == text
+
+    def test_still_strips_a_degraded_wrapper_beside_a_time_range(self):
+        assert strip_leaked_bracketed_paste_wrappers("00~12:00~12:15 and 00~x01~") == "12:00~12:15 and x"
+
 
 class TestCollapseRepeatedInputArtifacts:
     def test_issue_62557_corruption_tail(self):

@@ -15,6 +15,21 @@ describe('stripLeakedBracketedPasteWrappers', () => {
     const text = 'literal[200~tag and literal[201~tag should stay'
     expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
   })
+
+  it('keeps clock time ranges intact (#143444)', () => {
+    for (const text of ['12:00~12:15', '08:00~09:30', '9:00~9:30', '12:01~ 12:15']) {
+      expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
+    }
+  })
+
+  it('keeps a time range inside a sentence', () => {
+    const text = 'Schedule lunch 12:00~12:15.'
+    expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
+  })
+
+  it('still strips a degraded wrapper beside a time range', () => {
+    expect(stripLeakedBracketedPasteWrappers('00~12:00~12:15 and 00~x01~')).toBe('12:00~12:15 and x')
+  })
 })
 
 describe('collapseRepeatedInputArtifacts', () => {

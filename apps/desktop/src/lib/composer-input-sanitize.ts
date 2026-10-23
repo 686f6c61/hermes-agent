@@ -10,14 +10,14 @@ const BRACKETED_PASTE_BOUNDARY_END = /\[201~(?=$|[\s\n<[():;.,!?])/g
 const BRACKETED_PASTE_DEGRADED_START = /(^|[\s\n>:\])])00~/g
 const BRACKETED_PASTE_DEGRADED_END = /01~(?=$|[\s\n<[():;.,!?])/g
 
+// A clock-time range (`12:00~12:15`) reuses the shape of the degraded `00~` / `01~` markers, so its span is
+// held back from the boundary substitutions and passed through verbatim.
+const CLOCK_TIME_RANGE = /\d{1,2}:\d{2}~[ \t]?\d{1,2}:\d{2}/g
+
 const DESKTOP_PASTE_ARTIFACT = '~[[e'
 
 /** Strip leaked bracketed-paste wrapper markers from user-visible text. */
-export function stripLeakedBracketedPasteWrappers(text: string): string {
-  if (!text) {
-    return text
-  }
-
+function stripLeakedMarkers(text: string): string {
   let cleaned = text
     // eslint-disable-next-line no-control-regex -- terminal data may contain control chars
     .replace(/\x1b\[200~/g, '')
@@ -32,6 +32,24 @@ export function stripLeakedBracketedPasteWrappers(text: string): string {
   cleaned = cleaned.replace(BRACKETED_PASTE_DEGRADED_END, '')
 
   return cleaned
+}
+
+/** Strip leaked bracketed-paste wrapper markers from user-visible text. */
+export function stripLeakedBracketedPasteWrappers(text: string): string {
+  if (!text) {
+    return text
+  }
+
+  let out = ''
+  let cursor = 0
+
+  for (const match of text.matchAll(CLOCK_TIME_RANGE)) {
+    const start = match.index ?? 0
+    out += stripLeakedMarkers(text.slice(cursor, start)) + match[0]
+    cursor = start + match[0].length
+  }
+
+  return out + stripLeakedMarkers(text.slice(cursor))
 }
 
 /** Drop a trailing run of the desktop ~[[e corruption signature (#62557). */

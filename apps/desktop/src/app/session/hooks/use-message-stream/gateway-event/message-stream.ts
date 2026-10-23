@@ -381,8 +381,15 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
     flushQueuedDeltas(sessionId)
 
-    // Keyed by session so only one window beeps when several are open.
-    playCompletionSound(sessionId)
+    // Only the chat on screen beeps: the cue means "the chat you are watching
+    // finished", so a completion belonging to another session (a CLI one-shot
+    // the agent ran, a messaging turn) must not play it while this chat is
+    // still working. Keyed by session so only one window beeps when several
+    // are open.
+    if (isActiveEvent) {
+      playCompletionSound(sessionId)
+    }
+
     lightOwnMessagingTurn(sessionId, event.admission_id, event.profile)
 
     const finalText = coerceGatewayText(payload?.text) || coerceGatewayText(payload?.rendered)

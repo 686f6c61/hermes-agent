@@ -441,10 +441,11 @@ export function previewCompletionSound(variantId?: number) {
   playVariant(resolveCompletionSoundVariantId(variantId ?? $completionSoundVariantId.get()))
 }
 
-// Plays the selected completion cue on any `message.complete`. Pass a dedupeKey
-// (the session id) so only one window beeps when several are open — the mute and
-// "None" checks run first, so a silent window never claims the cue out from under
-// an audible peer.
+// Plays the selected completion cue for the chat on screen — the caller gates
+// it on the completed session being the active one, so a turn finishing
+// elsewhere never beeps here. Pass a dedupeKey (the session id) so only one
+// window beeps when several are open — the mute and "None" checks run first, so
+// a silent window never claims the cue out from under an audible peer.
 export function playCompletionSound(dedupeKey?: string) {
   if ($hapticsMuted.get()) {
     return

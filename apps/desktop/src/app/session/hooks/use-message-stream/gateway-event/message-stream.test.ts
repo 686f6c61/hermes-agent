@@ -4,7 +4,10 @@ const { refreshSupportedSessionControlAfterTurn } = vi.hoisted(() => ({
   refreshSupportedSessionControlAfterTurn: vi.fn(async () => undefined)
 }))
 
+const { playCompletionSound } = vi.hoisted(() => ({ playCompletionSound: vi.fn() }))
+
 vi.mock('@/store/session-control', () => ({ refreshSupportedSessionControlAfterTurn }))
+vi.mock('@/lib/completion-sound', () => ({ playCompletionSound, previewCompletionSound: vi.fn() }))
 
 import type { GatewayEventName } from '@hermes/shared'
 
@@ -211,5 +214,38 @@ describe('unread dot for a messaging turn Desktop sent', () => {
     publishSessionState('rt-tg', { ...createClientSessionState('tg-1'), busy: true })
     publishSessionState('rt-tg', { ...createClientSessionState('tg-1'), busy: false })
     expect($unreadFinishedSessionIds.get()).not.toContain('tg-1')
+  })
+})
+
+describe('turn-end cue follows the chat on screen', () => {
+  beforeEach(() => {
+    playCompletionSound.mockClear()
+    $sessionStates.set({})
+    $sessions.set([])
+    $messagingSessions.set([])
+    $selectedStoredSessionId.set(null)
+    $unreadFinishedSessionIds.set([])
+    $activeGatewayProfile.set('default')
+  })
+
+  it('stays silent when a completion belongs to another session', () => {
+    const ctx = context('message.complete')
+    ctx.sessionId = 'other-chat'
+    ctx.explicitSid = 'other-chat'
+    ctx.isActiveEvent = false
+
+    handleMessageStreamEvent(ctx)
+
+    expect(playCompletionSound).not.toHaveBeenCalled()
+  })
+
+  it('plays once for the completion of the session on screen', () => {
+    const ctx = context('message.complete')
+    ctx.isActiveEvent = true
+
+    handleMessageStreamEvent(ctx)
+
+    expect(playCompletionSound).toHaveBeenCalledTimes(1)
+    expect(playCompletionSound).toHaveBeenCalledWith('s1')
   })
 })

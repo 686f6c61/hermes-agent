@@ -1620,10 +1620,15 @@ def _applescript_unsaved_close_description(command: str, _depth: int = 0) -> str
     if _depth < 3:
         # Shell carriers the flat pattern projections do not fold in (`eval`, `env -S`) hand their
         # payload to a second layer of shell; follow it, bounded so a self-referential command
-        # cannot recurse.
+        # cannot recurse. The nested REASON is what comes back: collapsing every carrier answer to
+        # the unsaved-close description made `sh -c "… | tr z t | osascript"` publish the generic
+        # key while its payload was the unreadable-pipeline one, so approving that carrier for the
+        # session pre-approved a later direct close — a different blast radius under the same key
+        # (reported on #141346).
         for payload in _carrier_payloads(command):
-            if _applescript_unsaved_close_description(payload, _depth + 1) is not None:
-                return _APPLESCRIPT_UNSAVED_CLOSE_DESCRIPTION
+            nested = _applescript_unsaved_close_description(payload, _depth + 1)
+            if nested is not None:
+                return nested
     return None
 
 
@@ -1808,7 +1813,7 @@ def _osascript_script_sources(command: str):
         payloads, language, carries_source = _osascript_argv_sources(
             tokens, index, _dollar_quoted_words(segment)
         )
-        marker = _HEREDOC_MARKER_RE.search(segment)
+        marker = _unquoted_heredoc_marker(segment)
         if marker:
             marker_at = command.find(marker.group(0), start)
             if marker_at >= 0:
@@ -1842,6 +1847,23 @@ def _enclosing_command_start(command: str, word_start: int) -> int:
     return start
 
 
+def _unquoted_heredoc_marker(stage: str):
+    """The first heredoc marker in *stage* the shell parses as one, not as quoted data.
+
+    `printf 'set marker to "<<EOF"\\ntell … to quit without saving'` holds the characters `<<EOF`
+    inside a single-quoted argument: the shell hands them to printf and starts no here-document.
+    Matching the raw text found that marker, `_heredoc_body` found no body after it and returned
+    the empty string, and the producer's real payload was never read — the close was judged inert
+    (reported on #141346). `_mask_quoted_prose` blanks quoted content in place, so the masked
+    stage at the same offset says whether the marker the regex found is shell syntax.
+    """
+    masked = _mask_quoted_prose(stage)
+    for match in _HEREDOC_MARKER_RE.finditer(stage):
+        if masked[match.start():match.start() + 2] == "<<":
+            return match
+    return None
+
+
 def _piped_script_source(command: str, executable_start: int) -> object:
     """Script text of the pipeline stage that feeds *osascript* on stdin.
 
@@ -1860,7 +1882,7 @@ def _piped_script_source(command: str, executable_start: int) -> object:
     rewrites = False  # a stage between the payload and the binary reshapes the bytes
     for raw_stage in reversed(stages):
         producer = raw_stage.strip()
-        marker = _HEREDOC_MARKER_RE.search(producer)
+        marker = _unquoted_heredoc_marker(producer)
         if marker:
             marker_at = command.rfind(marker.group(0), 0, executable_start)
             if marker_at >= 0:
@@ -1871,7 +1893,11 @@ def _piped_script_source(command: str, executable_start: int) -> object:
                     bool(marker.group("dash")),
                 )
                 if body is not None:
-                    return body
+                    # A rewriting stage between this body and the binary reshapes those bytes
+                    # (`tr z t` turns `quiz` into `quit`), so the body is not the program the
+                    # binary reads: fail closed instead of judging the literal the rewrite hides
+                    # (reported on #141346).
+                    return UNREADABLE_PIPED_SCRIPT if rewrites else body
         tokens = _shell_segment_tokens(producer, 0)
         if not tokens:
             continue
@@ -1897,7 +1923,10 @@ def _piped_script_source(command: str, executable_start: int) -> object:
             # fail closed rather than judge the literal behind it (#141346).
             printed = _printed_literals(producer) if name in _LITERAL_PRINT_STAGES else None
             if printed is not None:
-                return printed
+                # Same fail-closed rule as a heredoc body: a stage already walked in this reverse
+                # order reshapes what this one emits, so the literal is not what the binary reads
+                # (`awk 'BEGIN{print "…quiz…"}' | tr z t | osascript`, reported on #141346).
+                return UNREADABLE_PIPED_SCRIPT if rewrites else printed
             # Nothing to read here; whether the text behind it is the program depends on what the
             # stage before this one wrote, which the walk below is about to find out.
             rewrites = True

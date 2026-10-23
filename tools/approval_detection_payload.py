@@ -52,6 +52,14 @@ _ECHO_FLAG_RE = re.compile(r"^-[neE]+$")
 # still writes the `\n` as a byte (measured on #141346). Reading `-E` as a switch there turned the
 # decoding off and the close the shell really put on its own line went unseen.
 _ECHO_FLAG_SHELLS = frozenset({"bash", "zsh", "ksh", "ksh93", "mksh", "pdksh"})
+# awk decodes the escapes of a string literal when it LEXES it, so `printf "…\nclose"` writes the
+# close on its own line. `\NNN` is octal in awk (`\101` is `A`); a spelling awk does not define is
+# left with its backslash, which is what the interpreter does with it.
+_AWK_ESCAPE_RE = re.compile(r"\\(?:(?P<octal>[0-7]{1,3})|(?P<code>[nrtbfva\\\"/]))")
+_AWK_ESCAPE_CODES = {
+    "n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v",
+    "a": "\a", "\\": "\\", '"': '"', "/": "/",
+}
 
 
 def _decode_shell_escapes(text: str) -> str:
@@ -210,6 +218,21 @@ def printf_script_text(tokens) -> object:
     return "".join(out)
 
 
+def _decode_awk_escapes(text: str) -> str:
+    """Spell out the escapes awk decodes in a string literal before it prints it.
+
+    awk lexes `"…"` and decodes the escapes then, so `print "a\\nb"` writes two lines. The set is
+    awk's own: the sh-family `\\n \\t \\r \\\\ \\"` plus `\\/ \\a \\b \\f \\v` and the octal `\\NNN`.
+    A spelling awk does not define keeps its backslash, which is what awk does with it too.
+    """
+    def replace(match) -> str:
+        if match.group("octal"):
+            return chr(int(match.group("octal"), 8))
+        return _AWK_ESCAPE_CODES[match.group("code")]
+
+    return _AWK_ESCAPE_RE.sub(replace, text)
+
+
 def _printed_literals(raw_stage: str) -> str | None:
     """Text a filter-`print` stage emits from its own literals, or None when it only transforms.
 
@@ -217,13 +240,18 @@ def _printed_literals(raw_stage: str) -> str | None:
     payload behind the pipe is its argv. `grep -v 'quit without saving'` only filters, and reading
     its pattern as the script flagged a harmless pipeline (reported on #141346) — hence the two
     conditions: a print verb AND a quoted literal. Anything else stays a pass-through stage.
+
+    The literal is the SOURCE spelling, and awk decodes its escapes at lex time: `"…\\nclose"` is
+    two lines on stdout, so joining the literals without decoding left `\\nclose` on one line, with
+    no word boundary before the verb, and the close `awk printf` really emits was judged inert
+    (reported on #141346).
     """
     if not re.search(r"\bprint(?:f)?\b", raw_stage):
         return None
     literals = re.findall(r'"((?:\\.|[^"\\])*)"', raw_stage)
     if not literals:
         return None
-    return " ".join(literal.replace('\\"', '"') for literal in literals)
+    return " ".join(_decode_awk_escapes(literal) for literal in literals)
 
 
 def _strip_output_redirections(tokens: list[str]) -> list[str]:

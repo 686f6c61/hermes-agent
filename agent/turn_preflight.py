@@ -28,6 +28,75 @@ from agent.turn_context_compaction import (
 logger = logging.getLogger("agent.conversation_loop")
 
 
+def preflight_skip_reason(
+    agent: Any, compressor: Any, *, messages: Any, compression_attempts: int,
+    max_compression_attempts: int, request_pressure_tokens: int, blocked: bool,
+    defer_preflight: Any,
+) -> Optional[str]:
+    """Why an over-threshold request is *not* compacted on this pass (``None`` below
+    threshold, or when every gate would let compression run).
+
+    The pre-API gate is one five-term condition, so a skip and a gate that was never
+    reached look identical in the log: a 4.7 h session can carry 164 over-threshold
+    requests with no attempt, no cooldown line and no reason (#143521). Walking the
+    same terms in the same order names the one that held, without changing the decision.
+    ``None`` when the reason is already surfaced as a deduped overflow warning
+    (summary-LLM cooldown, uncompressed-session guard).
+    """
+    threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    if threshold <= 0 or request_pressure_tokens < threshold:
+        return None
+    if not getattr(agent, "compression_enabled", False):
+        return "compression_disabled"
+    try:
+        if len(messages) <= 1:
+            return "single_message"
+    except TypeError:
+        pass
+    if compression_attempts >= max_compression_attempts:
+        return f"attempts_exhausted:{compression_attempts}/{max_compression_attempts}"
+    if _review_fork_first_request_pending(agent):
+        return "review_fork_first_request_pending"
+    if blocked:
+        return "turn_blocked"
+    try:
+        if defer_preflight(request_pressure_tokens):
+            return "deferred_to_real_usage"
+        if not compressor.should_compress(request_pressure_tokens):
+            return "engine_declined"
+    except Exception:  # a gate double that raises must not turn logging into a failure
+        return None
+    return None
+
+
+def _log_preflight_skip(
+    agent: Any, reason: str, *, request_pressure_tokens: int, compressor: Any,
+    compression_attempts: int, max_compression_attempts: int,
+) -> None:
+    """One INFO line per distinct skip reason; the next real compression pass clears it.
+
+    Deduped by reason rather than level: a defer that lasts three hours is one line,
+    and a reason that changes mid-session is a new line (``#143521``).
+    """
+    if getattr(agent, "_preflight_skip_logged", None) == reason:
+        return
+    try:
+        agent._preflight_skip_logged = reason
+    except Exception:  # a slotted/foreign double: logging must never fail the turn
+        pass
+    _context_length = getattr(compressor, "context_length", 0)
+    logger.info(
+        "Pre-API compression skipped: %s (~%s request tokens >= %s threshold "
+        "(context=%s, attempt=%s/%s))",
+        reason,
+        f"{request_pressure_tokens:,}",
+        f"{int(getattr(compressor, 'threshold_tokens', 0) or 0):,}",
+        f"{int(_context_length):,}" if _context_length else "unknown",
+        compression_attempts,
+        max_compression_attempts,
+    )
+
+
 @dataclass
 class PreflightGateVerdict:
     """``action``: ``"fallthrough"`` (make the API call), ``"continue"`` (window grown or
@@ -127,6 +196,11 @@ def run_preflight_compression(
             v.compression_attempts,
             max_compression_attempts,
         )
+        # A pass ran: the next skip is new information, not a repeat of the last reason.
+        try:
+            agent._preflight_skip_logged = None
+        except Exception:
+            pass
         _pre_api_status = automatic_compaction_status_message(
             compressor,
             phase="pre_api",
@@ -217,6 +291,24 @@ def run_preflight_compression(
             _warn_fn = getattr(agent, "_warn_uncompressed_context_overflow", None)
             if callable(_warn_fn):
                 _warn_fn(request_pressure_tokens, _ctx_len)
+
+    if not provider_overflow_preflight:
+        # An over-threshold request that no gate let through must say why: a silent
+        # skip is indistinguishable from a gate that never ran (#143521).
+        _skip_reason = preflight_skip_reason(
+            agent, compressor, messages=v.messages,
+            compression_attempts=v.compression_attempts,
+            max_compression_attempts=max_compression_attempts,
+            request_pressure_tokens=request_pressure_tokens,
+            blocked=bool(v._preflight_compression_blocked),
+            defer_preflight=defer_preflight,
+        )
+        if _skip_reason:
+            _log_preflight_skip(
+                agent, _skip_reason, request_pressure_tokens=request_pressure_tokens,
+                compressor=compressor, compression_attempts=v.compression_attempts,
+                max_compression_attempts=max_compression_attempts,
+            )
 
     if provider_overflow_preflight:
         # Any other gate blocking the forced preflight (e.g. uncompressible one-

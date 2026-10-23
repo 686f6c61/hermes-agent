@@ -626,7 +626,10 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
 
     # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
     explicit_passthrough = {ts for ts in toolset_names if ts not in explicit_known_keys and ts not in platform_default_keys}
-    enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
+    enabled_toolsets |= _merge_mcp_servers(
+        config, toolset_names, explicit_passthrough, include_default_mcp_servers,
+        platform_list_empty=explicitly_configured and not toolset_names,
+    )
 
     # Legacy profile opt-in is a fallback only. A saved platform list (even
     # empty) is authoritative, so a later disable cannot silently re-enable it.
@@ -690,10 +693,16 @@ def _recover_platform_native_toolsets(enabled_toolsets: set[str], platform: str,
 
 
 def _merge_mcp_servers(
-    config: dict, toolset_names: list[str], explicit_passthrough: set[str], include_default_mcp_servers: bool
+    config: dict, toolset_names: list[str], explicit_passthrough: set[str], include_default_mcp_servers: bool,
+    *, platform_list_empty: bool = False,
 ) -> set[str]:
     """Explicit passthrough entries plus this platform's MCP servers: listed names form an allowlist, else every
-    globally enabled server (when ``include_default_mcp_servers``); the ``no_mcp`` sentinel disables all."""
+    globally enabled server (when ``include_default_mcp_servers``); the ``no_mcp`` sentinel disables all.
+
+    An explicitly saved EMPTY platform list is the zero-tool state #82010 established, never "no restriction", so
+    it does not take the default-server branch either: ``platform_toolsets.<platform>: []`` must not grant every
+    enabled MCP server (now or when one is added to the config later). Only an absent key means "no restriction".
+    """
     enabled_mcp_servers = enabled_mcp_server_names(config)
     configured = config.get("mcp_servers") if isinstance(config.get("mcp_servers"), dict) else {}
     known = enabled_mcp_servers | {str(name) for name in configured}
@@ -707,7 +716,7 @@ def _merge_mcp_servers(
     explicit_mcp_servers = explicit_passthrough & enabled_mcp_servers
     # A listed server that is configured but disabled is still the user's server selection: it stays
     # off, and it must not fall through to every enabled server.
-    if include_default_mcp_servers and not explicit_passthrough & known:
+    if include_default_mcp_servers and not platform_list_empty and not explicit_passthrough & known:
         return result | enabled_mcp_servers
     return result | explicit_mcp_servers
 

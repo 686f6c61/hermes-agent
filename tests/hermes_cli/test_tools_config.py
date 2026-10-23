@@ -1051,3 +1051,26 @@ class TestLightpandaPostSetup:
         # Not in the forced-setup gate: a missing binary must not nag every
         # user who toggles the browser toolset.
         assert "lightpanda" not in _POST_SETUP_INSTALLED
+
+
+def test_explicit_empty_platform_list_does_not_grant_mcp_servers():
+    """#143574 / #82010: an explicitly saved empty platform list is the zero-tool state, so it must not take
+    the default-MCP branch either. ``platform_toolsets.<platform>: []`` used to resolve to *every* enabled MCP
+    server, which made the fail-closed spelling grant more than an absent key ever grants on that platform."""
+    servers = {"claudius": {"url": "http://x"}, "evil": {"url": "http://y"}}
+    config = {"mcp_servers": servers, "platform_toolsets": {"cli": []}}
+
+    resolved = _get_platform_tools(config, "cli", include_default_mcp_servers=True)
+    assert not resolved & set(servers), resolved
+
+    # An ABSENT key is the only spelling that means "no restriction": the defaults still merge.
+    absent = _get_platform_tools({"mcp_servers": servers}, "cli", include_default_mcp_servers=True)
+    assert set(servers) <= absent
+
+    # A saved list that names ONE server still narrows to it.
+    one = _get_platform_tools(
+        {**config, "platform_toolsets": {"cli": ["claudius"]}},
+        "cli",
+        include_default_mcp_servers=True,
+    )
+    assert one & set(servers) == {"claudius"}

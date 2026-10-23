@@ -12,7 +12,8 @@ def _component_check_auth(
 ) -> bool:
     """Shared user-or-role OR authorization for component button clicks.
     Allow on: DISCORD/GATEWAY_ALLOW_ALL_USERS, user in DISCORD/GATEWAY_ALLOWED_USERS, a role in the
-    role allowlist, or pairing-store approval. Role allowlist with no ``roles`` (DM) rejects (fail closed).
+    role allowlist, or pairing-store approval. A role allowlist with no ``roles`` (DM) cannot match the
+    role set, so it falls through to the pairing grant; without a pairing approval it is still rejected.
     ``allowed_user_ids`` is the adapter's connect-time snapshot: a user (or ``*``) admitted only there is confirmed
     with ``live_auth`` (the gateway's per-call check), and an explicit False falls through to the role
     and pairing grants.
@@ -48,17 +49,17 @@ def _component_check_auth(
                 live_auth is None or live_auth(interaction) is not False):
             return True
     if has_roles:
-        roles_attr = getattr(user, "roles", None)
-        if roles_attr is None:
-            # Role policy configured but no role data (DM Member, raw User): fail closed.
-            return False
         try:
-            user_role_ids = {getattr(r, "id", None) for r in roles_attr}
+            user_role_ids = {getattr(r, "id", None) for r in (getattr(user, "roles", None) or ())}
         except TypeError:
-            return False
+            user_role_ids = set()
         if user_role_ids & role_set:
             return True
     # Pairing store (mirrors ``authz_mixin._check_authorization``): paired users click without allowlist.
+    # This is the only grant a DM click can reach when a role allowlist is configured: a DM
+    # interaction's ``user`` is a raw ``discord.User`` with no ``roles``, so it can never match
+    # the role set. Falling through keeps unknown DM users out (the final ``return False``) while
+    # the pairing approval that already admits their messages also admits their buttons.
     if uid:
         try:
             from gateway.pairing import PairingStore

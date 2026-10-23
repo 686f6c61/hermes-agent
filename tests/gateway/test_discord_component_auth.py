@@ -132,6 +132,43 @@ async def test_approval_buttons_follow_a_revoke_made_after_connect():
 # ── fail-closed on missing role data ───────────────────────────────────────
 
 
+def test_role_allowlist_dm_click_falls_through_to_pairing():
+    """A DM click carries a raw User with no ``roles``: the pairing grant must stay reachable.
+
+    With DISCORD_ALLOWED_ROLES configured, a pairing-approved user's plain DM messages are
+    accepted, so their button clicks have to be accepted too. The role set cannot match a DM
+    payload, so authorization has to fall through to the pairing store instead of returning early.
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = True
+    with patch("gateway.pairing.PairingStore", return_value=mock_store):
+        interaction = _interaction(11111, drop_roles=True)
+        assert _component_check_auth(interaction, set(), {42}) is True
+    mock_store.is_approved.assert_called_once_with("discord", "11111")
+
+
+def test_role_allowlist_dm_click_unpaired_user_still_rejected():
+    """Falling through is not a blanket allow: an unknown DM clicker is rejected."""
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = False
+    with patch("gateway.pairing.PairingStore", return_value=mock_store):
+        assert _component_check_auth(_interaction(99999, drop_roles=True), set(), {42}) is False
+
+
+def test_role_allowlist_guild_click_without_the_role_stays_rejected():
+    """Guild payloads still have to match the role set; only the DM shape falls through."""
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = False
+    with patch("gateway.pairing.PairingStore", return_value=mock_store):
+        assert _component_check_auth(_interaction(99999, role_ids=[7]), set(), {42}) is False
+
+
 # ---------------------------------------------------------------------------
 # View construction: every view must accept allowed_role_ids and route
 # through the shared helper. Default value preserves prior call-sites.

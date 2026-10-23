@@ -429,6 +429,80 @@ class TestSendUpdateNotification:
 
 
     @pytest.mark.asyncio
+    async def test_a_marker_the_host_will_not_delete_does_not_abort_startup(self, tmp_path):
+        """A refused unlink is cleanup that did not happen, not a failed startup.
+
+        On Windows the updater still holds ``.update_output.txt`` as its own stdout
+        redirect for a moment after it restarts the gateway, so ``unlink`` raises
+        ``PermissionError`` (WinError 32). That raise used to land in the ``finally``
+        of this method — past its own ``except`` — and took the freshly restarted
+        gateway down with it, ~10 s after a successful update.
+        """
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending_path = hermes_home / ".update_pending.json"
+        output_path = hermes_home / ".update_output.txt"
+        exit_code_path = hermes_home / ".update_exit_code"
+        pending_path.write_text(json.dumps({
+            "platform": "telegram", "chat_id": "67890", "user_id": "12345",
+        }))
+        output_path.write_text("✓ Update complete!")
+        exit_code_path.write_text("0")
+
+        mock_adapter = AsyncMock()
+        runner.adapters = {Platform.TELEGRAM: mock_adapter}
+
+        real_unlink = Path.unlink
+
+        def refuse_output(path, *args, **kwargs):
+            if path == output_path:
+                raise PermissionError(
+                    32, "The process cannot access the file because it is being used by another process")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("gateway.run._hermes_home", hermes_home), \
+             patch.object(Path, "unlink", refuse_output):
+            result = await runner._send_update_notification()
+
+        assert result is True
+        mock_adapter.send.assert_called_once()
+        # Every marker the host allowed is gone, so the notice is not delivered twice...
+        assert not pending_path.exists()
+        assert not (hermes_home / ".update_pending.claimed.json").exists()
+        assert not exit_code_path.exists()
+        # ...and the file the host still holds is left behind rather than failing the call.
+        assert output_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_unlink_all_leaves_a_held_marker_without_raising(self, tmp_path):
+        """The completion watcher's cleanup tolerates the same hold, and finishes the rest."""
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        output_path = hermes_home / ".update_output.txt"
+        prompt_path = hermes_home / ".update_prompt.json"
+        output_path.write_text("done")
+        prompt_path.write_text("{}")
+
+        real_unlink = Path.unlink
+
+        def refuse_output(path, *args, **kwargs):
+            if path == output_path:
+                raise PermissionError(
+                    32, "The process cannot access the file because it is being used by another process")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("gateway.run._hermes_home", hermes_home), \
+             patch.object(Path, "unlink", refuse_output):
+            runner._update_paths().unlink_all()
+
+        assert not prompt_path.exists()
+        assert output_path.exists()
+
+    @pytest.mark.asyncio
     async def test_no_adapter_for_platform_preserves_markers(self, tmp_path):
         """A finished update whose platform is offline keeps its markers.
 

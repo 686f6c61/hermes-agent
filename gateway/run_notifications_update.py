@@ -35,6 +35,23 @@ def _update_failed_notice() -> str:
 _UPDATE_NOTIFY_MAX_ADAPTER_WAIT_SECONDS = 3600.0
 
 
+def _unlink_quietly(path: Path) -> None:
+    """Remove an update marker, tolerating a host that refuses the delete.
+
+    ``missing_ok`` covers the marker that is already gone. It does not cover Windows refusing the
+    delete while another process still holds the file open — the updater keeps ``.update_output.txt``
+    as its own stdout redirect until it exits, so ``unlink`` raises ``PermissionError`` (``WinError
+    32``) for seconds after a restart. Cleanup here is best-effort by contract (the next startup
+    retries it), and one of the callers is the ``finally`` of the post-update notification, which runs
+    *past* its own ``except``: an OSError escaping there does not fail the notification, it kills the
+    gateway that just came back up.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug("Leaving update marker %s in place: %s", path, e)
+
+
 def _update_output_tail(output: str, limit: int) -> str:
     """Last ``limit`` chars of an update log, prefixed with an ellipsis when cut."""
     return output if len(output) <= limit else "…" + output[-limit:]
@@ -59,7 +76,7 @@ class GatewayUpdateNotificationsMixin:
 
         def unlink_all(self) -> None:
             for p in (self.pending, self.claimed, self.output, self.exit_code, self.prompt, self.response):
-                p.unlink(missing_ok=True)
+                _unlink_quietly(p)
 
     @dataclasses.dataclass
     class _UpdateTarget:
@@ -370,5 +387,5 @@ class GatewayUpdateNotificationsMixin:
         finally:
             if cleanup:
                 for p in (active_pending_path, paths.claimed, paths.output, paths.exit_code):
-                    p.unlink(missing_ok=True)
+                    _unlink_quietly(p)
         return True

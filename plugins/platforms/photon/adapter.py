@@ -1647,6 +1647,7 @@ async def _standalone_send(
     base = f"http://{_DEFAULT_SIDECAR_BIND}:{port}"
     headers = {"X-Hermes-Sidecar-Token": token}
     last_message_id: Optional[str] = None
+    attachments_sent = 0
     try:
         async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
             async def _post(path: str, body: dict[str, Any]) -> tuple[Any, Optional[dict[str, Any]]]:
@@ -1684,10 +1685,17 @@ async def _standalone_send(
                 resp, data = await _post("/send-attachment", att_body)
                 if not data:
                     return _standalone_error(resp)
+                attachments_sent += 1
                 last_message_id = data.get("messageId") or last_message_id
                 await _record_sent_text_async(chat_id, data.get("messageId"), _attachment_label(
                     "voice" if is_voice else "attachment", os.path.basename(safe_path)))
-        return {"success": True, "message_id": last_message_id}
+        result: dict[str, Any] = {"success": True, "message_id": last_message_id}
+        # Only claim media delivery when every requested attachment reached the sidecar. A path
+        # rejected as unsafe is skipped above, and there send_message_tool's "attachments were
+        # omitted" warning is still the truth about what the recipient got.
+        if media_files and attachments_sent == len(media_files):
+            result["media_delivered"] = True
+        return result
     except Exception as e:
         return send_error(f"Photon standalone send failed: {e}")
 

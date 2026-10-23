@@ -121,6 +121,9 @@ async def test_standalone_send_text_then_attachments(
     )
 
     assert result.get("success") is True
+    # The attachment reached the sidecar, so the result must say so: send_message_tool only
+    # warns about omitted media when the sender returns success without this key.
+    assert result.get("media_delivered") is True
     # First call is the text /send, second is /send-attachment.
     assert posted[0][0].endswith("/send")
     assert posted[0][1]["text"] == "hello"
@@ -128,3 +131,57 @@ async def test_standalone_send_text_then_attachments(
     assert posted[1][1]["path"] == str(img)
     assert posted[1][1]["kind"] == "attachment"
     assert posted[1][1]["mimeType"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_standalone_send_does_not_claim_media_when_a_path_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An attachment rejected by path validation never reaches the sidecar, so the result must
+    keep lacking media_delivered: the caller's "attachments were omitted" warning is accurate."""
+    good = tmp_path / "a.png"
+    good.write_bytes(b"\x89PNG fake")
+    monkeypatch.setattr(
+        PhotonAdapter,
+        "validate_media_delivery_path",
+        staticmethod(lambda p: p if os.path.exists(p) else None),
+    )
+    monkeypatch.setenv("PHOTON_SIDECAR_TOKEN", "tok")
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"ok": True, "messageId": "m-9"}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url: str, json: dict[str, Any], headers=None):
+            posted.append((url, json))
+            return _Resp()
+
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _FakeClient)
+
+    cfg = PlatformConfig(enabled=True, token="", extra={})
+    result = await photon_adapter._standalone_send(
+        cfg,
+        "any;-;+1",
+        "hello",
+        media_files=[(str(good), False), (str(tmp_path / "missing.png"), False)],
+    )
+
+    assert result.get("success") is True
+    attachments = [(p, b) for p, b in posted if p.endswith("/send-attachment")]
+    assert [b["path"] for _, b in attachments] == [str(good)]
+    assert not result.get("media_delivered")

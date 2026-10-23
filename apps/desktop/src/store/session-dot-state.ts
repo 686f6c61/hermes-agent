@@ -26,6 +26,7 @@
 import { computed } from 'nanostores'
 
 import { stableArray, stableRecord } from '@/lib/stable-array'
+import type { SessionInfo } from '@/types/hermes'
 
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
@@ -39,6 +40,28 @@ import {
 import { $unreadWriteGuard, UNREAD_WRITE_GUARD_MS } from './session-unread-remote'
 import { $subagentsBySession, activeSubagentCount } from './subagents'
 
+// Alias resolution reads ONE lineage index, so that index has to hold every
+// slice with rows. The sidebar fetches recents and messaging separately, and a
+// compressed conversation's tip row — the one carrying `_lineage_ids` — lives in
+// the messaging slice: resolving against recents alone left the root's live
+// claim on `['root']`, so the messaging row painted idle while its root worked.
+// Rebuilt only when a slice is replaced, because `lineageAliases` memoizes per
+// array reference (session.ts::lineageIndex) and a fresh concat per status edge
+// would miss that cache on every delta.
+let lineageRows: readonly SessionInfo[] = []
+let lineageRowsFrom: readonly [SessionInfo[], SessionInfo[]] | null = null
+
+function lineageRowsWithMessaging(sessions: SessionInfo[], messaging: SessionInfo[]): readonly SessionInfo[] {
+  if (lineageRowsFrom && lineageRowsFrom[0] === sessions && lineageRowsFrom[1] === messaging) {
+    return lineageRows
+  }
+
+  lineageRowsFrom = [sessions, messaging]
+  lineageRows = messaging.length ? [...sessions, ...messaging] : sessions
+
+  return lineageRows
+}
+
 // Sessions parked in async delegation: the parent turn has ended (busy=false —
 // delegate_task(background=true) returns its handle the moment the children
 // are spawned) while those subagents keep working for minutes. Without this
@@ -49,16 +72,17 @@ import { $subagentsBySession, activeSubagentCount } from './subagents'
 // lineageAliases covers whichever tip of the conversation a surface holds.
 let delegatingIds: readonly string[] = []
 export const $delegatingSessionIds = computed(
-  [$subagentsBySession, $sessionStates, $sessions],
-  (bySession, states, sessions) => {
+  [$subagentsBySession, $sessionStates, $sessions, $messagingSessions],
+  (bySession, states, sessions, messaging) => {
     const ids = new Set<string>()
+    const lineage = lineageRowsWithMessaging(sessions, messaging)
 
     for (const [runtimeId, items] of Object.entries(bySession)) {
       if (activeSubagentCount(items) === 0) {
         continue
       }
 
-      for (const alias of lineageAliases(states[runtimeId]?.storedSessionId ?? runtimeId, sessions)) {
+      for (const alias of lineageAliases(states[runtimeId]?.storedSessionId ?? runtimeId, lineage)) {
         ids.add(alias)
       }
     }
@@ -109,14 +133,16 @@ export const $sessionDotStateById = computed(
     $unreadFinishedSessionIds,
     $draftSessionIds,
     $sessions,
+    $messagingSessions,
     $unreadWriteGuard
   ],
-  (attention, working, stalled, background, delegating, unread, draft, sessions, unreadWriteGuard) => {
+  (attention, working, stalled, background, delegating, unread, draft, sessions, messaging, unreadWriteGuard) => {
     const next: Record<string, SessionDotState> = {}
+    const lineage = lineageRowsWithMessaging(sessions, messaging)
 
     const claim = (ids: readonly string[], state: SessionDotState) => {
       for (const id of ids) {
-        for (const alias of lineageAliases(id, sessions)) {
+        for (const alias of lineageAliases(id, lineage)) {
           next[alias] = state
         }
       }
@@ -170,7 +196,7 @@ export const $sessionDotStateById = computed(
     // session already claimed as working. The hint outlives its turn by a tick
     // on some paths; without this it could invent a running session.
     for (const id of stalled) {
-      for (const alias of lineageAliases(id, sessions)) {
+      for (const alias of lineageAliases(id, lineage)) {
         if (next[alias] === 'working') {
           next[alias] = 'stalled'
         }

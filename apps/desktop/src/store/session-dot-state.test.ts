@@ -240,3 +240,64 @@ describe('$unreadSessionCount (titlebar badge)', () => {
     expect($sessionDotStateById.get()['cron-1']).not.toBe('unread')
   })
 })
+
+describe('a compressed messaging row and its lineage root', () => {
+  const compressed = (tip: string, root: string): SessionInfo =>
+    storedRow(tip, { _lineage_ids: [root, tip], _lineage_root_id: root, source: 'telegram' })
+
+  const subagent = (status: SubagentProgress['status']): SubagentProgress => ({
+    id: 'sub-1',
+    parentId: null,
+    goal: 'do a thing',
+    status,
+    taskCount: 1,
+    taskIndex: 0,
+    startedAt: 0,
+    updatedAt: 0,
+    filesRead: [],
+    filesWritten: [],
+    stream: []
+  })
+
+  const reset = () => {
+    clearAllSessionStates()
+    $sessions.set([])
+    $messagingSessions.set([])
+    $subagentsBySession.set({})
+    $unreadFinishedSessionIds.set([])
+    $unreadWriteGuard.set(new Map())
+  }
+
+  beforeEach(reset)
+  afterEach(reset)
+
+  // The messaging slice is a separate list: the tip row that carries the
+  // lineage map lives there, so resolving aliases against the recents slice
+  // alone left the root's claim on ['root'] and the tip row painted idle.
+  it('paints the messaging tip with the live state of its root', () => {
+    setMessagingSessions([compressed('tip', 'root')])
+    publishSessionState('rt-root', { ...createClientSessionState('root'), busy: true })
+
+    expect($sessionDotStateById.get()['root']).toBe('working')
+    expect($sessionDotStateById.get()['tip']).toBe('working')
+  })
+
+  it('keeps a messaging tip under background while its root delegates', () => {
+    setMessagingSessions([compressed('tip', 'root')])
+    publishSessionState('rt-root', { ...createClientSessionState('root'), busy: false })
+    $subagentsBySession.set({ 'rt-root': [subagent('running')] })
+
+    expect($delegatingSessionIds.get()).toContain('root')
+    expect($delegatingSessionIds.get()).toContain('tip')
+  })
+
+  // Alias resolution reads every slice that holds rows; the persisted-unread
+  // loop stays on the recents slice so a messaging watermark cannot invent an
+  // unread dot that the titlebar badge would then count.
+  it('does not turn a messaging backend watermark into a dot claim', () => {
+    setMessagingSessions([storedRow('msg-1', { source: 'telegram', unread: true })])
+
+    expect($sessionDotStateById.get()['msg-1']).toBeUndefined()
+    expect($unreadSessionCount.get()).toBe(0)
+  })
+})

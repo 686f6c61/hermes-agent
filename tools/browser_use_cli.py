@@ -20,8 +20,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
-from hermes_constants import get_hermes_home, hermes_home_key
-from tools.browser_harness_dirs import daemon_env, daemon_identity, namespace_harness_dirs
+from hermes_constants import account_default_hermes_home, get_hermes_home, hermes_home_key
+from tools.browser_harness_dirs import (
+    daemon_env,
+    daemon_identity,
+    namespace_harness_dirs,
+    socket_fit_runtime_dir,
+)
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -179,7 +184,10 @@ def _base_subprocess_env() -> dict:
         env.pop("PYTHONPATH", None)
     env["PATH"] = _floor_subprocess_path(env.get("PATH", ""))
     env.setdefault("ANONYMIZED_TELEMETRY", "false")
-    namespace_harness_dirs(env, _served_profile_tag())  # a served profile's own harness runtime/tmp dirs
+    tag = _served_profile_tag()
+    if not tag:  # outside a multiplexed turn: a non-default home still gets its own harness root
+        _home_scoped_harness_env(env)
+    namespace_harness_dirs(env, tag)  # a served profile's own harness runtime/tmp dirs
     return env
 
 
@@ -363,6 +371,35 @@ def _served_profile_tag() -> str:
     to another that happens to use the same session name or task id (#110032)."""
     from hermes_constants import get_hermes_home_override, hermes_home_key
     return "" if get_hermes_home_override() is None else hermes_home_key()
+
+
+def _home_scoped_harness_env(env: dict) -> None:
+    """Point the harness at a non-default Hermes home's own root, in place.
+
+    browser-harness resolves ``~/.config/browser-harness`` from the account HOME, so two roots
+    launched with different ``HERMES_HOME`` values share one ``bu-default`` daemon: the second
+    gateway hands its first call to another agent's live browser, and a home confined to its own
+    folders by a filesystem sandbox cannot start a daemon at all. The served-profile scope above
+    keys only the multiplexed case, so it leaves these roots sharing.
+
+    A plain install keeps the legacy location untouched: only a home that differs from the
+    platform default moves, and an explicit ``BH_HOME``/``BROWSER_HARNESS_HOME`` always wins. The
+    runtime dir goes through the shared socket-length fallback because the socket the harness
+    binds lives under it and a deep home path can exceed the AF_UNIX budget.
+    """
+    if env.get("BH_HOME") or env.get("BROWSER_HARNESS_HOME"):
+        return
+    home = get_hermes_home()
+    try:
+        if Path(home).resolve() == Path(account_default_hermes_home()).resolve():
+            return
+    except (OSError, RuntimeError):
+        return
+    root = Path(home) / "cache" / "browser-harness"
+    runtime = str(root / "runtime")
+    env["BH_HOME"] = str(root)
+    env["BH_RUNTIME_DIR"] = socket_fit_runtime_dir(runtime, runtime, hermes_home_key(home))
+    env["BH_RUNTIME_DIR_SHARED"] = "1"
 
 
 def _backend_cache_key(task_id: Optional[str], session_name: str = "", sidecar: bool = False) -> str:

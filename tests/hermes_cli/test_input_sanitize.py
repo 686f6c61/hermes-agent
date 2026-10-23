@@ -26,6 +26,21 @@ class TestStripLeakedBracketedPasteWrappers:
         text = "Schedule lunch 12:00~12:15."
         assert strip_leaked_bracketed_paste_wrappers(text) == text
 
+    def test_keeps_a_range_with_several_spaces(self):
+        """Any run of spaces may separate the two times (live check on #143444)."""
+        text = "12:01~  12:15"
+        assert strip_leaked_bracketed_paste_wrappers(text) == text
+
+    def test_keeps_a_marker_embedded_before_a_range(self):
+        """The `01~` in `id01~12:00~12:15` is mid-string in the original, so it is not a boundary marker."""
+        text = "id01~12:00~12:15"
+        assert strip_leaked_bracketed_paste_wrappers(text) == text
+
+    def test_keeps_a_marker_embedded_after_a_range(self):
+        """The `[200~` in `12:00~12:15[200~tag` follows the range, not the start of the string."""
+        text = "12:00~12:15[200~tag"
+        assert strip_leaked_bracketed_paste_wrappers(text) == text
+
     def test_still_strips_a_degraded_wrapper_beside_a_time_range(self):
         assert strip_leaked_bracketed_paste_wrappers("00~12:00~12:15 and 00~x01~") == "12:00~12:15 and x"
 

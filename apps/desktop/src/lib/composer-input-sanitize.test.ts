@@ -27,6 +27,21 @@ describe('stripLeakedBracketedPasteWrappers', () => {
     expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
   })
 
+  it('keeps a range whose two times are separated by several spaces (#143444)', () => {
+    const text = '12:01~  12:15'
+    expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
+  })
+
+  it('keeps a marker embedded before a time range (#143444)', () => {
+    const text = 'id01~12:00~12:15'
+    expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
+  })
+
+  it('keeps a marker embedded after a time range (#143444)', () => {
+    const text = '12:00~12:15[200~tag'
+    expect(stripLeakedBracketedPasteWrappers(text)).toBe(text)
+  })
+
   it('still strips a degraded wrapper beside a time range', () => {
     expect(stripLeakedBracketedPasteWrappers('00~12:00~12:15 and 00~x01~')).toBe('12:00~12:15 and x')
   })

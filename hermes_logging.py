@@ -187,6 +187,40 @@ def redact_detached_stdio() -> None:
             setattr(sys, name, _RedactingStdio(stream))
 
 
+class _AccessLogQueryRedactor(logging.Filter):
+    """Mask credential-bearing query parameters in aiohttp access-log lines.
+
+    ``gateway/platforms/shared_ingress.py`` forwards a served profile's webhook to the default
+    profile's listener, so the vendor's callback URL — query string included — is written by the
+    *default* listener's access logger. An adapter that passes ``access_log=None`` to keep its own
+    token out of the log (BlueBubbles carries the server password in ``?password=``) is bypassed on
+    that path, and the plain password lands in ``agent.log``. The record is scrubbed here so every
+    port-binding adapter is covered, the same way a detached process's stdio is.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from agent.redact import redact_sensitive_text
+            text = record.getMessage()
+        except (ImportError, TypeError, ValueError):
+            # No redactor (or a record whose %-args do not format): let it through untouched —
+            # an access-log line must never be the thing that breaks logging.
+            return True
+        redacted = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+        if redacted != text:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def redact_access_log_secrets() -> None:
+    """Scrub URL credentials from ``aiohttp.access`` records (idempotent)."""
+    access_logger = logging.getLogger("aiohttp.access")
+    if any(isinstance(existing, _AccessLogQueryRedactor) for existing in access_logger.filters):
+        return
+    access_logger.addFilter(_AccessLogQueryRedactor())
+
+
 def _is_windows_concurrent_log_lock_timeout(exc: BaseException | None) -> bool:
     """True for concurrent-log-handler's Windows lock timeout.
 
@@ -373,6 +407,9 @@ def setup_logging(
     # (#92281). Runs before the initialized check so every entry mode that
     # reaches this function gets it; a no-op once this stdout is line-buffered.
     _line_buffer_piped_stdout()
+    # Access-log records carry the request target, query string included: scrub it here, once per
+    # process, so a credential riding a webhook callback never reaches the log file unmasked.
+    redact_access_log_secrets()
 
     # A second Hermes home in a process that already logs for another one — a dashboard or
     # ``hermes serve`` backend building agents for several profiles, a multiplexed gateway —

@@ -80,6 +80,11 @@ def restart_externally_supervised_gateway(supervised_pid: int) -> None:
     SIGTERM a KeepAlive-armed process and stamp this CLI's PID, recreating the competing-owner
     wedge (#110637). A broken/unloaded supervisor surfaces as exit 1, not a success printed over
     a dead gateway (the contract ``launchd_restart`` enforces via ``_wait_for_launchd_service_pid``).
+
+    The two failure branches report different hosts, because they leave different hosts behind: a
+    gateway that outlived the drain is still running, while one that exited without a replacement
+    has left this host with no gateway at all — the refusal text used to claim "not stopping" over
+    a gateway it had already stopped, pointing at a supervisor instead of at the dead host (#143416).
     """
     from hermes_cli.gateway import _get_restart_exit_wait_budget, _graceful_restart_via_sigusr1, _print_lines
 
@@ -93,8 +98,16 @@ def restart_externally_supervised_gateway(supervised_pid: int) -> None:
             print(f"✓ Gateway relaunched by its supervisor (PID {replacement_pid})")
             return
         print("⚠ Supervisor did not relaunch the gateway after its graceful exit")
-    else:
-        print(f"⚠ Gateway did not exit within {wait_budget:.0f}s of SIGUSR1 (or the signal could not be sent)")
+        _print_lines(
+            "",
+            f"✗ Gateway (PID {supervised_pid}) exited and nothing brought it back:",
+            "  this host has no gateway running now.",
+            "  Start the supervisor, or bring a gateway up by hand:",
+            "    hermes gateway ensure    # detached runtime, no installed service needed",
+            "    hermes gateway run       # foreground, ends with this shell",
+        )
+        sys.exit(1)
+    print(f"⚠ Gateway did not exit within {wait_budget:.0f}s of SIGUSR1 (or the signal could not be sent)")
     _print_lines(
         "",
         "✗ Not stopping or foreground-running a supervisor-owned gateway.",

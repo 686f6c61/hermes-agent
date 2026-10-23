@@ -114,3 +114,45 @@ def test_update_inventory_records_the_launch_supervisor(monkeypatch, tmp_path, r
     plan = update_inventory.UpdatePlan()
     update_inventory._collect_gateway_runtimes(plan, [("default", tmp_path)], set())
     assert [runtime.supervisor for runtime in plan.runtimes] == [expected]
+
+
+def _handback(monkeypatch, *, drained, replacement):
+    """Run ``restart_externally_supervised_gateway`` for one hand-back outcome, return (exit, polls)."""
+    seen = {"replacement_waits": 0}
+    monkeypatch.setattr(gw, "_get_restart_exit_wait_budget", lambda: 7.0)
+    monkeypatch.setattr(gw, "_graceful_restart_via_sigusr1", lambda pid, budget: drained)
+
+    def _wait(pid, *a, **k):
+        seen["replacement_waits"] += 1
+        return replacement
+
+    monkeypatch.setattr(supervised, "_wait_for_supervised_gateway_replacement", _wait)
+    with pytest.raises(SystemExit) as exit_info:
+        supervised.restart_externally_supervised_gateway(4321)
+    return exit_info.value.code, seen["replacement_waits"]
+
+
+def test_a_drained_gateway_with_no_replacement_reports_the_dead_host(monkeypatch, capsys):
+    """The drain succeeded, so the gateway is gone: say that, and name the command that brings one back.
+
+    The single refusal branch printed "Not stopping or foreground-running a supervisor-owned
+    gateway" after the SIGUSR1 drain had already taken it down, so the operator read the opposite
+    of the host's state and never got the recovery command (#143416).
+    """
+    code, waits = _handback(monkeypatch, drained=True, replacement=None)
+
+    assert (code, waits) == (1, 1)
+    out = capsys.readouterr().out
+    assert "this host has no gateway running now" in out
+    assert "hermes gateway ensure" in out and "hermes gateway run" in out
+    assert "Not stopping" not in out
+
+
+def test_a_gateway_that_outlived_the_drain_keeps_the_not_stopping_refusal(monkeypatch, capsys):
+    """The mirror case: it is still running, so claiming the host is down would be the same lie."""
+    code, waits = _handback(monkeypatch, drained=False, replacement=None)
+
+    assert (code, waits) == (1, 0)
+    out = capsys.readouterr().out
+    assert "Not stopping or foreground-running a supervisor-owned gateway." in out
+    assert "no gateway running now" not in out

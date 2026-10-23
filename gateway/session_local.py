@@ -39,6 +39,12 @@ class LocalSessionAdapter(BasePlatformAdapter):
     def _identity(source):
         return source.platform, source.chat_id, source.user_id, source.profile, source.chat_type
 
+    def same_conversation(self, left, right):
+        """Whether *left* and *right* name the same conversation. Per-message metadata
+        (``message_id``, the reply/react/pin anchor) is never part of it: the live source keeps
+        the id of the message that triggered the turn, a receipt's ``local_source`` has none."""
+        return self._identity(left) == self._identity(right)
+
     def register_source(self, source):
         self.sources[source.chat_id] = source, self._identity(source)
 

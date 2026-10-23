@@ -178,3 +178,40 @@ async def test_delete_retires_owner_receipts_and_never_resurrects_the_id(tmp_pat
         bind_api_session(authority, 'api-owner')
     assert authority.db.get_session(local.session_id) is None
     assert authority.db.get_session('api-owner') is None
+
+
+@pytest.mark.asyncio
+async def test_local_recovery_compares_conversation_identity_not_the_message_id(tmp_path, monkeypatch):
+    """The live source keeps the triggering message's id; a receipt's ``local_source`` never has
+    one (``gateway/session.py``: ``message_id`` is the triggering message for reply/react/pin).
+    Comparing the whole dict therefore pauses the session on every turn after the first."""
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_contract import Principal
+    from gateway.session_local import create_local_session
+    from gateway.session_local_recovery import restore_local_session
+    from gateway import run
+    from hermes_state_runtime import RuntimeStoreError
+
+    config = {'platform_toolsets': {'cli': []}}
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: config)
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    runner = SimpleNamespace(session_store=store, _session_db=store._db,
+                             adapters={}, _draining=False)
+    authority = await initialize_session_authority(runner, profile_id='fixture', instance_id='first')
+    actor = Principal('owner', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
+    params = {'request_id': 'retry', 'source': 'gui', 'cwd': str(tmp_path), 'model': 'frozen', 'toolsets': []}
+    ref = create_local_session(authority, actor, params)
+    live = authority.sessions[ref.session_id]
+
+    # The first turn admitted this session from the client's own source, which carries the id of
+    # the message that triggered it. The second turn restores against the receipt's bare source.
+    live.source.message_id = '20eedc39854645e99186b4186bcb18eb'
+    assert restore_local_session(authority, ref.session_id) == ref
+
+    # A real identity change on the live source still refuses: the fix only drops the
+    # per-message field, it does not stop comparing who the conversation belongs to.
+    live.source.chat_id = 'local-someone-else'
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        restore_local_session(authority, ref.session_id)

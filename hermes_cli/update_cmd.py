@@ -291,6 +291,22 @@ def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):
         return result
 
 
+def _refresh_release_tags(git_cmd) -> None:
+    """Best-effort refresh of the release tags ``version_info`` names the build from (#143361).
+
+    Every update fetch is ``--no-tags`` and the already-on-the-release path fetches nothing at
+    all, so a checkout can hold the release commit while ``refs/tags/v*`` never arrives: the
+    checkout is correct and the version it reports is the previous release plus its distance.
+    A failed refresh is ignored — the update moved the tree already, and identity is recoverable
+    on the next run, so a tag fetch must never turn a good update into an error.
+    """
+    try:
+        _git_run(git_cmd, ["fetch", "--quiet", "--no-tags", "origin", "refs/tags/v*:refs/tags/v*"],
+                 network=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _heal_stale_shallow_checkout(repo_root: Path, branch: str) -> None:
     """Unshallow a shallow checkout before the bounded fetch (#123254). Non-fatal: on failure the
     update proceeds with the fetch it always ran."""
@@ -1922,6 +1938,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _record_stop("git_timeout" if fetch_result.returncode == 124 else "disk_full"
                          if "No space left on device" in (fetch_result.stderr or "") else "fetch_failed")
             sys.exit(1)
+
+        if release_sha:
+            # The fetch above is tagless (or skipped when HEAD already is the release), so the tag
+            # naming this build is still missing locally and `hermes --version` would report the
+            # previous release plus its distance for a checkout that is on the release (#143361).
+            _refresh_release_tags(git_cmd)
 
         current_branch = _current_branch_name(git_cmd, check=True)
         _commit.record_run_start(git_cmd, _m().PROJECT_ROOT)
